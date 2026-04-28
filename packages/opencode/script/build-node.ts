@@ -59,4 +59,31 @@ await Bun.build({
   },
 })
 
+// Copy WASM assets to dist/node/chunks/ (tree-sitter parsers)
+const chunksDir = path.join(dir, "dist/node/chunks")
+if (!fs.existsSync(chunksDir)) {
+  fs.mkdirSync(chunksDir, { recursive: true })
+}
+
+const wasmPackages = ["web-tree-sitter", "tree-sitter-bash", "tree-sitter-powershell"]
+const nodeModulesDirs = [
+  path.join(dir, "node_modules"),
+  path.resolve(dir, "../../node_modules"),
+]
+
+for (const pkg of wasmPackages) {
+  for (const nmDir of nodeModulesDirs) {
+    const pkgDir = path.join(nmDir, pkg)
+    if (!fs.existsSync(pkgDir)) continue
+    for (const file of fs.readdirSync(pkgDir, { recursive: true }) as string[]) {
+      if (!file.endsWith(".wasm")) continue
+      const src = path.join(pkgDir, file)
+      const dest = path.join(chunksDir, path.basename(file))
+      fs.copyFileSync(src, dest)
+      console.log(`Copied WASM: ${path.basename(file)}`)
+    }
+    break
+  }
+}
+
 console.log("Build complete")
