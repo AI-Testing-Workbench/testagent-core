@@ -1,0 +1,30 @@
+{
+  "name": "@opencode-ai/server",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "OpenCode AI Server - Node.js standalone distribution",
+  "bin": {
+    "opencode-server": "./cli.mjs"
+  },
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "scripts": {
+    "build": "bun run script/build.ts"
+  },
+  "dependencies": {
+    "jsonc-parser": "^3.3.1",
+    "@lydell/node-pty": "1.2.0-beta.10"
+  },
+  "optionalDependencies": {
+    "@lydell/node-pty-darwin-arm64": "1.2.0-beta.10",
+    "@lydell/node-pty-darwin-x64": "1.2.0-beta.10",
+    "@lydell/node-pty-linux-arm64": "1.2.0-beta.10",
+    "@lydell/node-pty-linux-x64": "1.2.0-beta.10",
+    "@lydell/node-pty-win32-arm64": "1.2.0-beta.10",
+    "@lydell/node-pty-win32-x64": "1.2.0-beta.10"
+  },
+  "files": [
+    "dist"
+  ]
+}
