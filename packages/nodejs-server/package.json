@@ -4,7 +4,7 @@
   "type": "module",
   "description": "OpenCode AI Server - Node.js standalone distribution",
   "bin": {
-    "opencode-server": "./cli.mjs"
+    "nodejs-server": "./cli.mjs"
   },
   "engines": {
     "node": ">=22.5.0"

@@ -5,7 +5,7 @@ import { rm, mkdir, cp, writeFile } from "node:fs/promises"
 
 const ROOT = join(import.meta.dir, "../../..")
 const OPENCODE_PKG = join(ROOT, "packages/opencode")
-const SERVER_PKG = join(ROOT, "packages/opencode-server")
+const SERVER_PKG = join(ROOT, "packages/nodejs-server")
 const DIST = join(SERVER_PKG, "dist")
 
 console.log("Building OpenCode Node.js Server...")

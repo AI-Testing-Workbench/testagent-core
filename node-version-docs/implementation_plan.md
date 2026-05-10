@@ -12,7 +12,7 @@ Windows 环境下 Bun 运行时存在崩溃问题，用户希望基于 Node.js �
 
 ```mermaid
 graph TB
-    subgraph NodeServer["packages/opencode-server (新增包)"]
+    subgraph NodeServer["packages/nodejs-server (新增包)"]
         Entry["cli.mjs<br/>Node.js 启动入口"]
         NodeJS["node.js<br/>Bun.build(target:node) 产物"]
         WASM["*.wasm 资源文件"]
@@ -40,14 +40,14 @@ graph TB
 ### 核心思路
 
 1. **直接复用** 已有的 `build-node.ts` 产出 `dist/node/node.js`
-2. **新建 `packages/opencode-server`** 作为独立可分发的 Node.js server 包
+2. **新建 `packages/nodejs-server`** 作为独立可分发的 Node.js server 包
 3. **包含一个自包含启动脚本** `cli.mjs`，支持命令行参数配置端口、主机名、认证等
 4. **自动化构建脚本** 将产物、WASM 资源、外部依赖组装为可直接 `node` 运行的目录
 
 ### 包结构
 
 ```
-packages/opencode-server/
+packages/nodejs-server/
 ├── package.json           # npm 包描述, type: module
 ├── cli.mjs                # Node.js 启动入口（可直接运行）
 ├── script/
@@ -65,21 +65,21 @@ packages/opencode-server/
 
 ## Proposed Changes
 
-### 新增 `packages/opencode-server` 包
+### 新增 `packages/nodejs-server` 包
 
-#### [NEW] [package.json](file:///Users/lujs/opencode/packages/opencode-server/package.json)
+#### [NEW] [package.json](file:///Users/lujs/opencode/packages/nodejs-server/package.json)
 
 独立的 npm 包描述文件：
 
 - `name`: `@opencode-ai/server`
 - `type`: `module`
-- `bin.opencode-server`: `./cli.mjs`
+- `bin.nodejs-server`: `./cli.mjs`
 - `dependencies`: `jsonc-parser`、`@lydell/node-pty`
 - `optionalDependencies`: 各平台 `@lydell/node-pty-*` 预编译包（复用 desktop-electron 的列表）
 - `engines`: `{ "node": ">=22.5.0" }`
 - `scripts.build`: `bun run script/build.ts`
 
-#### [NEW] [cli.mjs](file:///Users/lujs/opencode/packages/opencode-server/cli.mjs)
+#### [NEW] [cli.mjs](file:///Users/lujs/opencode/packages/nodejs-server/cli.mjs)
 
 Node.js 启动入口，功能：
 
@@ -128,7 +128,7 @@ process.on("SIGTERM", shutdown)
 > [!IMPORTANT]
 > 需要 `node --experimental-sqlite` 标志来启用 `node:sqlite`。在 shebang 中包含此标志，或在文档中说明运行方式。
 
-#### [NEW] [script/build.ts](file:///Users/lujs/opencode/packages/opencode-server/script/build.ts)
+#### [NEW] [script/build.ts](file:///Users/lujs/opencode/packages/nodejs-server/script/build.ts)
 
 构建 + 组装脚本，执行以下步骤：
 
@@ -139,7 +139,7 @@ process.on("SIGTERM", shutdown)
 5. 复制 `cli.mjs` 到 `dist/`
 6. 生成分发用 `package.json`（含 dependencies 和 optionalDependencies）
 
-#### [NEW] [README.md](file:///Users/lujs/opencode/packages/opencode-server/README.md)
+#### [NEW] [README.md](file:///Users/lujs/opencode/packages/nodejs-server/README.md)
 
 使用文档，覆盖：
 - Node.js 版本要求（≥22.5.0）
@@ -157,7 +157,7 @@ process.on("SIGTERM", shutdown)
 
 **变更**：增加 WASM 文件自动复制逻辑。当前构建脚本不复制 `.wasm` 文件（这在 Electron 方案中由 Vite 插件处理），需要在构建完成后将 `web-tree-sitter`、`tree-sitter-bash`、`tree-sitter-powershell` 的 `.wasm` 文件复制到 `dist/node/chunks/`。
 
-这样 `opencode-server` 的构建脚本只需要简单地复制 `dist/node/` 目录即可。
+这样 `nodejs-server` 的构建脚本只需要简单地复制 `dist/node/` 目录即可。
 
 ---
 
@@ -165,7 +165,7 @@ process.on("SIGTERM", shutdown)
 
 #### [MODIFY] [package.json](file:///Users/lujs/opencode/package.json) (root)
 
-在 `workspaces` 中添加 `packages/opencode-server`（如果使用 workspaces 管理）。
+在 `workspaces` 中添加 `packages/nodejs-server`（如果使用 workspaces 管理）。
 
 ---
 
@@ -224,13 +224,13 @@ process.on("SIGTERM", shutdown)
 1. **构建验证**:
    ```bash
    cd packages/opencode && bun script/build-node.ts
-   cd packages/opencode-server && bun script/build.ts
+   cd packages/nodejs-server && bun script/build.ts
    ```
    确认 `dist/` 目录包含 `node.js`、`cli.mjs`、`*.wasm`、`package.json`
 
 2. **启动验证**:
    ```bash
-   cd packages/opencode-server/dist
+   cd packages/nodejs-server/dist
    node --experimental-sqlite cli.mjs --port 4096 --hostname 127.0.0.1
    ```
    确认服务启动并响应健康检查

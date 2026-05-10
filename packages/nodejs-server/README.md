@@ -71,7 +71,7 @@ const session = await client.sessions.create({
 ## Building from Source
 
 ```bash
-cd packages/opencode-server
+cd packages/nodejs-server
 bun run build
 ```
 

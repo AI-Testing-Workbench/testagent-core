@@ -325,6 +325,25 @@
         "typescript": "catalog:",
       },
     },
+    "packages/nodejs-server": {
+      "name": "@opencode-ai/server",
+      "version": "0.1.0",
+      "bin": {
+        "nodejs-server": "./cli.mjs",
+      },
+      "dependencies": {
+        "@lydell/node-pty": "1.2.0-beta.10",
+        "jsonc-parser": "^3.3.1",
+      },
+      "optionalDependencies": {
+        "@lydell/node-pty-darwin-arm64": "1.2.0-beta.10",
+        "@lydell/node-pty-darwin-x64": "1.2.0-beta.10",
+        "@lydell/node-pty-linux-arm64": "1.2.0-beta.10",
+        "@lydell/node-pty-linux-x64": "1.2.0-beta.10",
+        "@lydell/node-pty-win32-arm64": "1.2.0-beta.10",
+        "@lydell/node-pty-win32-x64": "1.2.0-beta.10",
+      },
+    },
     "packages/opencode": {
       "name": "opencode",
       "version": "1.14.41",
@@ -466,25 +485,6 @@
         "vscode-languageserver-types": "3.17.5",
         "why-is-node-running": "3.2.2",
         "zod-to-json-schema": "3.24.5",
-      },
-    },
-    "packages/opencode-server": {
-      "name": "@opencode-ai/server",
-      "version": "0.1.0",
-      "bin": {
-        "opencode-server": "./cli.mjs",
-      },
-      "dependencies": {
-        "@lydell/node-pty": "1.2.0-beta.10",
-        "jsonc-parser": "^3.3.1",
-      },
-      "optionalDependencies": {
-        "@lydell/node-pty-darwin-arm64": "1.2.0-beta.10",
-        "@lydell/node-pty-darwin-x64": "1.2.0-beta.10",
-        "@lydell/node-pty-linux-arm64": "1.2.0-beta.10",
-        "@lydell/node-pty-linux-x64": "1.2.0-beta.10",
-        "@lydell/node-pty-win32-arm64": "1.2.0-beta.10",
-        "@lydell/node-pty-win32-x64": "1.2.0-beta.10",
       },
     },
     "packages/plugin": {
@@ -1577,7 +1577,7 @@
 
     "@opencode-ai/sdk": ["@opencode-ai/sdk@workspace:packages/sdk/js"],
 
-    "@opencode-ai/server": ["@opencode-ai/server@workspace:packages/opencode-server"],
+    "@opencode-ai/server": ["@opencode-ai/server@workspace:packages/nodejs-server"],
 
     "@opencode-ai/slack": ["@opencode-ai/slack@workspace:packages/slack"],
 
