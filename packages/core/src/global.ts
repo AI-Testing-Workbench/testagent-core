@@ -7,11 +7,17 @@ import { Flock } from "./util/flock"
 import { Flag } from "./flag/flag"
 
 const app = "opencode"
-const data = path.join(xdgData!, app)
-const cache = path.join(xdgCache!, app)
-const config = path.join(xdgConfig!, app)
-const state = path.join(xdgState!, app)
-const tmp = path.join(os.tmpdir(), app)
+// testagent_change start - testagent uses its own config/data/state dirs, but shares opencode cache to avoid reinstalling plugins
+const appTA = "testagent"
+
+const data = path.join(xdgData!, appTA)
+const cache = path.join(xdgCache!, app)   // share opencode cache
+const config = path.join(xdgConfig!, appTA)
+const state = path.join(xdgState!, appTA)
+// opencode legacy paths - not auto-created, but read if user creates them manually
+export const opencodeConfig = path.join(xdgConfig!, app)
+// testagent_change end
+const tmp = path.join(os.tmpdir(), appTA) // testagent_change
 
 const paths = {
   get home() {

@@ -6,7 +6,7 @@ import { InstanceState } from "@/effect/instance-state"
 import { Flag } from "@opencode-ai/core/flag/flag"
 import { AppFileSystem } from "@opencode-ai/core/filesystem"
 import { withTransientReadRetry } from "@/util/effect-http-client"
-import { Global } from "@opencode-ai/core/global"
+import { Global, opencodeConfig } from "@opencode-ai/core/global" // testagent_change
 import type { MessageV2 } from "./message-v2"
 import type { MessageID } from "./schema"
 
@@ -59,8 +59,14 @@ export const layer: Layer.Layer<
     const global = yield* Global.Service
     const http = HttpClient.filterStatusOk(withTransientReadRetry(yield* HttpClient.HttpClient))
     const globalFiles = [
+      // testagent_change start - opencode legacy global dir (user-created, lower priority)
+      path.join(opencodeConfig, "AGENTS.md"),
+      // testagent_change end
       path.join(global.config, "AGENTS.md"),
       ...(!Flag.OPENCODE_DISABLE_CLAUDE_CODE_PROMPT ? [path.join(global.home, ".claude", "CLAUDE.md")] : []),
+      // testagent_change start - also check ~/.testagent/AGENTS.md
+      path.join(global.home, ".testagent", "AGENTS.md"),
+      // testagent_change end
     ]
 
     const state = yield* InstanceState.make(
@@ -124,6 +130,10 @@ export const layer: Layer.Layer<
             break
           }
         }
+        // testagent_change start - also scan .testagent/ dirs for AGENTS.md
+        const testagentMatches = yield* fs.findUp(path.join(".testagent", "AGENTS.md"), ctx.directory, ctx.worktree)
+        testagentMatches.forEach((item) => paths.add(path.resolve(item)))
+        // testagent_change end
       }
 
       if (config.instructions) {

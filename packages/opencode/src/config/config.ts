@@ -4,7 +4,7 @@ import { pathToFileURL } from "url"
 import os from "os"
 import z from "zod"
 import { mergeDeep } from "remeda"
-import { Global } from "@opencode-ai/core/global"
+import { Global, opencodeConfig } from "@opencode-ai/core/global" // testagent_change
 import fsNode from "fs/promises"
 import { NamedError } from "@opencode-ai/core/util/error"
 import { Flag } from "@opencode-ai/core/flag/flag"
@@ -55,8 +55,21 @@ function mergeConfigConcatArrays(target: Info, source: Info): Info {
   if (target.instructions && source.instructions) {
     merged.instructions = Array.from(new Set([...target.instructions, ...source.instructions]))
   }
-  return merged
+  // testagent_change start - strip null sentinel values (null = delete key)
+  return stripNulls(merged) as Info
+  // testagent_change end
 }
+
+// testagent_change start - null sentinel: setting a key to null removes it from the merged result
+function stripNulls(obj: Record<string, unknown>): Record<string, unknown> {
+  const result: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(obj)) {
+    if (value === null) continue
+    result[key] = isRecord(value) ? stripNulls(value) : value
+  }
+  return result
+}
+// testagent_change end
 
 function normalizeLoadedConfig(data: unknown, source: string) {
   if (!isRecord(data)) return data
@@ -419,9 +432,18 @@ export const layer = Layer.effect(
 
     const loadGlobal = Effect.fnUntraced(function* () {
       let result: Info = {}
+      // testagent_change start - load opencode legacy global config first (lower priority, user-created)
+      result = mergeConfig(result, yield* loadFile(path.join(opencodeConfig, "config.json")))
+      result = mergeConfig(result, yield* loadFile(path.join(opencodeConfig, "opencode.json")))
+      result = mergeConfig(result, yield* loadFile(path.join(opencodeConfig, "opencode.jsonc")))
+      // testagent_change end
       result = mergeConfig(result, yield* loadFile(path.join(Global.Path.config, "config.json")))
       result = mergeConfig(result, yield* loadFile(path.join(Global.Path.config, "opencode.json")))
       result = mergeConfig(result, yield* loadFile(path.join(Global.Path.config, "opencode.jsonc")))
+      // testagent_change start
+      result = mergeConfig(result, yield* loadFile(path.join(Global.Path.config, "testagent.json")))
+      result = mergeConfig(result, yield* loadFile(path.join(Global.Path.config, "testagent.jsonc")))
+      // testagent_change end
 
       const legacy = path.join(Global.Path.config, "config")
       if (existsSync(legacy)) {
@@ -569,6 +591,11 @@ export const layer = Layer.effect(
           for (const file of yield* ConfigPaths.files("opencode", ctx.directory, ctx.worktree).pipe(Effect.orDie)) {
             yield* merge(file, yield* loadFile(file), "local")
           }
+          // testagent_change start
+          for (const file of yield* ConfigPaths.files("testagent", ctx.directory, ctx.worktree).pipe(Effect.orDie)) {
+            yield* merge(file, yield* loadFile(file), "local")
+          }
+          // testagent_change end
         }
 
         result.agent = result.agent || {}
@@ -576,6 +603,10 @@ export const layer = Layer.effect(
         result.plugin = result.plugin || []
 
         const directories = yield* ConfigPaths.directories(ctx.directory, ctx.worktree)
+        // testagent_change start - append .testagent dirs after .opencode dirs so they load last (higher priority)
+        const testagentDirs = yield* ConfigPaths.testagentDirectories(ctx.directory, ctx.worktree)
+        const allDirs = [...directories, ...testagentDirs]
+        // testagent_change end
 
         if (Flag.OPENCODE_CONFIG_DIR) {
           log.debug("loading config from OPENCODE_CONFIG_DIR", { path: Flag.OPENCODE_CONFIG_DIR })
@@ -583,7 +614,7 @@ export const layer = Layer.effect(
 
         const deps: Fiber.Fiber<void, never>[] = []
 
-        for (const dir of directories) {
+        for (const dir of allDirs) {
           if (dir.endsWith(".opencode") || dir === Flag.OPENCODE_CONFIG_DIR) {
             for (const file of ["opencode.json", "opencode.jsonc"]) {
               const source = path.join(dir, file)
@@ -594,6 +625,18 @@ export const layer = Layer.effect(
               result.plugin ??= []
             }
           }
+          // testagent_change start - load testagent.json from .testagent/ dirs (higher priority)
+          if (dir.endsWith(".testagent")) {
+            for (const file of ["testagent.json", "testagent.jsonc"]) {
+              const source = path.join(dir, file)
+              log.debug(`loading config from ${source}`)
+              yield* merge(source, yield* loadFile(source))
+              result.agent ??= {}
+              result.mode ??= {}
+              result.plugin ??= []
+            }
+          }
+          // testagent_change end
 
           yield* ensureGitignore(dir).pipe(Effect.orDie)
 
@@ -684,6 +727,12 @@ export const layer = Layer.effect(
             const source = path.join(managedDir, file)
             yield* merge(source, yield* loadFile(source), "global")
           }
+          // testagent_change start
+          for (const file of ["testagent.json", "testagent.jsonc"]) {
+            const source = path.join(managedDir, file)
+            yield* merge(source, yield* loadFile(source), "global")
+          }
+          // testagent_change end
         }
 
         // macOS managed preferences (.mobileconfig deployed via MDM) override everything

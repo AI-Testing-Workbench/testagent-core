@@ -40,6 +40,29 @@ export const directories = Effect.fn("ConfigPaths.directories")(function* (direc
   ])
 })
 
+// testagent_change start - also collect .testagent/ directories for testagent config
+export const testagentDirectories = Effect.fn("ConfigPaths.testagentDirectories")(function* (
+  directory: string,
+  worktree?: string,
+) {
+  const afs = yield* AppFileSystem.Service
+  return unique([
+    ...(!Flag.OPENCODE_DISABLE_PROJECT_CONFIG
+      ? yield* afs.up({
+          targets: [".testagent"],
+          start: directory,
+          stop: worktree,
+        })
+      : []),
+    ...(yield* afs.up({
+      targets: [".testagent"],
+      start: Global.Path.home,
+      stop: Global.Path.home,
+    })),
+  ])
+})
+// testagent_change end
+
 export function fileInDirectory(dir: string, name: string) {
   return [path.join(dir, `${name}.json`), path.join(dir, `${name}.jsonc`)]
 }
