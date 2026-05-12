@@ -289,7 +289,11 @@ const ask = Effect.fn("ShellTool.ask")(function* (ctx: Tool.Context, scan: Scan)
 
 function cmd(shell: string, command: string, cwd: string, env: NodeJS.ProcessEnv) {
   if (process.platform === "win32" && Shell.ps(shell)) {
-    return ChildProcess.make(shell, ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command], {
+    // testagent_change start: Ensure UTF-8 output on Windows PowerShell
+    // Prepend OutputEncoding setting to force UTF-8 output
+    const utf8Command = `[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; ${command}`
+    return ChildProcess.make(shell, ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", utf8Command], {
+      // testagent_change end
       cwd,
       env,
       stdin: "ignore",
