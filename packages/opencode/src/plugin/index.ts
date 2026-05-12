@@ -31,6 +31,19 @@ import type { WorkspaceAdapter } from "@/control-plane/types"
 
 const log = Log.create({ service: "plugin" })
 
+// testagent_change start - VS Code notification helpers
+function isVSCodeEnvironment(): boolean {
+  return true // 默认就是vscode环境
+  // return process.env.KILO_CLIENT === "vscode"
+}
+
+function notifyVSCode(type: "info" | "error", message: string) {
+  // Output JSON to stderr with special prefix for VS Code extension to parse
+  const notification = JSON.stringify({ type: "plugin-notification", level: type, message })
+  console.error(`[TESTAGENT_NOTIFICATION] ${notification}`)
+}
+// testagent_change end
+
 type State = {
   hooks: Hooks[]
 }
@@ -163,7 +176,18 @@ export const layer = Layer.effect(
         if (Flag.OPENCODE_PURE && cfg.plugin_origins?.length) {
           log.info("skipping external plugins in pure mode", { count: cfg.plugin_origins.length })
         }
-        if (plugins.length) yield* config.waitForDependencies()
+        if (plugins.length) {
+          // testagent_change start - notify plugin installation start
+          const message = `正在安装 ${plugins.length} 个插件...`
+          if (isVSCodeEnvironment()) {
+            notifyVSCode("info", message)
+          } else {
+            console.log(message)
+            yield* bus.publish(Session.Event.Info, { message })
+          }
+          // testagent_change end
+          yield* config.waitForDependencies()
+        }
 
         const loaded = yield* Effect.promise(() =>
           PluginLoader.loadExternal({
@@ -171,6 +195,15 @@ export const layer = Layer.effect(
             kind: "server",
             report: {
               start(candidate) {
+                // testagent_change start - notify plugin loading start
+                const message = `正在加载插件: ${candidate.plan.spec}`
+                if (isVSCodeEnvironment()) {
+                  notifyVSCode("info", message)
+                } else {
+                  console.log(message)
+                  Effect.runFork(bus.publish(Session.Event.Info, { message }))
+                }
+                // testagent_change end
                 log.info("loading plugin", { path: candidate.plan.spec })
               },
               missing(candidate, _retry, message) {

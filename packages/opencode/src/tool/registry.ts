@@ -12,6 +12,7 @@ import { WebFetchTool } from "./webfetch"
 import { WriteTool } from "./write"
 import { InvalidTool } from "./invalid"
 import { SkillTool } from "./skill"
+import { SandboxTool } from "../testagent/tool/sandbox" // testagent_change
 import * as Tool from "./tool"
 import { Config } from "@/config/config"
 import { type ToolContext as PluginToolContext, type ToolDefinition } from "@opencode-ai/plugin"
@@ -120,6 +121,7 @@ export const layer: Layer.Layer<
     const greptool = yield* GrepTool
     const patchtool = yield* ApplyPatchTool
     const skilltool = yield* SkillTool
+    const sandbox = yield* SandboxTool // testagent_change
     const agent = yield* Agent.Service
 
     const state = yield* InstanceState.make<State>(
@@ -175,7 +177,11 @@ export const layer: Layer.Layer<
         }
 
         const dirs = yield* config.directories()
-        const matches = dirs.flatMap((dir) =>
+        // testagent_change start - also scan .testagent/ directories for tools
+        const testagentDirs = yield* config.testagentDirectories()
+        const allToolDirs = [...dirs, ...testagentDirs]
+        // testagent_change end
+        const matches = allToolDirs.flatMap((dir) =>
           Glob.scanSync("{tool,tools}/*.{js,ts}", { cwd: dir, absolute: true, dot: true, symlink: true }),
         )
         if (matches.length) yield* config.waitForDependencies()
@@ -217,6 +223,7 @@ export const layer: Layer.Layer<
           question: Tool.init(question),
           lsp: Tool.init(lsptool),
           plan: Tool.init(plan),
+          sandbox: Tool.init(sandbox), // testagent_change
         })
 
         return {
@@ -236,6 +243,7 @@ export const layer: Layer.Layer<
             tool.search,
             tool.skill,
             tool.patch,
+            tool.sandbox, // testagent_change
             ...(Flag.OPENCODE_EXPERIMENTAL_LSP_TOOL ? [tool.lsp] : []),
             ...(Flag.OPENCODE_EXPERIMENTAL_PLAN_MODE && Flag.OPENCODE_CLIENT === "cli" ? [tool.plan] : []),
           ],

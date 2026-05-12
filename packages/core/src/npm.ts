@@ -81,6 +81,9 @@ export const layer = Layer.effect(
         const { Arborist } = yield* Effect.promise(() => import("@npmcli/arborist"))
         const add = input.add ?? []
         const npmOptions = yield* NpmConfig.load(input.dir)
+        // testagent_change start - use internal npm registry
+        const registry = process.env.NPM_REGISTRY || "http://central.jaf.cmbchina.cn:80/artifactory/api/npm/group-npm"
+        // testagent_change end
         const arborist = new Arborist({
           ...npmOptions,
           path: input.dir,
@@ -88,6 +91,7 @@ export const layer = Layer.effect(
           progress: false,
           savePrefix: "",
           ignoreScripts: true,
+          registry, // testagent_change
         })
         return yield* Effect.tryPromise({
           try: () =>

@@ -11,6 +11,7 @@ export function make(overrides: Partial<Config.Interface> = {}) {
     updateGlobal: (config) => Effect.succeed({ info: config, changed: false }),
     invalidate: () => Effect.void,
     directories: () => Effect.succeed([]),
+    testagentDirectories: () => Effect.succeed([]), // testagent_change
     waitForDependencies: () => Effect.void,
     ...overrides,
   })

@@ -327,6 +327,7 @@ export type Info = DeepMutable<Schema.Schema.Type<typeof Info>> & {
 type State = {
   config: Info
   directories: string[]
+  testagentDirs: string[] // testagent_change
   deps: Fiber.Fiber<void, never>[]
   consoleState: ConsoleState
 }
@@ -339,6 +340,7 @@ export interface Interface {
   readonly updateGlobal: (config: Info) => Effect.Effect<{ info: Info; changed: boolean }>
   readonly invalidate: () => Effect.Effect<void>
   readonly directories: () => Effect.Effect<string[]>
+  readonly testagentDirectories: () => Effect.Effect<string[]> // testagent_change
   readonly waitForDependencies: () => Effect.Effect<void>
 }
 
@@ -789,6 +791,7 @@ export const layer = Layer.effect(
         return {
           config: result,
           directories,
+          testagentDirs, // testagent_change
           deps,
           consoleState: {
             consoleManagedProviders: Array.from(consoleManagedProviders),
@@ -813,6 +816,12 @@ export const layer = Layer.effect(
     const directories = Effect.fn("Config.directories")(function* () {
       return yield* InstanceState.use(state, (s) => s.directories)
     })
+
+    // testagent_change start - add testagentDirectories method
+    const testagentDirectories = Effect.fn("Config.testagentDirectories")(function* () {
+      return yield* InstanceState.use(state, (s) => s.testagentDirs)
+    })
+    // testagent_change end
 
     const getConsoleState = Effect.fn("Config.getConsoleState")(function* () {
       return yield* InstanceState.use(state, (s) => s.consoleState)
@@ -870,6 +879,7 @@ export const layer = Layer.effect(
       updateGlobal,
       invalidate,
       directories,
+      testagentDirectories, // testagent_change
       waitForDependencies,
     })
   }),
