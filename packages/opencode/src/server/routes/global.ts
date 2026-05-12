@@ -17,6 +17,7 @@ import { Config } from "@/config/config"
 import { errors } from "../error"
 import { disposeAllInstancesAndEmitGlobalDisposed } from "../global-lifecycle"
 
+
 const log = Log.create({ service: "server" })
 
 async function streamEvents(c: Context, subscribe: (q: AsyncQueue<string | null>) => () => void) {
@@ -282,5 +283,5 @@ export const GlobalRoutes = lazy(() =>
         })
         return c.json({ success: true, version: target })
       },
-    ),
+    )
 )

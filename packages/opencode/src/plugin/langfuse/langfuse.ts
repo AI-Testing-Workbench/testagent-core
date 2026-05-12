@@ -851,8 +851,9 @@ async function get_project_apikeys(
 
 
 export const LangfusePlugin: Plugin = async (ctx) => {
-  console.log("[langfuse] Plugin started")
   const user = User.get()
+  console.log("[langfuse] Plugin started",user)
+
   let langfuse: any = null
   let project_id: string | null = null
   let userIdMetadata: string | null = null

@@ -1,13 +1,21 @@
 import { Global } from "@opencode-ai/core/global"
 import path from "path"
 import { Context, Duration, Effect, Layer, Option, Schedule, Schema } from "effect"
-import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/unstable/http"
-import { Installation } from "../installation"
+// testagent_change - removed HttpClient imports, using native fetch
+// import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/unstable/http"
+// import { Installation } from "../installation"
 import { Flag } from "@opencode-ai/core/flag/flag"
-import { Flock } from "@opencode-ai/core/util/flock"
-import { Hash } from "@opencode-ai/core/util/hash"
+// testagent_change - removed Flock and Hash, not needed for local-only cache
+// import { Flock } from "@opencode-ai/core/util/flock"
+// import { Hash } from "@opencode-ai/core/util/hash"
 import { AppFileSystem } from "@opencode-ai/core/filesystem"
-import { withTransientReadRetry } from "@/util/effect-http-client"
+// testagent_change - removed withTransientReadRetry, not needed
+// import { withTransientReadRetry } from "@/util/effect-http-client"
+import { User } from "../testagent/user" // testagent_change
+import * as Log from "@opencode-ai/core/util/log"
+
+const log = Log.create({ service: "models fetch" })
+
 
 const Cost = Schema.Struct({
   input: Schema.Finite,
@@ -96,103 +104,143 @@ export interface Interface {
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/ModelsDev") {}
 
-export const layer: Layer.Layer<Service, never, AppFileSystem.Service | HttpClient.HttpClient> = Layer.effect(
+// testagent_change - layer only needs AppFileSystem, no HttpClient needed
+export const layer: Layer.Layer<Service, never, AppFileSystem.Service> = Layer.effect(
   Service,
   Effect.gen(function* () {
     const fs = yield* AppFileSystem.Service
-    const http = HttpClient.filterStatusOk(withTransientReadRetry(yield* HttpClient.HttpClient))
+    // testagent_change - http client not needed, no remote fetch
+    // const http = HttpClient.filterStatusOk(withTransientReadRetry(yield* HttpClient.HttpClient))
 
-    const source = Flag.OPENCODE_MODELS_URL || "https://models.dev"
-    const filepath = path.join(
-      Global.Path.cache,
-      source === "https://models.dev" ? "models.json" : `models-${Hash.fast(source)}.json`,
-    )
-    const ttl = Duration.minutes(5)
-    const lockKey = `models-dev:${filepath}`
+    // testagent_change - simplified filepath, no hash needed
+    const filepath = path.join(Global.Path.cache, "models.json")
+    // testagent_change - no ttl/lockKey needed for local-only cache
+    // const ttl = Duration.minutes(5)
+    // const lockKey = `models-dev:${filepath}`
 
-    const fresh = Effect.fnUntraced(function* () {
-      const stat = yield* fs.stat(filepath).pipe(Effect.catch(() => Effect.succeed(undefined)))
-      if (!stat) return false
-      const mtime = Option.getOrElse(stat.mtime, () => new Date(0)).getTime()
-      return Date.now() - mtime < Duration.toMillis(ttl)
-    })
-
-    const fetchApi = Effect.fn("ModelsDev.fetchApi")(function* () {
-      return yield* HttpClientRequest.get(`${source}/api.json`).pipe(
-        HttpClientRequest.setHeader("User-Agent", Installation.USER_AGENT),
-        http.execute,
-        Effect.flatMap((res) => res.text),
-        Effect.timeout("10 seconds"),
-      )
-    })
+    // testagent_change - fresh/fetchApi/fetchAndWrite not needed for local-only cache
+    // const fresh = Effect.fnUntraced(function* () { ... })
+    // const fetchApi = Effect.fn("ModelsDev.fetchApi")(function* () { ... })
+    // const fetchAndWrite = Effect.fn("ModelsDev.fetchAndWrite")(function* () { ... })
 
     const loadFromDisk = fs.readJson(Flag.OPENCODE_MODELS_PATH ?? filepath).pipe(
       Effect.catch(() => Effect.succeed(undefined)),
       Effect.map((v) => v as Record<string, Provider> | undefined),
     )
 
-    // Bundled at build time; absent in dev — `tryPromise` covers both.
-    const loadSnapshot = Effect.tryPromise({
-      // @ts-ignore — generated at build time, may not exist in dev
-      try: () => import("./models-snapshot.js").then((m) => m.snapshot as Record<string, Provider> | undefined),
-      catch: () => undefined,
-    }).pipe(Effect.catch(() => Effect.succeed(undefined)))
+    // testagent_change - no snapshot loading needed
+    // const loadSnapshot = Effect.tryPromise({ ... })
 
-    const fetchAndWrite = Effect.fn("ModelsDev.fetchAndWrite")(function* () {
-      const text = yield* fetchApi()
-      yield* fs.writeWithDirs(filepath, text)
-      return text
-    })
-
+    // testagent_change start - only read from local cache, no remote fetch
     const populate = Effect.gen(function* () {
       const fromDisk = yield* loadFromDisk
       if (fromDisk) return fromDisk
-      const snapshot = yield* loadSnapshot
-      if (snapshot) return snapshot
-      if (Flag.OPENCODE_DISABLE_MODELS_FETCH) return {}
-      // Flock is cross-process: concurrent opencode CLIs can race on this cache file.
-      const text = yield* Effect.scoped(
-        Effect.gen(function* () {
-          yield* Flock.effect(lockKey)
-          return yield* fetchAndWrite()
-        }),
-      )
-      return JSON.parse(text) as Record<string, Provider>
+      // testagent_change - no bundled snapshot, users must configure models manually
+      return {}
     }).pipe(Effect.withSpan("ModelsDev.populate"), Effect.orDie)
+    // testagent_change end
 
     const [cachedGet, invalidate] = yield* Effect.cachedInvalidateWithTTL(populate, Duration.infinity)
 
-    const get = (): Effect.Effect<Record<string, Provider>> => cachedGet
-
-    const refresh = Effect.fn("ModelsDev.refresh")(function* (force = false) {
-      if (!force && (yield* fresh())) return
-      yield* Effect.scoped(
-        Effect.gen(function* () {
-          yield* Flock.effect(lockKey)
-          // Re-check under the lock: another process may have refreshed between
-          // our outer check and lock acquisition.
-          if (!force && (yield* fresh())) return
-          yield* fetchAndWrite()
-          yield* invalidate
+    // testagent_change start - fetch test-llm models helper
+    const fetchTestLLMModels = Effect.fn("ModelsDev.fetchTestLLMModels")(function* () {
+      const apiKey = process.env.TEST_LLM_API_KEY ?? "sk-WHMJMG6H36UGdq7FdVzODA"
+      const baseURL = (process.env.TEST_LLM_BASE_URL ?? "http://test-llm.platform.cmbchina.cn/v1").replace(/\/+$/, "")
+      const userId = User.get().id ?? ""
+      const url = `${baseURL}/models?user_id=${encodeURIComponent(userId)}`
+      
+      log.info("[testagent] fetchTestLLMModels:", { url, userId, baseURL })
+      // testagent_change - use native fetch instead of Effect HttpClient
+      const response = yield* Effect.tryPromise({
+        try: () => fetch(url, {
+          headers: { Authorization: `Bearer ${apiKey}` },
+          signal: AbortSignal.timeout(10_000),
         }),
-      ).pipe(
-        Effect.tapCause((cause) => Effect.logError("Failed to fetch models.dev", { cause })),
-        Effect.ignore,
-      )
+        catch: (error) => error,
+      })
+      
+      if (!response.ok) {
+        throw new Error(`test-llm /models returned HTTP ${response.status}`)
+      }
+      
+      const json = (yield* Effect.tryPromise({
+        try: () => response.json(),
+        catch: (error) => error,
+      })) as { data?: Array<{ id: string; owned_by?: string }> }
+      
+      const result: Record<string, Model> = {}
+      
+      for (const item of json.data ?? []) {
+        if (!item.id) continue
+        result[item.id] = {
+          id: item.id,
+          name: item.id,
+          family: item.owned_by ?? "test-llm",
+          release_date: "",
+          attachment: false,
+          reasoning: item.id.includes("reasoner"),
+          temperature: true,
+          tool_call: true,
+          cost: { input: 0, output: 0 },
+          limit: { context: 64000, output: 0 },
+          modalities: {
+            input: ["text"],
+            output: ["text"],
+          },
+        }
+      }
+      
+      return result
     })
+    // testagent_change end
 
-    if (!Flag.OPENCODE_DISABLE_MODELS_FETCH && !process.argv.includes("--get-yargs-completions")) {
-      // Schedule.spaced runs the effect once, then waits between completions.
-      yield* Effect.forkScoped(refresh().pipe(Effect.repeat(Schedule.spaced("60 minutes")), Effect.ignore))
-    }
+    const get = (): Effect.Effect<Record<string, Provider>> => 
+      // testagent_change start - inject test-llm provider dynamically every time
+      Effect.gen(function* () {
+        const providers = yield* cachedGet
+        
+        // Always check and inject test-llm if not present
+        if (!providers["test-llm"]) {
+          const models = yield* fetchTestLLMModels().pipe(
+            Effect.catch((error) => {
+              console.error("[testagent] test-llm model fetch failed:", error)
+              return Effect.succeed({} as Record<string, Model>)
+            }),
+          )
+          
+          const mutableProviders = { ...providers } as Record<string, Provider>
+          mutableProviders["test-llm"] = {
+            id: "test-llm",
+            name: "Test LLM",
+            env: ["TEST_LLM_API_KEY"],
+            api: "http://test-llm.platform.cmbchina.cn/v1",
+            npm: "@ai-sdk/openai-compatible",
+            models,
+          }
+          return mutableProviders
+        }
+        
+        return providers
+      })
+      // testagent_change end
+
+    // testagent_change start - refresh disabled, models come from local cache only
+    const refresh = Effect.fn("ModelsDev.refresh")(function* (_force = false) {
+      // Remote fetch disabled — models come from local cache only
+      return
+    })
+    // testagent_change end
+
+    // testagent_change - no automatic refresh
+    // if (!Flag.OPENCODE_DISABLE_MODELS_FETCH && !process.argv.includes("--get-yargs-completions")) {
+    //   yield* Effect.forkScoped(refresh().pipe(Effect.repeat(Schedule.spaced("60 minutes")), Effect.ignore))
+    // }
 
     return Service.of({ get, refresh })
   }),
 )
 
-export const defaultLayer: Layer.Layer<Service> = layer.pipe(
-  Layer.provide(FetchHttpClient.layer),
-  Layer.provide(AppFileSystem.defaultLayer),
-)
+// testagent_change - defaultLayer only needs AppFileSystem
+export const defaultLayer: Layer.Layer<Service> = layer.pipe(Layer.provide(AppFileSystem.defaultLayer))
 
 export * as ModelsDev from "./models"

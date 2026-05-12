@@ -830,6 +830,58 @@ function custom(dep: CustomDep): Record<string, CustomLoader> {
           },
         },
       }),
+    // testagent_change start - test-llm built-in provider
+    "test-llm": Effect.fnUntraced(function* () {
+      const auth = yield* dep.auth("test-llm")
+      const env = yield* dep.env()
+      const apiKey = env["TEST_LLM_API_KEY"] ?? (auth?.type === "api" ? auth.key : undefined) ?? "sk-WHMJMG6H36UGdq7FdVzODA"
+      const baseURL = env["TEST_LLM_BASE_URL"] ?? "http://test-llm.platform.cmbchina.cn/v1"
+      return {
+        autoload: true,
+        options: {
+          baseURL,
+          apiKey,
+          fetch: async (input: RequestInfo | URL, init?: RequestInit) => {
+            const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url
+            const method = init?.method ?? "GET"
+            const headers = init?.headers ? Object.fromEntries(new Headers(init.headers).entries()) : {}
+            const body = init?.body ? (typeof init.body === "string" ? init.body : "[Binary Data]") : undefined
+
+            console.log("[testagent] 🌐 HTTP Request to test-llm gateway:", {
+              url,
+              method,
+              headers,
+              bodyPreview: body ? body.substring(0, 500) : undefined,
+            })
+
+            const startTime = Date.now()
+            const response = await fetch(input, init)
+            const duration = Date.now() - startTime
+
+            // Clone response to read body without consuming it
+            const cloned = response.clone()
+            let responseBody: string | undefined
+            try {
+              const text = await cloned.text()
+              responseBody = text.substring(0, 1000) // First 1000 chars
+            } catch (e) {
+              responseBody = "[Could not read response body]"
+            }
+
+            console.log("[testagent] 📥 HTTP Response from test-llm gateway:", {
+              status: response.status,
+              statusText: response.statusText,
+              headers: Object.fromEntries(response.headers.entries()),
+              duration: `${duration}ms`,
+              bodyPreview: responseBody,
+            })
+
+            return response
+          },
+        },
+      }
+    }),
+    // testagent_change end
   }
 }
 
@@ -936,7 +988,10 @@ export const ConfigProvidersResult = Schema.Struct({
 export type ConfigProvidersResult = Types.DeepMutable<Schema.Schema.Type<typeof ConfigProvidersResult>>
 
 export function defaultModelIDs<T extends { models: Record<string, { id: string }> }>(providers: Record<string, T>) {
-  return mapValues(providers, (item) => sort(Object.values(item.models))[0].id)
+  return mapValues(providers, (item) => {
+    const sorted = sort(Object.values(item.models))
+    return sorted[0]?.id ?? ""
+  })
 }
 
 export interface Interface {

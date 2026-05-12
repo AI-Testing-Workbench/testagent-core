@@ -6,6 +6,7 @@ import type * as Provider from "./provider"
 import type * as ModelsDev from "./models"
 import { iife } from "@/util/iife"
 import { Flag } from "@opencode-ai/core/flag/flag"
+import { User } from "@/testagent/user" // testagent_change
 
 type Modality = NonNullable<ModelsDev.Model["modalities"]>["input"][number]
 
@@ -1212,6 +1213,14 @@ const SLUG_OVERRIDES: Record<string, string> = {
 }
 
 export function providerOptions(model: Provider.Model, options: { [x: string]: any }) {
+  const result: Record<string, any> = {}
+
+  // testagent_change start - inject user ID set dynamically by VS Code extension
+  const user = User.get()
+  if (user.id) result["user"] = user.id
+  result["tags"] = ["test-design"]
+  // testagent_change end
+
   if (model.api.npm === "@ai-sdk/gateway") {
     // Gateway providerOptions are split across two namespaces:
     // - `gateway`: gateway-native routing/caching controls (order, only, byok, etc.)
@@ -1225,7 +1234,6 @@ export function providerOptions(model: Provider.Model, options: { [x: string]: a
     const rest = Object.fromEntries(Object.entries(options).filter(([k]) => k !== "gateway"))
     const has = Object.keys(rest).length > 0
 
-    const result: Record<string, any> = {}
     if (gateway !== undefined) result.gateway = gateway
 
     if (has) {
