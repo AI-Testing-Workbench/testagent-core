@@ -1191,6 +1191,23 @@ export function fromError(
         },
         { cause: e },
       ).toObject()
+    // testagent_change start - add nodejs network reset error
+    case e instanceof TypeError && e.message === "terminated":
+      // Node.js undici throws TypeError: terminated on connection reset
+      // This is equivalent to Bun's ECONNRESET
+      return new APIError(
+        {
+          message: "Connection reset by server",
+          isRetryable: true,
+          metadata: {
+            type: "TypeError",
+            message: e.message,
+            runtime: "nodejs-undici",
+          },
+        },
+        { cause: e },
+      ).toObject()
+    //testagent_chang end
     case e instanceof Error && (e as FetchDecompressionError).code === "ZlibError":
       if (ctx.aborted) {
         return new AbortedError({ message: e.message }, { cause: e }).toObject()
