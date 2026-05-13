@@ -178,6 +178,13 @@ const discoverSkills = Effect.fnUntraced(function* (
     yield* scan(state, dir, OPENCODE_SKILL_PATTERN)
   }
 
+  // testagent_change start - also scan .testagent directories for skills
+  const testagentDirs = yield* config.testagentDirectories()
+  for (const dir of testagentDirs) {
+    yield* scan(state, dir, OPENCODE_SKILL_PATTERN)
+  }
+  // testagent_change end
+
   const cfg = yield* config.get()
   for (const item of cfg.skills?.paths ?? []) {
     const expanded = item.startsWith("~/") ? path.join(global.home, item.slice(2)) : item

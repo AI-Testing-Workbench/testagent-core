@@ -833,11 +833,12 @@ function* listByProject(
           : or(...conds)!,
       )
     }
-  } else if (input.scope !== "project" && !Flag.OPENCODE_EXPERIMENTAL_WORKSPACES) {
-    if (input.directory) {
-      conditions.push(eq(SessionTable.directory, input.directory))
-    }
-  }
+  } 
+  // else if (input.scope !== "project" && !Flag.OPENCODE_EXPERIMENTAL_WORKSPACES) {
+  //   if (input.directory) {
+  //     conditions.push(eq(SessionTable.directory, input.directory))
+  //   }
+  // }
   if (input.roots) {
     conditions.push(isNull(SessionTable.parent_id))
   }

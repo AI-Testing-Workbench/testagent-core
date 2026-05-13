@@ -288,17 +288,31 @@ const ask = Effect.fn("ShellTool.ask")(function* (ctx: Tool.Context, scan: Scan)
 })
 
 function cmd(shell: string, command: string, cwd: string, env: NodeJS.ProcessEnv) {
-  if (process.platform === "win32" && Shell.ps(shell)) {
-    // testagent_change start: Ensure UTF-8 output on Windows PowerShell
-    // Prepend OutputEncoding setting to force UTF-8 output
-    const utf8Command = `[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; ${command}`
-    return ChildProcess.make(shell, ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", utf8Command], {
-      // testagent_change end
-      cwd,
-      env,
-      stdin: "ignore",
-      detached: false,
-    })
+  if (process.platform === "win32") {
+    if (Shell.ps(shell)) {
+      // testagent_change start: Ensure UTF-8 output on Windows PowerShell
+      // Prepend OutputEncoding setting to force UTF-8 output
+      const utf8Command = `[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; $OutputEncoding = [System.Text.Encoding]::UTF8; ${command}`
+      return ChildProcess.make(shell, ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", utf8Command], {
+        // testagent_change end
+        cwd,
+        env,
+        stdin: "ignore",
+        detached: false,
+      })
+    }
+    // testagent_change start: Handle cmd.exe on Windows
+    // For cmd.exe, we need to use chcp 65001 to set UTF-8 code page
+    if (shell.toLowerCase().includes("cmd")) {
+      const utf8Command = `chcp 65001 >nul 2>&1 && ${command}`
+      return ChildProcess.make(shell, ["/d", "/s", "/c", utf8Command], {
+        cwd,
+        env,
+        stdin: "ignore",
+        detached: false,
+      })
+    }
+    // testagent_change end
   }
 
   return ChildProcess.make(command, [], {
@@ -418,10 +432,22 @@ export const ShellTool = Tool.define(
         { cwd, sessionID: ctx.sessionID, callID: ctx.callID },
         { env: {} },
       )
-      return {
+      // testagent_change start - ensure UTF-8 encoding on Windows
+      const baseEnv = {
         ...process.env,
         ...extra.env,
       }
+      if (process.platform === "win32") {
+        return {
+          ...baseEnv,
+          PYTHONIOENCODING: "utf-8",
+          PYTHONUTF8: "1",
+          // Force cmd.exe to use UTF-8
+          // Note: This doesn't affect PowerShell which uses its own encoding settings
+        }
+      }
+      // testagent_change end
+      return baseEnv
     })
 
     const run = Effect.fn("ShellTool.run")(function* (
