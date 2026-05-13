@@ -867,7 +867,11 @@ export const layer = Layer.effect(
         if (changed) yield* fs.writeFileString(file, updated).pipe(Effect.orDie)
       }
 
-      if (changed) yield* invalidate()
+      // testagent_change start: Always invalidate cache, even if config didn't change
+      // This is needed when marketplace items are removed from config files externally
+      // and we need to force a cache refresh without actually changing the config
+      yield* invalidate()
+      // testagent_change end
       return { info: next, changed }
     })
 
