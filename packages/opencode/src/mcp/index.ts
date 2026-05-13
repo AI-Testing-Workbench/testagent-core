@@ -900,11 +900,18 @@ export const layer = Layer.effect(
       log.info("reloading mcp servers from config")
 
       // 1. Invalidate config cache to force re-read from disk
+      // This clears both global and instance-level config caches
       yield* cfgSvc.invalidate()
 
-      // 2. Re-read config (now fresh from disk)
+      // 2. Re-read config directly (bypassing any InstanceState cache)
+      // Force a fresh read by calling get() after invalidate()
       const cfg = yield* cfgSvc.get()
       const config = cfg.mcp ?? {}
+
+      log.info("config reloaded from disk", { 
+        serverCount: Object.keys(config).length,
+        servers: Object.keys(config)
+      })
 
       // 3. Get current state
       const s = yield* InstanceState.get(state)
@@ -934,7 +941,7 @@ export const layer = Layer.effect(
       s.defs = {}
       pendingOAuthTransports.clear()
 
-      // 6. Reinitialize from config (reuse initialization logic)
+      // 6. Reinitialize from fresh config
       const bridge = yield* EffectBridge.make()
       yield* Effect.forEach(
         Object.entries(config),
