@@ -27,6 +27,9 @@ import { zod, ZodOverride } from "@/util/effect-zod"
 import { NonNegativeInt, withStatics } from "@/util/schema"
 import { namedSchemaError } from "@/util/named-schema-error"
 import * as EffectLogger from "@opencode-ai/core/effect/logger"
+// testagent_change start
+import { EditorContext } from "../testagent/editor-context"
+// testagent_change end
 
 /** Error shape thrown by Bun's fetch() when gzip/br decompression fails mid-stream */
 interface FetchDecompressionError extends Error {
@@ -397,6 +400,9 @@ export const User = Schema.Struct({
   }),
   system: Schema.optional(Schema.String),
   tools: Schema.optional(Schema.Record(Schema.String, Schema.Boolean)),
+  // testagent_change start
+  editorContext: Schema.optional(EditorContext),
+  // testagent_change end
 })
   .annotate({ identifier: "UserMessage" })
   .pipe(withStatics((s) => ({ zod: zod(s) })))
