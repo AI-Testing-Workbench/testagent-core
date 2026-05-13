@@ -76,6 +76,7 @@ bun run build
 ```
 
 This will:
+
 1. Build the Node.js bundle from `packages/opencode`
 2. Copy all necessary files to `dist/`
 3. Include WASM resources for tree-sitter
@@ -84,6 +85,7 @@ This will:
 ## Platform Support
 
 The package includes precompiled binaries for `@lydell/node-pty` on:
+
 - macOS (x64, arm64)
 - Linux (x64, arm64)
 - Windows (x64, arm64)

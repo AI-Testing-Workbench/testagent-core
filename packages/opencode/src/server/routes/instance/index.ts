@@ -11,6 +11,7 @@ import { InstanceRuntime } from "@/project/instance-runtime"
 import { Vcs } from "@/project/vcs"
 import { Agent } from "@/agent/agent"
 import { Skill } from "@/skill"
+import { MCP } from "@/mcp" // testagent_change - add MCP import for reload endpoint
 import { Global } from "@opencode-ai/core/global"
 import { LSP } from "@/lsp/lsp"
 import { Command } from "@/command"
@@ -476,6 +477,32 @@ export const InstanceRoutes = (upgrade: UpgradeWebSocket, opts?: CorsOptions): H
           jsonRequest("InstanceRoutes.skill.reload", c, function* () {
             const skill = yield* Skill.Service
             yield* skill.reload()
+            return { success: true }
+          }),
+      )
+      // testagent_change end
+      // testagent_change start - add reload MCP servers endpoint
+      .post(
+        "/mcp/reload",
+        describeRoute({
+          summary: "Reload MCP servers",
+          description: "Reload all MCP servers from config file without restarting CLI",
+          operationId: "mcp.reload",
+          responses: {
+            200: {
+              description: "MCP servers reloaded successfully",
+              content: {
+                "application/json": {
+                  schema: resolver(z.object({ success: z.boolean() })),
+                },
+              },
+            },
+          },
+        }),
+        async (c) =>
+          jsonRequest("InstanceRoutes.mcp.reload", c, function* () {
+            const mcp = yield* MCP.Service
+            yield* mcp.reload()
             return { success: true }
           }),
       )

@@ -45,6 +45,7 @@ const it = testEffect(
           all: () => Effect.succeed(skills),
           dirs: () => Effect.succeed([]),
           available: () => Effect.succeed(skills),
+          reload: () => Effect.void, // testagent_change - add reload mock
         }),
       ),
     ),
