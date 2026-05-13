@@ -1234,6 +1234,9 @@ const layer: Layer.Layer<
           }
 
           for (const [modelID, model] of Object.entries(provider.models ?? {})) {
+            // testagent_change start - skip null models (null = delete key)
+            if (model === null) continue
+            // testagent_change end
             const existingModel = parsed.models[model.id ?? modelID]
             const apiID = model.id ?? existingModel?.api.id ?? modelID
             const apiNpm =

@@ -35,13 +35,15 @@ export const Model = Schema.Struct({
       ),
     }),
   ),
+  // testagent_change start - make all limit fields optional
   limit: Schema.optional(
     Schema.Struct({
-      context: Schema.Finite,
+      context: Schema.optional(Schema.Finite),
       input: Schema.optional(Schema.Finite),
-      output: Schema.Finite,
+      output: Schema.optional(Schema.Finite),
     }),
   ),
+  // testagent_change end
   modalities: Schema.optional(
     Schema.Struct({
       input: Schema.mutable(Schema.Array(Schema.Literals(["text", "audio", "image", "video", "pdf"]))),
@@ -104,7 +106,9 @@ export const Info = Schema.Struct({
       [Schema.Record(Schema.String, Schema.Any)],
     ),
   ),
-  models: Schema.optional(Schema.Record(Schema.String, Model)),
+  // testagent_change start - allow null values for models (null = delete key)
+  models: Schema.optional(Schema.Record(Schema.String, Schema.NullOr(Model))),
+  // testagent_change end
 })
   .annotate({ identifier: "ProviderConfig" })
   .pipe(withStatics((s) => ({ zod: zod(s) })))
