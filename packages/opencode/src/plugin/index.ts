@@ -183,7 +183,6 @@ export const layer = Layer.effect(
             notifyVSCode("info", message)
           } else {
             console.log(message)
-            yield* bus.publish(Session.Event.Info, { message })
           }
           // testagent_change end
           yield* config.waitForDependencies()
@@ -201,7 +200,6 @@ export const layer = Layer.effect(
                   notifyVSCode("info", message)
                 } else {
                   console.log(message)
-                  Effect.runFork(bus.publish(Session.Event.Info, { message }))
                 }
                 // testagent_change end
                 log.info("loading plugin", { path: candidate.plan.spec })
