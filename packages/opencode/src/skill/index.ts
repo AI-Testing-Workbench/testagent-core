@@ -71,6 +71,7 @@ export interface Interface {
   readonly all: () => Effect.Effect<Info[]>
   readonly dirs: () => Effect.Effect<string[]>
   readonly available: (agent?: Agent.Info) => Effect.Effect<Info[]>
+  readonly reload: () => Effect.Effect<void> // testagent_change - add reload method
 }
 
 const add = Effect.fnUntraced(function* (state: State, match: string, bus: Bus.Interface) {
@@ -263,7 +264,15 @@ export const layer = Layer.effect(
       return list.filter((skill) => Permission.evaluate("skill", skill.name, agent.permission).action !== "deny")
     })
 
-    return Service.of({ get, all, dirs, available })
+    // testagent_change start - add reload method to invalidate cache
+    const reload = Effect.fn("Skill.reload")(function* () {
+      yield* InstanceState.invalidate(discovered)
+      yield* InstanceState.invalidate(state)
+      log.info("skills reloaded")
+    })
+    // testagent_change end
+
+    return Service.of({ get, all, dirs, available, reload })
   }),
 )
 
