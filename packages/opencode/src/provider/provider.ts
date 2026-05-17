@@ -1527,8 +1527,120 @@ const layer: Layer.Layer<
         const chunkTimeout = options["chunkTimeout"]
         delete options["chunkTimeout"]
 
+        // testagent_change start - Use external undici package to bypass built-in undici bodyTimeout
+        // Node.js built-in undici has a hardcoded 300s bodyTimeout that cannot be disabled.
+        // Solution: Use external undici package which allows configuring bodyTimeout: 0
+        const isNodeJS = typeof process !== "undefined" && process.versions?.node
+        const wrappedFetch = isNodeJS ? await (async () => {
+          try {
+            // Try to import external undici package
+            const undici = await import("undici")
+            
+            log.debug("Using external undici package to bypass bodyTimeout", {
+              providerID: model.providerID,
+            })
+            
+            // Create custom Agent with timeouts disabled
+            // Note: keepAliveTimeout and keepAliveMaxTimeout must be >= 2000ms (undici requirement)
+            const agent = new undici.Agent({
+              bodyTimeout: 0,              // Disable body timeout (this is the key!)
+              headersTimeout: 0,           // Disable headers timeout
+              keepAliveTimeout: 2000,      // Minimum allowed value (2s)
+              keepAliveMaxTimeout: 6000,   // Minimum allowed value (6s)
+            })
+            
+            // Set as global dispatcher for undici.fetch
+            undici.setGlobalDispatcher(agent)
+            
+            log.debug("Custom undici Agent configured", {
+              providerID: model.providerID,
+              bodyTimeout: 0,
+              headersTimeout: 0,
+              keepAliveTimeout: 2000,
+              keepAliveMaxTimeout: 6000,
+            })
+            
+            // Return undici.fetch (not globalThis.fetch)
+            return undici.fetch
+            
+          } catch (error: any) {
+            log.error("Failed to load external undici, falling back to Node.js http/https", {
+              providerID: model.providerID,
+              error: error.message,
+            })
+            
+            // Fallback: Use Node.js http/https modules
+            const http = await import("http")
+            const https = await import("https")
+            
+            return async (input: any, init?: any): Promise<Response> => {
+              const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url
+              const parsedUrl = new URL(url)
+              const isHttps = parsedUrl.protocol === "https:"
+              const client = isHttps ? https : http
+              
+              return new Promise((resolve, reject) => {
+                const reqOptions = {
+                  method: init?.method || "GET",
+                  headers: init?.headers || {},
+                  timeout: 0,
+                }
+                
+                const req = client.request(parsedUrl, reqOptions, (res) => {
+                  const headers = new Headers()
+                  for (const [key, value] of Object.entries(res.headers)) {
+                    if (value) headers.set(key, Array.isArray(value) ? value.join(", ") : value)
+                  }
+                  
+                  const nodeStream = res as any
+                  const webStream = new ReadableStream({
+                    start(controller) {
+                      nodeStream.on("data", (chunk: Buffer) => {
+                        controller.enqueue(new Uint8Array(chunk))
+                      })
+                      nodeStream.on("end", () => controller.close())
+                      nodeStream.on("error", (err: Error) => controller.error(err))
+                    },
+                    cancel() {
+                      nodeStream.destroy()
+                    }
+                  })
+                  
+                  resolve(new Response(webStream, {
+                    status: res.statusCode || 200,
+                    statusText: res.statusMessage || "",
+                    headers,
+                  }))
+                })
+                
+                req.on("error", reject)
+                
+                if (init?.signal) {
+                  init.signal.addEventListener("abort", () => {
+                    req.destroy()
+                    reject(new DOMException("Aborted", "AbortError"))
+                  })
+                }
+                
+                if (init?.body) {
+                  if (typeof init.body === "string") {
+                    req.write(init.body)
+                  } else if (Buffer.isBuffer(init.body)) {
+                    req.write(init.body)
+                  } else if (init.body instanceof Uint8Array) {
+                    req.write(Buffer.from(init.body))
+                  }
+                }
+                
+                req.end()
+              })
+            }
+          }
+        })() : (customFetch ?? fetch)
+        // testagent_change end
+
         options["fetch"] = async (input: any, init?: BunFetchRequestInit) => {
-          const fetchFn = customFetch ?? fetch
+          const fetchFn = wrappedFetch
           const opts = init ?? {}
           const chunkAbortCtl = typeof chunkTimeout === "number" && chunkTimeout > 0 ? new AbortController() : undefined
           const signals: AbortSignal[] = []
