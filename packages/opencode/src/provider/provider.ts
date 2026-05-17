@@ -1536,7 +1536,7 @@ const layer: Layer.Layer<
             // Try to import external undici package
             const undici = await import("undici")
             
-            log.debug("Using external undici package to bypass bodyTimeout", {
+            log.info("Using external undici package", {
               providerID: model.providerID,
             })
             
@@ -1552,7 +1552,7 @@ const layer: Layer.Layer<
             // Set as global dispatcher for undici.fetch
             undici.setGlobalDispatcher(agent)
             
-            log.debug("Custom undici Agent configured", {
+            log.info("Custom undici configured", {
               providerID: model.providerID,
               bodyTimeout: 0,
               headersTimeout: 0,
