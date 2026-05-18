@@ -18,6 +18,7 @@
         "@tsconfig/bun": "catalog:",
         "@types/mime-types": "3.0.1",
         "@typescript/native-preview": "catalog:",
+        "cross-env": "7.0.3",
         "glob": "13.0.5",
         "husky": "9.1.7",
         "oxlint": "1.60.0",
@@ -334,6 +335,7 @@
       },
       "dependencies": {
         "@lydell/node-pty": "1.2.0-beta.10",
+        "@parcel/watcher": "^2.5.0",
         "jsonc-parser": "^3.3.1",
       },
       "optionalDependencies": {
@@ -343,6 +345,12 @@
         "@lydell/node-pty-linux-x64": "1.2.0-beta.10",
         "@lydell/node-pty-win32-arm64": "1.2.0-beta.10",
         "@lydell/node-pty-win32-x64": "1.2.0-beta.10",
+        "@parcel/watcher-darwin-arm64": "^2.5.0",
+        "@parcel/watcher-darwin-x64": "^2.5.0",
+        "@parcel/watcher-linux-arm64-glibc": "^2.5.0",
+        "@parcel/watcher-linux-x64-glibc": "^2.5.0",
+        "@parcel/watcher-win32-arm64": "^2.5.0",
+        "@parcel/watcher-win32-x64": "^2.5.0",
       },
     },
     "packages/opencode": {
@@ -445,6 +453,7 @@
         "tree-sitter-powershell": "0.25.10",
         "turndown": "7.2.0",
         "ulid": "catalog:",
+        "undici": "7.24.4",
         "venice-ai-sdk-provider": "2.0.1",
         "vscode-jsonrpc": "8.2.1",
         "web-tree-sitter": "0.25.10",
@@ -486,6 +495,9 @@
         "vscode-languageserver-types": "3.17.5",
         "why-is-node-running": "3.2.2",
         "zod-to-json-schema": "3.24.5",
+      },
+      "optionalDependencies": {
+        "@opentui/core-win32-x64": "0.2.5",
       },
     },
     "packages/plugin": {
@@ -2890,6 +2902,8 @@
 
     "cross-dirname": ["cross-dirname@0.1.0", "https://registry.npmmirror.com/cross-dirname/-/cross-dirname-0.1.0.tgz", {}, "sha512-+R08/oI0nl3vfPcqftZRpytksBXDzOUveBq/NBVx0sUp1axwzPQrKinNx5yd5sxPu8j1wIy8AfnVQ+5eFdha6Q=="],
 
+    "cross-env": ["cross-env@7.0.3", "https://registry.npmmirror.com/cross-env/-/cross-env-7.0.3.tgz", { "dependencies": { "cross-spawn": "^7.0.1" }, "bin": { "cross-env": "src/bin/cross-env.js", "cross-env-shell": "src/bin/cross-env-shell.js" } }, "sha512-+/HKd6EgcQCJGh2PSjZuUitQBQynKor4wrFbRg4DtAgS1aWO+gU52xpH7M9ScGgXSYmAVS9bIJ8EzuaGw0oNAw=="],
+
     "cross-fetch": ["cross-fetch@3.2.0", "https://registry.npmmirror.com/cross-fetch/-/cross-fetch-3.2.0.tgz", { "dependencies": { "node-fetch": "^2.7.0" } }, "sha512-Q+xVJLoGOeIMXZmbUK4HYk+69cQH6LudR0Vu/pRm2YlU/hDV9CiS0gKUMaWY5f2NeUH9C1nV3bsTlCo0FsTV1Q=="],
 
     "cross-spawn": ["cross-spawn@7.0.6", "https://registry.npmmirror.com/cross-spawn/-/cross-spawn-7.0.6.tgz", { "dependencies": { "path-key": "^3.1.0", "shebang-command": "^2.0.0", "which": "^2.0.1" } }, "sha512-uV2QOWP2nWzsy2aMp8aRibhi9dlzF5Hgh5SHaB9OiTGEyDTiJJyx0uy51QXdyWbtAHNua4XJzUKca3OzKUd3vA=="],
@@ -4906,7 +4920,7 @@
 
     "uncrypto": ["uncrypto@0.1.3", "https://registry.npmmirror.com/uncrypto/-/uncrypto-0.1.3.tgz", {}, "sha512-Ql87qFHB3s/De2ClA9e0gsnS6zXG27SkTiSJwjCc9MebbfapQfuPzumMIUMi38ezPZVNFcHI9sUIepeQfw8J8Q=="],
 
-    "undici": ["undici@7.25.0", "https://registry.npmmirror.com/undici/-/undici-7.25.0.tgz", {}, "sha512-xXnp4kTyor2Zq+J1FfPI6Eq3ew5h6Vl0F/8d9XU5zZQf1tX9s2Su1/3PiMmUANFULpmksxkClamIZcaUqryHsQ=="],
+    "undici": ["undici@7.24.4", "https://registry.npmmirror.com/undici/-/undici-7.24.4.tgz", {}, "sha512-BM/JzwwaRXxrLdElV2Uo6cTLEjhSb3WXboncJamZ15NgUURmvlXvxa6xkwIOILIjPNo9i8ku136ZvWV0Uly8+w=="],
 
     "undici-types": ["undici-types@7.16.0", "https://registry.npmmirror.com/undici-types/-/undici-types-7.16.0.tgz", {}, "sha512-Zz+aZWSj8LE6zoxD+xrjh4VfkIG8Ya6LvYkZqtUQGJPZjYl53ypCaUwWqo7eI0x66KBGeRo+mlBEkMSeSZ38Nw=="],
 
@@ -5999,6 +6013,8 @@
     "mssql/tedious": ["tedious@18.6.2", "https://registry.npmmirror.com/tedious/-/tedious-18.6.2.tgz", { "dependencies": { "@azure/core-auth": "^1.7.2", "@azure/identity": "^4.2.1", "@azure/keyvault-keys": "^4.4.0", "@js-joda/core": "^5.6.1", "@types/node": ">=18", "bl": "^6.0.11", "iconv-lite": "^0.6.3", "js-md4": "^0.3.2", "native-duplexpair": "^1.0.0", "sprintf-js": "^1.1.3" } }, "sha512-g7jC56o3MzLkE3lHkaFe2ZdOVFBahq5bsB60/M4NYUbocw/MCrS89IOEQUFr+ba6pb8ZHczZ/VqCyYeYq0xBAg=="],
 
     "nitro/h3": ["h3@2.0.1-rc.5", "https://registry.npmmirror.com/h3/-/h3-2.0.1-rc.5.tgz", { "dependencies": { "rou3": "^0.7.9", "srvx": "^0.9.1" }, "peerDependencies": { "crossws": "^0.4.1" }, "optionalPeers": ["crossws"] }, "sha512-qkohAzCab0nLzXNm78tBjZDvtKMTmtygS8BJLT3VPczAQofdqlFXDPkXdLMJN4r05+xqneG8snZJ0HgkERCZTg=="],
+
+    "nitro/undici": ["undici@7.25.0", "https://registry.npmmirror.com/undici/-/undici-7.25.0.tgz", {}, "sha512-xXnp4kTyor2Zq+J1FfPI6Eq3ew5h6Vl0F/8d9XU5zZQf1tX9s2Su1/3PiMmUANFULpmksxkClamIZcaUqryHsQ=="],
 
     "node-gyp-build-optional-packages/detect-libc": ["detect-libc@2.1.2", "https://registry.npmmirror.com/detect-libc/-/detect-libc-2.1.2.tgz", {}, "sha512-Btj2BOOO83o3WyH59e8MgXsxEQVcarkUOpEYrubB0urwnN10yQ364rsiByU11nZlqWYZm05i/of7io4mzihBtQ=="],
 

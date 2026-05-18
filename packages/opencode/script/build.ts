@@ -12,10 +12,35 @@ const dir = path.resolve(__dirname, "..")
 
 process.chdir(dir)
 
-await import("./generate.ts")
-
 import { Script } from "@opencode-ai/script"
 import pkg from "../package.json"
+// testagent_change - use fixed version instead of Script.version
+const TESTAGENT_VERSION = "1.4.3"
+
+// testagent_change start - parse flags early
+// const singleFlag = process.argv.includes("--single")
+// const baselineFlag = process.argv.includes("--baseline")
+// const skipInstall = process.argv.includes("--skip-install")
+const windowsFlag = process.argv.includes("--windows")
+const targetArg = process.argv.find((a) => a.startsWith("--target="))?.split("=")[1]
+// testagent_change end
+
+// testagent_change start - patch y18n to handle EPERM on Windows (Bun virtual fs B:\~BUN\locales)
+// 不过有一个风险：patch 的路径 node_modules/.bun/y18n@5.0.8/... 是硬编码的，如果 y18n 版本升级了路径会变。你可以在 CI 里跑构建时留意那行 "y18n patch: pattern not found" 的警告。
+const y18nPath = path.join(dir, "../../node_modules/.bun/y18n@5.0.8/node_modules/y18n/build/lib/index.js")
+const y18nSrc = await Bun.file(y18nPath).text()
+const patched = y18nSrc.replace(
+  `if (err.code === 'ENOENT')\n                localeLookup = {};`,
+  `if (err.code === 'ENOENT' || err.code === 'EPERM')\n                localeLookup = {};`,
+)
+if (patched === y18nSrc) console.warn("y18n patch: pattern not found, may already be patched or version changed")
+else {
+  await Bun.write(y18nPath, patched)
+  console.log("y18n patched: EPERM handled in _readLocaleFile")
+}
+// testagent_change end
+
+// testagent_change - models snapshot removed, users configure models manually
 
 // Load migrations from migration directories
 const migrationDirs = (
@@ -50,7 +75,6 @@ console.log(`Loaded ${migrations.length} migrations`)
 const singleFlag = process.argv.includes("--single")
 const baselineFlag = process.argv.includes("--baseline")
 const skipInstall = process.argv.includes("--skip-install")
-const sourcemapsFlag = process.argv.includes("--sourcemaps")
 const plugin = createSolidTransformPlugin()
 const skipEmbedWebUi = process.argv.includes("--skip-embed-web-ui")
 
@@ -61,7 +85,6 @@ const createEmbeddedWebUIBundle = async () => {
   await $`bun run --cwd ${appDir} build`
   const files = (await Array.fromAsync(new Bun.Glob("**/*").scan({ cwd: dist })))
     .map((file) => file.replaceAll("\\", "/"))
-    .filter((file) => !file.endsWith(".map"))
     .sort()
   const imports = files.map((file, i) => {
     const spec = path.relative(dir, path.join(dist, file)).replaceAll("\\", "/")
@@ -143,26 +166,31 @@ const allTargets: {
   },
 ]
 
-const targets = singleFlag
+const targets = targetArg
   ? allTargets.filter((item) => {
-      if (item.os !== process.platform || item.arch !== process.arch) {
-        return false
-      }
-
-      // When building for the current platform, prefer a single native binary by default.
-      // Baseline binaries require additional Bun artifacts and can be flaky to download.
-      if (item.avx2 === false) {
-        return baselineFlag
-      }
-
-      // also skip abi-specific builds for the same reason
-      if (item.abi !== undefined) {
-        return false
-      }
-
+      const [os, arch, variant] = targetArg.split("-")
+      if (item.os !== os) return false
+      if (item.arch !== arch) return false
+      if (variant === "baseline" && item.avx2 !== false) return false
+      if (variant !== "baseline" && item.avx2 === false) return false
       return true
     })
-  : allTargets
+  : singleFlag
+    ? allTargets.filter((item) => {
+        if (item.os !== process.platform || item.arch !== process.arch) {
+          return false
+        }
+        if (item.avx2 === false) {
+          return baselineFlag
+        }
+        if (item.abi !== undefined) {
+          return false
+        }
+        return true
+      })
+    : windowsFlag // testagent_change
+      ? allTargets.filter((item) => item.os === "win32") // testagent_change
+      : allTargets
 
 await $`rm -rf dist`
 
@@ -198,36 +226,35 @@ for (const item of targets) {
     conditions: ["browser"],
     tsconfig: "./tsconfig.json",
     plugins: [plugin],
-    external: ["node-gyp"],
-    format: "esm",
-    minify: true,
-    sourcemap: sourcemapsFlag ? "linked" : "none",
-    splitting: true,
+    external: ["node-gyp"], // testagent_change - langfuse is now bundled
     compile: {
       autoloadBunfig: false,
       autoloadDotenv: false,
       autoloadTsconfig: true,
       autoloadPackageJson: true,
       target: name.replace(pkg.name, "bun") as any,
-      outfile: `dist/${name}/bin/opencode`,
-      execArgv: [`--user-agent=opencode/${Script.version}`, "--use-system-ca", "--"],
+      outfile: `dist/${name}/bin/testagent`, // testagent_change
+      execArgv: [`--user-agent=testagent/${Script.version}`, "--use-system-ca", "--"], // testagent_change - kept opencode for HTTP user-agent compatibility
       windows: {},
     },
-    files: embeddedFileMap ? { "opencode-web-ui.gen.ts": embeddedFileMap } : {},
+    files: {
+      ...(embeddedFileMap ? { "opencode-web-ui.gen.ts": embeddedFileMap } : {}),
+    },
     entrypoints: ["./src/index.ts", parserWorker, workerPath, ...(embeddedFileMap ? ["opencode-web-ui.gen.ts"] : [])],
     define: {
-      OPENCODE_VERSION: `'${Script.version}'`,
+      OPENCODE_VERSION: `'${TESTAGENT_VERSION}'`, // testagent_change - use fixed version
       OPENCODE_MIGRATIONS: JSON.stringify(migrations),
       OTUI_TREE_SITTER_WORKER_PATH: bunfsRoot + workerRelativePath,
       OPENCODE_WORKER_PATH: workerPath,
       OPENCODE_CHANNEL: `'${Script.channel}'`,
       OPENCODE_LIBC: item.os === "linux" ? `'${item.abi ?? "glibc"}'` : "",
+      LANGFUSE_ENV: JSON.stringify(await Bun.file("./src/plugin/langfuse/.env").text()),
     },
   })
 
   // Smoke test: only run if binary is for current platform
   if (item.os === process.platform && item.arch === process.arch && !item.abi) {
-    const binaryPath = `dist/${name}/bin/opencode`
+    const binaryPath = `dist/${name}/bin/testagent` // testagent_change
     console.log(`Running smoke test: ${binaryPath} --version`)
     try {
       const versionOutput = await $`${binaryPath} --version`.text()
@@ -239,6 +266,14 @@ for (const item of targets) {
   }
 
   await $`rm -rf ./dist/${name}/bin/tui`
+  // testagent_change start - create lightweight opencode alias
+  if (item.os === "win32") {
+    await Bun.write(`dist/${name}/bin/opencode.cmd`, `@"%~dp0testagent.exe" %*\r\n`)
+  } else {
+    await Bun.write(`dist/${name}/bin/opencode`, `#!/bin/sh\nexec "$(dirname "$0")/testagent" "$@"\n`)
+    await $`chmod +x dist/${name}/bin/opencode`
+  }
+  // testagent_change end
   await Bun.file(`dist/${name}/package.json`).write(
     JSON.stringify(
       {

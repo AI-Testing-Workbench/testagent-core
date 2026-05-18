@@ -18,7 +18,8 @@
     "prepare": "husky",
     "random": "echo 'Random script'",
     "hello": "echo 'Hello World!'",
-    "test": "echo 'do not run tests from root' && exit 1"
+    "test": "echo 'do not run tests from root' && exit 1",
+    "bun:windows": "cross-env OPENCODE_CHANNEL=latest bun packages/opencode/script/build.ts --target=win32-x64-baseline --skip-models && mkdir -p ../kilo-vscode/bin/ &&  cp packages/opencode/dist/opencode-windows-x64-baseline/bin/testagent.exe ../kilo-vscode/bin/testagent.exe"
   },
   "workspaces": {
     "packages": [
@@ -91,6 +92,7 @@
     "@tsconfig/bun": "catalog:",
     "@types/mime-types": "3.0.1",
     "@typescript/native-preview": "catalog:",
+    "cross-env": "7.0.3",
     "glob": "13.0.5",
     "husky": "9.1.7",
     "oxlint": "1.60.0",

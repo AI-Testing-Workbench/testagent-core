@@ -182,5 +182,8 @@
   },
   "overrides": {
     "drizzle-orm": "catalog:"
+  },
+  "optionalDependencies": {
+    "@opentui/core-win32-x64": "0.2.5"
   }
 }
