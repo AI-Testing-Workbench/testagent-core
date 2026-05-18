@@ -182,7 +182,7 @@ export const layer = Layer.effect(
           if (isVSCodeEnvironment()) {
             notifyVSCode("info", message)
           } else {
-            console.log(message)
+            log.info(message)
           }
           // testagent_change end
           yield* config.waitForDependencies()
@@ -199,7 +199,7 @@ export const layer = Layer.effect(
                 if (isVSCodeEnvironment()) {
                   notifyVSCode("info", message)
                 } else {
-                  console.log(message)
+                  log.info(message)
                 }
                 // testagent_change end
                 log.info("loading plugin", { path: candidate.plan.spec })

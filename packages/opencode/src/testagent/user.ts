@@ -1,5 +1,8 @@
 // testagent_change - new file
 // Stores the current user info set by the VS Code extension via HTTP or env vars.
+import * as Log from "@opencode-ai/core/util/log"
+
+const log = Log.create({ service: "testagent.user" })
 
 interface UserInfo {
   id?: string
@@ -14,7 +17,7 @@ export const User = {
   get(): UserInfo {
     // override takes precedence (set by VS Code extension via HTTP)
     if (override?.id) {
-      console.log("[testagent] User.get() from override:", override)
+      log.debug("from override", { user: override })
       return override
     }
     
@@ -24,7 +27,7 @@ export const User = {
       name: process.env["TESTAGENT_USER_NAME"],
     }
     if (fromEnv.id) {
-      console.log("[testagent] User.get() from env:", fromEnv)
+      log.debug("from env", { user: fromEnv })
       return fromEnv
     }
     
@@ -41,28 +44,28 @@ export const User = {
         const xdgData = process.env.XDG_DATA_HOME || path.join(os.homedir(), ".local", "share")
         const file = path.join(xdgData, "testagent", "external-user.json")
         
-        console.log("[testagent] User.get() checking file:", file)
+        log.debug("checking file", { file })
         if (fs.existsSync(file)) {
           const data = JSON.parse(fs.readFileSync(file, "utf8"))
           if (data.userId && data.userName) {
             cachedFromFile = { id: data.userId, name: data.userName }
-            console.log("[testagent] User.get() from file:", cachedFromFile)
+            log.debug("from file", { user: cachedFromFile })
           }
         } else {
-          console.log("[testagent] User.get() file does not exist")
+          log.debug("file does not exist", { file })
         }
       } catch (e) {
-        console.log("[testagent] User.get() file read error:", e)
+        log.warn("file read error", { error: e })
         // ignore errors, just return empty
       }
     }
     
     const result = cachedFromFile ?? { id: undefined, name: undefined }
-    console.log("[testagent] User.get() final result:", result)
+    log.debug("final result", { user: result })
     return result
   },
   set(info: UserInfo) {
-    console.log("[testagent] User.set():", info)
+    log.debug("set", { user: info })
     override = info
   },
 }

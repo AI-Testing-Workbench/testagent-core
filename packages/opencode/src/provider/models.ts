@@ -203,7 +203,7 @@ export const layer: Layer.Layer<Service, never, AppFileSystem.Service> = Layer.e
         if (!providers["test-llm"]) {
           const models = yield* fetchTestLLMModels().pipe(
             Effect.catch((error) => {
-              console.error("[testagent] test-llm model fetch failed:", error)
+              log.error("test-llm model fetch failed", { error })
               return Effect.succeed({} as Record<string, Model>)
             }),
           )

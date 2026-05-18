@@ -15,6 +15,9 @@ import type { Plugin } from "@opencode-ai/plugin"
 import { User } from "@/testagent/user" // testagent_change
 import LangfuseClient from "langfuse"
 import { readFileSync, existsSync } from "fs"
+import { Log } from "@opencode-ai/core/util/log" // testagent_change
+
+const log = Log.create({ service: "plugin.langfuse" }) // testagent_change
 
 const LANGFUSE_BASE_URL = "https://testhub-agent-trace.paasuat.cmbchina.cn";
 // const LANGFUSE_BASE_URL = "http://localhost:3000";
@@ -696,9 +699,9 @@ async function signup_user(user_id: string, user_name: string, langfuse_host: st
   })
   const resJson = await res.json()
   if (resJson.message === "User created") {
-    console.log(`[langfuse] 注册用户成功:${user_name}/${user_id}`)
+    log.info("注册用户成功", { user: `${user_name}/${user_id}` })
   } else {
-    console.error(`[langfuse] 注册用户失败:${JSON.stringify(resJson)}`)
+    log.error("注册用户失败", { response: resJson })
   }
 }
 
@@ -763,7 +766,7 @@ async function create_organization(session: string, langfuse_host: string): Prom
     const resJson = await res.json()
     return resJson.result.data.json.id
   } catch (e) {
-    console.error(`[langfuse] 创建organization失败:${e}`)
+    log.error("创建organization失败", { error: e })
     return null
   }
 }
@@ -796,7 +799,7 @@ async function create_project(
     const secret_key = resJson.result.data.json.secretKey
     return { public_key, secret_key, project_id }
   } catch (e) {
-    console.error(`[langfuse] 创建project失败:${e}`)
+    log.error("创建project失败", { error: e })
     return null
   }
 }
@@ -818,7 +821,7 @@ async function get_apikeys_by_user(
     const project_id = resJson.result.data.json.projectId
     return { public_key, secret_key, project_id }
   } catch (e) {
-    console.error(`[langfuse] 获取密钥信息失败:${e}`)
+    log.error("获取密钥信息失败", { error: e })
     return null
   }
 }
@@ -852,7 +855,7 @@ async function get_project_apikeys(
 
 export const LangfusePlugin: Plugin = async (ctx) => {
   const user = User.get()
-  console.log("[langfuse] Plugin started",user)
+  log.info("Plugin started", { user })
 
   let langfuse: any = null
   let project_id: string | null = null
@@ -888,7 +891,7 @@ export const LangfusePlugin: Plugin = async (ctx) => {
           })
       }
     } catch (e) {
-      console.log("[langfuse] Failed to initialize with dynamic keys:", e)
+      log.warn("Failed to initialize with dynamic keys", { error: e })
       langfuse = new LangfuseClient({
             publicKey: defaultPublicKey,
             secretKey: defaultSecretKey,

@@ -25,7 +25,9 @@ import { createOpencodeClient, type OpencodeClient, type ToolPart } from "@openc
 import { Agent } from "@/agent/agent"
 import { Permission } from "@/permission"
 import { INTERACTIVE_INPUT_ERROR, resolveInteractiveStdin } from "./run/runtime.stdin"
+import { Log } from "@/util/log"
 
+const log = Log.create({ service: "cli.run" })
 const runtimeTask = import("./run/runtime")
 type ModelInput = Parameters<OpencodeClient["session"]["prompt"]>[0]["model"]
 
@@ -594,10 +596,6 @@ export const RunCommand = effectCmd({
           return false
         }
 
-        // Consume one subscribed event stream for the active session and mirror it
-        // to stdout/UI. `client` is passed explicitly because attach mode may
-        // rebind the SDK to the session's directory after the subscription is
-        // created, and replies issued from inside the loop must use that client.
         async function loop(client: OpencodeClient, events: Awaited<ReturnType<typeof sdk.event.subscribe>>) {
           const toggles = new Map<string, boolean>()
           let error: string | undefined
@@ -731,7 +729,7 @@ export const RunCommand = effectCmd({
         if (!args.interactive) {
           const events = await client.event.subscribe()
           loop(client, events).catch((e) => {
-            console.error(e)
+            log.error("event loop failed", { error: e })
             process.exit(1)
           })
 

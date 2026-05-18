@@ -71,7 +71,7 @@ const FileTreeCommand = effectCmd({
     }),
   handler: Effect.fn("Cli.debug.file.tree")(function* (args) {
     const tree = yield* Effect.orDie(Ripgrep.Service.use((svc) => svc.tree({ cwd: args.dir, limit: 200 })))
-    console.log(JSON.stringify(tree, null, 2))
+    process.stdout.write(JSON.stringify(tree, null, 2) + EOL)
   }),
 })
 

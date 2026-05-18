@@ -847,7 +847,7 @@ function custom(dep: CustomDep): Record<string, CustomLoader> {
             const headers = init?.headers ? Object.fromEntries(new Headers(init.headers).entries()) : {}
             const body = init?.body ? (typeof init.body === "string" ? init.body : "[Binary Data]") : undefined
 
-            console.log("[testagent] 🌐 HTTP Request to test-llm gateway:", {
+            log.debug("HTTP Request to test-llm gateway", {
               url,
               method,
               headers,
@@ -868,7 +868,7 @@ function custom(dep: CustomDep): Record<string, CustomLoader> {
               responseBody = "[Could not read response body]"
             }
 
-            console.log("[testagent] 📥 HTTP Response from test-llm gateway:", {
+            log.debug("HTTP Response from test-llm gateway", {
               status: response.status,
               statusText: response.statusText,
               headers: Object.fromEntries(response.headers.entries()),
