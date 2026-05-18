@@ -25,7 +25,7 @@ import { createOpencodeClient, type OpencodeClient, type ToolPart } from "@openc
 import { Agent } from "@/agent/agent"
 import { Permission } from "@/permission"
 import { INTERACTIVE_INPUT_ERROR, resolveInteractiveStdin } from "./run/runtime.stdin"
-import { Log } from "@/util/log"
+import * as Log from "@opencode-ai/core/util/log"
 
 const log = Log.create({ service: "cli.run" })
 const runtimeTask = import("./run/runtime")
