@@ -8,6 +8,8 @@ import { containsPath, type InstanceContext } from "../project/instance-context"
 import { InstanceState } from "@/effect/instance-state"
 import { lazy } from "@/util/lazy"
 import { Language, type Node } from "web-tree-sitter"
+// testagent_change: Import iconv-lite for GBK encoding support on Windows
+import iconv from "iconv-lite"
 
 import { AppFileSystem } from "@opencode-ai/core/filesystem"
 import { fileURLToPath } from "url"
@@ -287,6 +289,48 @@ const ask = Effect.fn("ShellTool.ask")(function* (ctx: Tool.Context, scan: Scan)
   })
 })
 
+// testagent_change start: Handle encoding for Windows cmd.exe
+// Windows cmd.exe may output in GBK/CP936 even after chcp 65001
+// We need to detect and handle this properly using iconv-lite
+function decodeWindowsCmdOutput(buffer: Uint8Array): string {
+  // Try UTF-8 first
+  const utf8Decoder = new TextDecoder("utf-8", { fatal: true })
+  try {
+    const decoded = utf8Decoder.decode(buffer)
+    // Check if the decoded string contains replacement characters (�)
+    // which indicates encoding mismatch
+    const replacementCharCount = (decoded.match(/�/g) || []).length
+    const totalChars = decoded.length
+    
+    // If more than 5% of characters are replacement characters, likely wrong encoding
+    if (totalChars > 0 && replacementCharCount / totalChars > 0.05) {
+      // Try GBK/CP936 encoding (common on Chinese Windows)
+      try {
+        return iconv.decode(Buffer.from(buffer), "gbk")
+      } catch {
+        // If GBK also fails, return the UTF-8 version with replacement chars
+        return decoded
+      }
+    }
+    
+    return decoded
+  } catch {
+    // UTF-8 decode failed completely, try GBK
+    try {
+      return iconv.decode(Buffer.from(buffer), "gbk")
+    } catch {
+      // Last resort: use non-fatal UTF-8 which replaces invalid sequences with �
+      const fallbackDecoder = new TextDecoder("utf-8", { fatal: false })
+      return fallbackDecoder.decode(buffer)
+    }
+  }
+}
+
+function shouldUseWindowsCmdDecoding(shell: string): boolean {
+  return process.platform === "win32" && shell.toLowerCase().includes("cmd")
+}
+// testagent_change end
+
 function cmd(shell: string, command: string, cwd: string, env: NodeJS.ProcessEnv) {
   if (process.platform === "win32") {
     if (Shell.ps(shell)) {
@@ -301,13 +345,28 @@ function cmd(shell: string, command: string, cwd: string, env: NodeJS.ProcessEnv
         detached: false,
       })
     }
-    // testagent_change start: Handle cmd.exe on Windows
+    // testagent_change start: Handle cmd.exe on Windows with enhanced UTF-8 support
     // For cmd.exe, we need to use chcp 65001 to set UTF-8 code page
+    // Also set environment variables to encourage UTF-8 output from child processes
     if (shell.toLowerCase().includes("cmd")) {
-      const utf8Command = `chcp 65001 >nul 2>&1 && ${command}`
+      // Use a more aggressive approach: wrap the command in a way that forces UTF-8
+      // 1. Set code page to 65001 (UTF-8)
+      // 2. Set console output encoding
+      // 3. Execute the command
+      const utf8Command = `@echo off & chcp 65001 >nul 2>&1 & ${command}`
       return ChildProcess.make(shell, ["/d", "/s", "/c", utf8Command], {
         cwd,
-        env,
+        env: {
+          ...env,
+          // Force UTF-8 for various programs
+          PYTHONIOENCODING: "utf-8",
+          PYTHONUTF8: "1",
+          // Node.js UTF-8 mode  
+          NODE_NO_WARNINGS: "1",
+          // Playwright and other tools
+          LANG: "en_US.UTF-8",
+          LC_ALL: "en_US.UTF-8",
+        },
         stdin: "ignore",
         detached: false,
       })
@@ -483,9 +542,15 @@ export const ShellTool = Tool.define(
       const code: number | null = yield* Effect.scoped(
         Effect.gen(function* () {
           const handle = yield* spawner.spawn(cmd(input.shell, input.command, input.cwd, input.env))
+          // testagent_change: Use custom decoding for Windows cmd.exe to handle GBK encoding
+          const useCustomDecoding = shouldUseWindowsCmdDecoding(input.shell)
 
           yield* Effect.forkScoped(
-            Stream.runForEach(Stream.decodeText(handle.all), (chunk) => {
+            Stream.runForEach(
+              useCustomDecoding
+                ? Stream.map(handle.all, (chunk) => decodeWindowsCmdOutput(chunk))
+                : Stream.decodeText(handle.all),
+              (chunk) => {
               const size = Buffer.byteLength(chunk, "utf-8")
               list.push({ text: chunk, size })
               used += size
