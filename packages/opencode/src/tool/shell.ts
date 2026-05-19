@@ -289,10 +289,10 @@ const ask = Effect.fn("ShellTool.ask")(function* (ctx: Tool.Context, scan: Scan)
   })
 })
 
-// testagent_change start: Handle encoding for Windows cmd.exe
-// Windows cmd.exe may output in GBK/CP936 even after chcp 65001
+// testagent_change start: Handle encoding for Windows shells (cmd.exe and PowerShell)
+// Windows shells may output in GBK/CP936 even after setting UTF-8 encoding
 // We need to detect and handle this properly using iconv-lite
-function decodeWindowsCmdOutput(buffer: Uint8Array): string {
+function decodeWindowsShellOutput(buffer: Uint8Array): string {
   // Try UTF-8 first
   const utf8Decoder = new TextDecoder("utf-8", { fatal: true })
   try {
@@ -326,8 +326,10 @@ function decodeWindowsCmdOutput(buffer: Uint8Array): string {
   }
 }
 
-function shouldUseWindowsCmdDecoding(shell: string): boolean {
-  return process.platform === "win32" && shell.toLowerCase().includes("cmd")
+function shouldUseWindowsShellDecoding(shell: string): boolean {
+  // testagent_change: Apply smart decoding to both cmd.exe and PowerShell on Windows
+  // Both can output GBK encoding on Chinese Windows systems
+  return process.platform === "win32" && (shell.toLowerCase().includes("cmd") || Shell.ps(shell))
 }
 // testagent_change end
 
@@ -542,13 +544,13 @@ export const ShellTool = Tool.define(
       const code: number | null = yield* Effect.scoped(
         Effect.gen(function* () {
           const handle = yield* spawner.spawn(cmd(input.shell, input.command, input.cwd, input.env))
-          // testagent_change: Use custom decoding for Windows cmd.exe to handle GBK encoding
-          const useCustomDecoding = shouldUseWindowsCmdDecoding(input.shell)
+          // testagent_change: Use custom decoding for Windows shells (cmd.exe and PowerShell) to handle GBK encoding
+          const useCustomDecoding = shouldUseWindowsShellDecoding(input.shell)
 
           yield* Effect.forkScoped(
             Stream.runForEach(
               useCustomDecoding
-                ? Stream.map(handle.all, (chunk) => decodeWindowsCmdOutput(chunk))
+                ? Stream.map(handle.all, (chunk) => decodeWindowsShellOutput(chunk))
                 : Stream.decodeText(handle.all),
               (chunk) => {
               const size = Buffer.byteLength(chunk, "utf-8")
