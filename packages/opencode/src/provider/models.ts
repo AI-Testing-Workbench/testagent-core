@@ -166,7 +166,7 @@ export const layer: Layer.Layer<Service, never, AppFileSystem.Service> = Layer.e
       const json = (yield* Effect.tryPromise({
         try: () => response.json(),
         catch: (error) => error,
-      })) as { data?: Array<{ id: string; owned_by?: string }> }
+      })) as { data?: Array<{ id: string; owned_by?: string; limit?: { context: number; output?: number } }> }
       
       const result: Record<string, Model> = {}
       
@@ -182,7 +182,7 @@ export const layer: Layer.Layer<Service, never, AppFileSystem.Service> = Layer.e
           temperature: true,
           tool_call: true,
           cost: { input: 0, output: 0 },
-          limit: { context: 64000, output: 0 },
+          limit: { context: item.limit?.context ?? 0, output: 0 },
           modalities: {
             input: ["text"],
             output: ["text"],
