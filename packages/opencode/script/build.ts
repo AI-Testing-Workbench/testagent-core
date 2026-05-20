@@ -234,7 +234,7 @@ for (const item of targets) {
       autoloadDotenv: false,
       autoloadTsconfig: true,
       autoloadPackageJson: true,
-      target: name.replace(pkg.name, "bun") as any,
+      target: name.replace("testagent", "bun") as any, // testagent_change - replace testagent with bun for Bun.build target
       outfile: `dist/${name}/bin/testagent`, // testagent_change
       execArgv: [`--user-agent=testagent/${Script.version}`, "--use-system-ca", "--"], // testagent_change - kept opencode for HTTP user-agent compatibility
       windows: {},

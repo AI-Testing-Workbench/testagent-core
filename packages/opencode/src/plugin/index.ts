@@ -180,7 +180,7 @@ export const layer = Layer.effect(
           // testagent_change start - notify plugin installation start
           const message = `正在安装 ${plugins.length} 个插件...`
           if (isVSCodeEnvironment()) {
-            notifyVSCode("info", message)
+            // notifyVSCode("info", message)
           } else {
             log.info(message)
           }
@@ -197,7 +197,7 @@ export const layer = Layer.effect(
                 // testagent_change start - notify plugin loading start
                 const message = `正在加载插件: ${candidate.plan.spec}`
                 if (isVSCodeEnvironment()) {
-                  notifyVSCode("info", message)
+                  // notifyVSCode("info", message)
                 } else {
                   log.info(message)
                 }
@@ -237,6 +237,18 @@ export const layer = Layer.effect(
             },
           }),
         )
+        
+        // testagent_change start - notify all plugins loaded
+        if (plugins.length) {
+          const successCount = loaded.filter((l) => l !== null).length
+          const message = `插件加载完成: ${successCount}/${plugins.length} 个插件已加载`
+          if (isVSCodeEnvironment()) {
+            notifyVSCode("info", message)
+          } else {
+            log.info(message)
+          }
+        }
+        // testagent_change end
         for (const load of loaded) {
           if (!load) continue
 
