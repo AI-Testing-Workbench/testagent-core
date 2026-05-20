@@ -5,7 +5,7 @@ import { LSP } from "@/lsp/lsp"
 import { Vcs } from "@/project/vcs"
 import { Skill } from "@/skill"
 import { Schema } from "effect"
-import { HttpApi, HttpApiEndpoint, HttpApiGroup, HttpApiSchema, OpenApi } from "effect/unstable/httpapi"
+import { HttpApi, HttpApiEndpoint, HttpApiError, HttpApiGroup, HttpApiSchema, OpenApi } from "effect/unstable/httpapi"
 import { Authorization } from "../middleware/authorization"
 import { InstanceContextMiddleware } from "../middleware/instance-context"
 import { WorkspaceRoutingMiddleware } from "../middleware/workspace-routing"
@@ -18,6 +18,18 @@ const PathInfo = Schema.Struct({
   worktree: Schema.String,
   directory: Schema.String,
 }).annotate({ identifier: "Path" })
+
+const ReloadResult = Schema.Struct({
+  success: Schema.Boolean,
+})
+
+export const EnhancePromptPayload = Schema.Struct({
+  text: Schema.NonEmptyString,
+})
+
+export const EnhancePromptResult = Schema.Struct({
+  text: Schema.String,
+})
 
 export const VcsDiffQuery = Schema.Struct({
   mode: Vcs.Mode,
@@ -45,8 +57,11 @@ export const InstancePaths = {
   command: "/command",
   agent: "/agent",
   skill: "/skill",
+  skillReload: "/skill/reload",
+  mcpReload: "/mcp/reload",
   lsp: "/lsp",
   formatter: "/formatter",
+  enhancePrompt: "/enhance-prompt",
 } as const
 
 export const InstanceApi = HttpApi.make("instance")
@@ -151,6 +166,24 @@ export const InstanceApi = HttpApi.make("instance")
             description: "Get a list of all available skills in the OpenCode system.",
           }),
         ),
+        HttpApiEndpoint.post("skillReload", InstancePaths.skillReload, {
+          success: described(ReloadResult, "Skills reloaded successfully"),
+        }).annotateMerge(
+          OpenApi.annotations({
+            identifier: "app.reloadSkills",
+            summary: "Reload skills",
+            description: "Invalidate skill cache and reload all skills from disk",
+          }),
+        ),
+        HttpApiEndpoint.post("mcpReload", InstancePaths.mcpReload, {
+          success: described(ReloadResult, "MCP servers reloaded successfully"),
+        }).annotateMerge(
+          OpenApi.annotations({
+            identifier: "mcp.reload",
+            summary: "Reload MCP servers",
+            description: "Reload all MCP servers from config file without restarting CLI",
+          }),
+        ),
         HttpApiEndpoint.get("lsp", InstancePaths.lsp, {
           success: described(Schema.Array(LSP.Status), "LSP server status"),
         }).annotateMerge(
@@ -167,6 +200,17 @@ export const InstanceApi = HttpApi.make("instance")
             identifier: "formatter.status",
             summary: "Get formatter status",
             description: "Get formatter status",
+          }),
+        ),
+        HttpApiEndpoint.post("enhancePrompt", InstancePaths.enhancePrompt, {
+          payload: EnhancePromptPayload,
+          success: described(EnhancePromptResult, "Enhanced prompt text"),
+          error: HttpApiError.BadRequest,
+        }).annotateMerge(
+          OpenApi.annotations({
+            identifier: "enhancePrompt.enhance",
+            summary: "Enhance prompt",
+            description: "Rewrite a user's draft prompt into a clearer, more specific, and more effective prompt.",
           }),
         ),
       )

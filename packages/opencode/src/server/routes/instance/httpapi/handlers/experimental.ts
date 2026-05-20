@@ -5,6 +5,7 @@ import { InstanceState } from "@/effect/instance-state"
 import { MCP } from "@/mcp"
 import { Project } from "@/project/project"
 import { Session } from "@/session/session"
+import { WorktreeDiff } from "@/testagent/review/worktree-diff"
 import { ToolRegistry } from "@/tool/registry"
 import * as EffectZod from "@/util/effect-zod"
 import { Worktree } from "@/worktree"
@@ -12,7 +13,13 @@ import { Effect, Option } from "effect"
 import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse"
 import { HttpApiBuilder, HttpApiError } from "effect/unstable/httpapi"
 import { InstanceHttpApi } from "../api"
-import { ConsoleSwitchPayload, SessionListQuery, ToolListQuery } from "../groups/experimental"
+import {
+  ConsoleSwitchPayload,
+  SessionListQuery,
+  ToolListQuery,
+  WorktreeDiffFileQuery,
+  WorktreeDiffQuery,
+} from "../groups/experimental"
 
 export const experimentalHandlers = HttpApiBuilder.group(InstanceHttpApi, "experimental", (handlers) =>
   Effect.gen(function* () {
@@ -22,6 +29,7 @@ export const experimentalHandlers = HttpApiBuilder.group(InstanceHttpApi, "exper
     const mcp = yield* MCP.Service
     const project = yield* Project.Service
     const registry = yield* ToolRegistry.Service
+    const worktreeDiff = yield* WorktreeDiff.Service
     const worktreeSvc = yield* Worktree.Service
 
     const getConsole = Effect.fn("ExperimentalHttpApi.console")(function* () {
@@ -119,6 +127,38 @@ export const experimentalHandlers = HttpApiBuilder.group(InstanceHttpApi, "exper
       return true
     })
 
+    const getWorktreeDiff = Effect.fn("ExperimentalHttpApi.worktreeDiff")(function* (ctx: {
+      query: typeof WorktreeDiffQuery.Type
+    }) {
+      const instanceCtx = yield* InstanceState.context
+      const base = ctx.query.base || "origin/main"
+      const diffs = yield* worktreeDiff.full({ dir: instanceCtx.directory, base })
+      return diffs.map((diff) => ({
+        file: diff.file,
+        patch: diff.patch,
+        additions: diff.additions,
+        deletions: diff.deletions,
+        status: diff.status,
+      }))
+    })
+
+    const getWorktreeDiffSummary = Effect.fn("ExperimentalHttpApi.worktreeDiffSummary")(function* (ctx: {
+      query: typeof WorktreeDiffQuery.Type
+    }) {
+      const instanceCtx = yield* InstanceState.context
+      const base = ctx.query.base || "origin/main"
+      return yield* worktreeDiff.summary({ dir: instanceCtx.directory, base })
+    })
+
+    const getWorktreeDiffFile = Effect.fn("ExperimentalHttpApi.worktreeDiffFile")(function* (ctx: {
+      query: typeof WorktreeDiffFileQuery.Type
+    }) {
+      const instanceCtx = yield* InstanceState.context
+      const base = ctx.query.base || "origin/main"
+      const result = yield* worktreeDiff.detail({ dir: instanceCtx.directory, base, file: ctx.query.file })
+      return result ?? null
+    })
+
     const session = Effect.fn("ExperimentalHttpApi.session")(function* (ctx: { query: typeof SessionListQuery.Type }) {
       const limit = ctx.query.limit ?? 100
       const sessions = Array.from(
@@ -155,6 +195,9 @@ export const experimentalHandlers = HttpApiBuilder.group(InstanceHttpApi, "exper
       .handle("worktreeCreate", worktreeCreate)
       .handle("worktreeRemove", worktreeRemove)
       .handle("worktreeReset", worktreeReset)
+      .handle("worktreeDiff", getWorktreeDiff)
+      .handle("worktreeDiffSummary", getWorktreeDiffSummary)
+      .handle("worktreeDiffFile", getWorktreeDiffFile)
       .handle("session", session)
       .handle("resource", resource)
   }),

@@ -10,6 +10,7 @@ import { FileApi } from "./groups/file"
 import { GlobalApi } from "./groups/global"
 import { InstanceApi } from "./groups/instance"
 import { McpApi } from "./groups/mcp"
+import { TestagentApi } from "./groups/testagent"
 import { PermissionApi } from "./groups/permission"
 import { ProjectApi } from "./groups/project"
 import { ProviderApi } from "./groups/provider"
@@ -29,6 +30,7 @@ const SyncEventSchemas = SyncEvent.effectPayloads()
 export const RootHttpApi = HttpApi.make("opencode-root")
   .addHttpApi(ControlApi)
   .addHttpApi(GlobalApi)
+  .addHttpApi(TestagentApi)
   .middleware(Authorization)
 
 export const InstanceHttpApi = HttpApi.make("opencode-instance")

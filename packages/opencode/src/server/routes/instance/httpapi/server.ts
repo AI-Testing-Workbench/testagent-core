@@ -51,6 +51,7 @@ import { ToolRegistry } from "@/tool/registry"
 import { lazy } from "@/util/lazy"
 import { Vcs } from "@/project/vcs"
 import { Worktree } from "@/worktree"
+import { WorktreeDiff } from "@/testagent/review/worktree-diff"
 import { Workspace } from "@/control-plane/workspace"
 import { CorsConfig, isAllowedCorsOrigin, type CorsOptions } from "@/server/cors"
 import { serveUIEffect } from "@/server/shared/ui"
@@ -73,6 +74,7 @@ import { ptyConnectRoute, ptyHandlers } from "./handlers/pty"
 import { questionHandlers } from "./handlers/question"
 import { sessionHandlers } from "./handlers/session"
 import { syncHandlers } from "./handlers/sync"
+import { testagentHandlers } from "./handlers/testagent"
 import { tuiHandlers } from "./handlers/tui"
 import { v2Handlers } from "./handlers/v2"
 import { workspaceHandlers } from "./handlers/workspace"
@@ -113,7 +115,7 @@ const cors = (corsOptions?: CorsOptions) =>
 const authOnlyRouterLayer = authorizationRouterMiddleware.layer.pipe(Layer.provide(ServerAuth.Config.defaultLayer))
 const httpApiAuthLayer = authorizationLayer.pipe(Layer.provide(ServerAuth.Config.defaultLayer))
 const rootApiRoutes = HttpApiBuilder.layer(RootHttpApi).pipe(
-  Layer.provide([controlHandlers, globalHandlers]),
+  Layer.provide([controlHandlers, globalHandlers, testagentHandlers]),
   Layer.provide(httpApiAuthLayer),
 )
 const instanceRouterLayer = authorizationRouterMiddleware
@@ -218,6 +220,7 @@ export function createRoutes(corsOptions?: CorsOptions) {
       ToolRegistry.defaultLayer,
       Vcs.defaultLayer,
       Workspace.defaultLayer,
+      WorktreeDiff.defaultLayer,
       Worktree.appLayer,
       Bus.layer,
       AppFileSystem.defaultLayer,

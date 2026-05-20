@@ -71,7 +71,7 @@
     "typescript": "catalog:",
     "vscode-languageserver-types": "3.17.5",
     "zod-to-json-schema": "3.24.5",
-    "iconv-lite":"0.7.2",
+    "iconv-lite": "0.7.2",
     "why-is-node-running": "3.2.2"
   },
   "dependencies": {

@@ -2,6 +2,8 @@ import { AccountID, OrgID } from "@/account/schema"
 import { MCP } from "@/mcp"
 import { ProviderID, ModelID } from "@/provider/schema"
 import { Session } from "@/session/session"
+import { Snapshot } from "@/snapshot"
+import { WorktreeDiff } from "@/testagent/review/worktree-diff"
 import { Worktree } from "@/worktree"
 import { NonNegativeInt } from "@/util/schema"
 import { Schema, SchemaGetter } from "effect"
@@ -64,6 +66,15 @@ export const SessionListQuery = Schema.Struct({
   archived: Schema.optional(QueryBoolean),
 })
 
+export const WorktreeDiffQuery = Schema.Struct({
+  base: Schema.optional(Schema.String),
+})
+
+export const WorktreeDiffFileQuery = Schema.Struct({
+  base: Schema.optional(Schema.String),
+  file: Schema.String,
+})
+
 export const ExperimentalPaths = {
   console: "/experimental/console",
   consoleOrgs: "/experimental/console/orgs",
@@ -72,6 +83,9 @@ export const ExperimentalPaths = {
   toolIDs: "/experimental/tool/ids",
   worktree: "/experimental/worktree",
   worktreeReset: "/experimental/worktree/reset",
+  worktreeDiff: "/experimental/worktree/diff",
+  worktreeDiffSummary: "/experimental/worktree/diff/summary",
+  worktreeDiffFile: "/experimental/worktree/diff/file",
   session: "/experimental/session",
   resource: "/experimental/resource",
 } as const
@@ -174,6 +188,39 @@ export const ExperimentalApi = HttpApi.make("experimental")
             identifier: "worktree.reset",
             summary: "Reset worktree",
             description: "Reset a worktree branch to the primary default branch.",
+          }),
+        ),
+        HttpApiEndpoint.get("worktreeDiff", ExperimentalPaths.worktreeDiff, {
+          query: WorktreeDiffQuery,
+          success: described(Schema.Array(Snapshot.FileDiff), "File diffs"),
+          error: HttpApiError.BadRequest,
+        }).annotateMerge(
+          OpenApi.annotations({
+            identifier: "worktree.diff",
+            summary: "Get worktree diff",
+            description: "Get file diffs for a worktree compared to its base branch. Includes uncommitted changes.",
+          }),
+        ),
+        HttpApiEndpoint.get("worktreeDiffSummary", ExperimentalPaths.worktreeDiffSummary, {
+          query: WorktreeDiffQuery,
+          success: described(Schema.Array(WorktreeDiff.Item), "Diff summary items"),
+          error: HttpApiError.BadRequest,
+        }).annotateMerge(
+          OpenApi.annotations({
+            identifier: "worktree.diffSummary",
+            summary: "Get worktree diff summary",
+            description: "Get lightweight file diff metadata for a worktree compared to its base branch.",
+          }),
+        ),
+        HttpApiEndpoint.get("worktreeDiffFile", ExperimentalPaths.worktreeDiffFile, {
+          query: WorktreeDiffFileQuery,
+          success: described(Schema.NullOr(WorktreeDiff.Item), "Diff detail item"),
+          error: HttpApiError.BadRequest,
+        }).annotateMerge(
+          OpenApi.annotations({
+            identifier: "worktree.diffFile",
+            summary: "Get worktree diff detail",
+            description: "Get full diff contents for one worktree file compared to its base branch.",
           }),
         ),
         HttpApiEndpoint.get("session", ExperimentalPaths.session, {

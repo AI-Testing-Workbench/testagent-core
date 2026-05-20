@@ -4,12 +4,13 @@ import * as InstanceState from "@/effect/instance-state"
 import { Format } from "@/format"
 import { Global } from "@opencode-ai/core/global"
 import { LSP } from "@/lsp/lsp"
+import { MCP } from "@/mcp"
 import { Vcs } from "@/project/vcs"
 import { Skill } from "@/skill"
 import { Effect } from "effect"
 import { HttpApiBuilder } from "effect/unstable/httpapi"
 import { InstanceHttpApi } from "../api"
-import { ApiVcsApplyError } from "../groups/instance"
+import { ApiVcsApplyError, EnhancePromptPayload } from "../groups/instance"
 import { markInstanceForDisposal } from "../lifecycle"
 
 export const instanceHandlers = HttpApiBuilder.group(InstanceHttpApi, "instance", (handlers) =>
@@ -18,6 +19,7 @@ export const instanceHandlers = HttpApiBuilder.group(InstanceHttpApi, "instance"
     const command = yield* Command.Service
     const format = yield* Format.Service
     const lsp = yield* LSP.Service
+    const mcp = yield* MCP.Service
     const skill = yield* Skill.Service
     const vcs = yield* Vcs.Service
 
@@ -81,12 +83,30 @@ export const instanceHandlers = HttpApiBuilder.group(InstanceHttpApi, "instance"
       return yield* skill.all()
     })
 
+    const skillReload = Effect.fn("InstanceHttpApi.skillReload")(function* () {
+      yield* skill.reload()
+      return { success: true }
+    })
+
+    const mcpReload = Effect.fn("InstanceHttpApi.mcpReload")(function* () {
+      yield* mcp.reload()
+      return { success: true }
+    })
+
     const getLsp = Effect.fn("InstanceHttpApi.lsp")(function* () {
       return yield* lsp.status()
     })
 
     const getFormatter = Effect.fn("InstanceHttpApi.formatter")(function* () {
       return yield* format.status()
+    })
+
+    const enhancePrompt = Effect.fn("InstanceHttpApi.enhancePrompt")(function* (ctx: {
+      payload: typeof EnhancePromptPayload.Type
+    }) {
+      const { enhancePrompt: enhance } = yield* Effect.promise(() => import("@/testagent/enhance-prompt"))
+      const result = yield* Effect.promise(() => enhance(ctx.payload.text as string))
+      return { text: result }
     })
 
     return handlers
@@ -100,7 +120,10 @@ export const instanceHandlers = HttpApiBuilder.group(InstanceHttpApi, "instance"
       .handle("command", getCommand)
       .handle("agent", getAgent)
       .handle("skill", getSkill)
+      .handle("skillReload", skillReload)
+      .handle("mcpReload", mcpReload)
       .handle("lsp", getLsp)
       .handle("formatter", getFormatter)
+      .handle("enhancePrompt", enhancePrompt)
   }),
 )
