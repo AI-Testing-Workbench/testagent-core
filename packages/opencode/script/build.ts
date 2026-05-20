@@ -200,8 +200,9 @@ if (!skipInstall) {
   await $`bun install --os="*" --cpu="*" @parcel/watcher@${pkg.dependencies["@parcel/watcher"]}`
 }
 for (const item of targets) {
+  // testagent_change start - use testagent as output directory name
   const name = [
-    pkg.name,
+    "testagent",  // 固定使用 testagent 而不是 pkg.name
     // changing to win32 flags npm for some reason
     item.os === "win32" ? "windows" : item.os,
     item.arch,
@@ -210,6 +211,7 @@ for (const item of targets) {
   ]
     .filter(Boolean)
     .join("-")
+  // testagent_change end
   console.log(`building ${name}`)
   await $`mkdir -p dist/${name}/bin`
 
@@ -242,7 +244,7 @@ for (const item of targets) {
     },
     entrypoints: ["./src/index.ts", parserWorker, workerPath, ...(embeddedFileMap ? ["opencode-web-ui.gen.ts"] : [])],
     define: {
-      OPENCODE_VERSION: `'${TESTAGENT_VERSION}'`, // testagent_change - use fixed version
+      OPENCODE_VERSION: '1.14.42', // testagent_change - use fixed version
       OPENCODE_MIGRATIONS: JSON.stringify(migrations),
       OTUI_TREE_SITTER_WORKER_PATH: bunfsRoot + workerRelativePath,
       OPENCODE_WORKER_PATH: workerPath,
