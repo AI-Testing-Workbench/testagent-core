@@ -56,7 +56,18 @@ export async function load(dir: string) {
       result[config.name] = parsed.data
       continue
     }
-    throw new InvalidError({ path: item, issues: parsed.error.issues }, { cause: parsed.error })
+    // testagent_change start - don't throw, just log and skip invalid commands
+    const error = new InvalidError({ path: item, issues: parsed.error.issues }, { cause: parsed.error })
+    log.error("failed to validate command", { command: item, issues: parsed.error.issues })
+    const { Session } = await import("@/session/session")
+    void Bus.publish(Session.Event.Error, { 
+      error: new NamedError.Unknown({ 
+        message: `Command validation failed: ${item}\n${parsed.error.issues.map(i => `- ${i.path.join(".")}: ${i.message}`).join("\n")}` 
+      }).toObject() 
+    })
+    // Skip this command and continue with others
+    continue
+    // testagent_change end
   }
   return result
 }

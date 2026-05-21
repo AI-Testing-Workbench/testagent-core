@@ -37,6 +37,18 @@ export function fallbackSanitization(content: string): string {
       continue
     }
 
+    // testagent_change start - handle missing space after colon (e.g., "mode:Build")
+    // First try to match key:value without space
+    const noSpaceMatch = line.match(/^([a-zA-Z_][a-zA-Z0-9_]*):([^\s].*)$/)
+    if (noSpaceMatch) {
+      // Add the missing space
+      const key = noSpaceMatch[1]
+      const value = noSpaceMatch[2].trim()
+      result.push(`${key}: ${value}`)
+      continue
+    }
+    // testagent_change end
+
     // match key: value pattern
     const kvMatch = line.match(/^([a-zA-Z_][a-zA-Z0-9_]*)\s*:\s*(.*)$/)
     if (!kvMatch) {
@@ -72,15 +84,38 @@ export async function parse(filePath: string) {
 
   try {
     const md = matter(template)
+    // testagent_change start - detect if gray-matter returned malformed data
+    // If data is a string instead of an object, it means parsing failed silently
+    if (typeof md.data === "string") {
+      throw new Error("gray-matter returned string data, likely due to malformed YAML")
+    }
+    // testagent_change end
     return md
   } catch {
     try {
       return matter(fallbackSanitization(template))
     } catch (err) {
+      // testagent_change start - provide helpful error message
+      let message = `${filePath}: Failed to parse YAML frontmatter`
+      
+      if (err instanceof Error) {
+        const errorMsg = err.message
+        
+        // Detect common errors and provide fixes
+        if (errorMsg.includes("can not read a block mapping entry") || errorMsg.includes("implicit key")) {
+          message += "\n\n常见问题：YAML 键值对缺少空格"
+          message += "\n例如：'mode:Build' 应该改为 'mode: Build'"
+          message += "\n\n请检查 front matter 中的所有键值对是否有空格分隔"
+        } else {
+          message += `: ${errorMsg}`
+        }
+      }
+      // testagent_change end
+      
       throw new FrontmatterError(
         {
           path: filePath,
-          message: `${filePath}: Failed to parse YAML frontmatter: ${err instanceof Error ? err.message : String(err)}`,
+          message,
         },
         { cause: err },
       )
