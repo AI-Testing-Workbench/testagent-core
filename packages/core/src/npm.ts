@@ -9,7 +9,10 @@ import { Global } from "./global"
 import { EffectFlock } from "./util/effect-flock"
 import { makeRuntime } from "./effect/runtime"
 import { NpmConfig } from "./npm-config"
+import * as Log from "@opencode-ai/core/util/log"
 
+
+const log =  Log.create({ service: "npm-service" })
 export class InstallFailedError extends Schema.TaggedErrorClass<InstallFailedError>()("NpmInstallFailedError", {
   add: Schema.Array(Schema.String).pipe(Schema.optional),
   dir: Schema.String,
@@ -83,6 +86,7 @@ export const layer = Layer.effect(
         const npmOptions = yield* NpmConfig.load(input.dir)
         // testagent_change start - use internal npm registry
         const registry = process.env.NPM_REGISTRY || "http://central.jaf.cmbchina.cn:80/artifactory/api/npm/group-npm"
+        log.info('current registry',{registry})
         // testagent_change end
         const arborist = new Arborist({
           ...npmOptions,

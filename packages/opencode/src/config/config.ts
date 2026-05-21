@@ -652,7 +652,7 @@ export const layer = Layer.effect(
               add: [
                 {
                   name: "@opencode-ai/plugin",
-                  version: InstallationLocal ? "1.4.3" : InstallationVersion, // testagent_change - fixed version for local builds
+                  version: "1.4.3", // testagent_change - always use fixed version 1.4.3
                 },
               ],
             })
