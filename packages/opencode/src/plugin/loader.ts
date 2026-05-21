@@ -54,6 +54,10 @@ export namespace PluginLoader {
       error: unknown,
       resolved?: Resolved,
     ) => void
+    // testagent_change start - add success callback
+    // Called when a plugin is successfully loaded.
+    success?: (candidate: Candidate, retry: boolean, loaded: Loaded) => void
+    // testagent_change end
   }
 
   // Normalize a config item into the loader's internal representation.
@@ -165,6 +169,10 @@ export namespace PluginLoader {
       report?.error?.(candidate, retry, "load", loaded.error, resolved.value)
       return
     }
+
+    // testagent_change start - report success
+    report?.success?.(candidate, retry, loaded.value)
+    // testagent_change end
 
     // The default behavior is to return the successfully loaded plugin as-is, but callers can
     // provide a finisher to adapt the result into a more specific runtime shape.

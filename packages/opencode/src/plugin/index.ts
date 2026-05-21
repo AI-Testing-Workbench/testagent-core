@@ -176,6 +176,14 @@ export const layer = Layer.effect(
         if (Flag.OPENCODE_PURE && cfg.plugin_origins?.length) {
           log.info("skipping external plugins in pure mode", { count: cfg.plugin_origins.length })
         }
+
+        // testagent_change start - track plugin loading results
+        const pluginResults = {
+          success: [] as string[],
+          failed: [] as { spec: string; error: string }[],
+        }
+        // testagent_change end
+
         if (plugins.length) {
           // testagent_change start - notify plugin installation start
           const message = `正在安装 ${plugins.length} 个插件...`
@@ -206,11 +214,18 @@ export const layer = Layer.effect(
               },
               missing(candidate, _retry, message) {
                 log.warn("plugin has no server entrypoint", { path: candidate.plan.spec, message })
+                // testagent_change start - track missing plugin
+                pluginResults.failed.push({ spec: candidate.plan.spec, error: message })
+                // testagent_change end
               },
               error(candidate, _retry, stage, error, resolved) {
                 const spec = candidate.plan.spec
                 const cause = error instanceof Error ? (error.cause ?? error) : error
                 const message = stage === "load" ? errorMessage(error) : errorMessage(cause)
+
+                // testagent_change start - track failed plugin
+                pluginResults.failed.push({ spec, error: message })
+                // testagent_change end
 
                 if (stage === "install") {
                   const parsed = parsePluginSpecifier(spec)
@@ -234,14 +249,32 @@ export const layer = Layer.effect(
                 log.error("failed to load plugin", { path: spec, target: resolved?.entry, error: message })
                 publishPluginError(`Failed to load plugin ${spec}: ${message}`)
               },
+              success(candidate) {
+                // testagent_change start - track successful plugin
+                pluginResults.success.push(candidate.plan.spec)
+                // testagent_change end
+                log.info("plugin loaded successfully", { path: candidate.plan.spec })
+              },
             },
           }),
         )
         
-        // testagent_change start - notify all plugins loaded
+        // testagent_change start - notify all plugins loaded with detailed results
         if (plugins.length) {
-          const successCount = loaded.filter((l) => l !== null).length
-          const message = `插件加载完成: ${successCount}/${plugins.length} 个插件已加载`
+          // Build detailed message with plugin names
+          const successMsg = pluginResults.success.length > 0 
+            ? `✅ 成功: ${pluginResults.success.join(", ")}`
+            : ""
+          const failedMsg = pluginResults.failed.length > 0 
+            ? `❌ 失败: ${pluginResults.failed.map(f => f.spec).join(", ")}`
+            : ""
+          
+          const message = [
+            "插件加载完成:",
+            successMsg,
+            failedMsg,
+          ].filter(Boolean).join("\n")
+          
           if (isVSCodeEnvironment()) {
             notifyVSCode("info", message)
           } else {
