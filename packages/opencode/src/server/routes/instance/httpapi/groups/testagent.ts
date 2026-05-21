@@ -9,7 +9,7 @@ export const TestagentUserPayload = Schema.Struct({
 })
 
 export const TestagentPaths = {
-  userSet: "/kilocode/testagent/user",
+  userSet: "/testagent/user",
 } as const
 
 export const TestagentApi = HttpApi.make("testagent").add(
