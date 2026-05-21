@@ -60,7 +60,7 @@ let write = (msg: any) => {
 }
 
 export async function init(options: Options) {
-  if (options.level) level = options.level
+   if (options.level) level = options.level
   void cleanup(Global.Path.log)
   if (options.print) return
   logpath = path.join(
@@ -80,6 +80,7 @@ export async function init(options: Options) {
 }
 
 async function cleanup(dir: string) {
+  // testagent_change start - update pattern to match new filename format
   const files = (
     await Glob.scan("????-??-??T??????.log", {
       cwd: dir,
@@ -87,6 +88,7 @@ async function cleanup(dir: string) {
       include: "file",
     }).catch(() => [])
   )
+  // testagent_change end
     .filter((file) => path.basename(file) === file)
     .sort()
   if (files.length <= keep) return
@@ -127,10 +129,17 @@ export function create(tags?: Record<string, any>) {
         return prefix + value
       })
       .join(" ")
+    // testagent_change start - use China timezone (UTC+8) with readable format for log timestamp
     const next = new Date()
+    const chinaTime = new Date(next.getTime() + 8 * 60 * 60 * 1000)
+    const isoString = chinaTime.toISOString()
+    const [date, time] = isoString.split("T")
+    const timeWithoutMs = time.split(".")[0]
+    const timestamp = `${date} ${timeWithoutMs}`
+    // testagent_change end
     const diff = next.getTime() - last
     last = next.getTime()
-    return [next.toISOString().split(".")[0], "+" + diff + "ms", prefix, message].filter(Boolean).join(" ") + "\n"
+    return [timestamp, "+" + diff + "ms", prefix, message].filter(Boolean).join(" ") + "\n"
   }
   const result: Logger = {
     debug(message?: any, extra?: Record<string, any>) {

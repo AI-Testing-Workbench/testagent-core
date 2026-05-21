@@ -1370,7 +1370,8 @@ const layer: Layer.Layer<
           if (disabled.has(providerID)) continue
           const data = database[providerID]
           if (!data) {
-            log.error("Provider does not exist in model list " + providerID)
+            // testagent_change - downgrade to debug, not a real error in testagent
+            log.debug("Provider does not exist in model list " + providerID)
             continue
           }
           const result = yield* fn(data)
