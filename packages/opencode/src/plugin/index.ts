@@ -37,6 +37,10 @@ function isVSCodeEnvironment(): boolean {
   // return process.env.KILO_CLIENT === "vscode"
 }
 
+// Track if we've already shown the plugin notification to avoid duplicate notifications
+// when multiple instances are created (e.g., on session creation)
+let hasShownPluginNotification = false
+
 function notifyVSCode(type: "info" | "error", message: string) {
   // Output JSON to stderr with special prefix for VS Code extension to parse
   const notification = JSON.stringify({ type: "plugin-notification", level: type, message })
@@ -128,6 +132,14 @@ export const layer = Layer.effect(
 
     const state = yield* InstanceState.make<State>(
       Effect.fn("Plugin.state")(function* (ctx) {
+        // testagent_change start - log directory to understand multiple initializations
+        log.info("Plugin.state initializing", { 
+          directory: ctx.directory,
+          worktree: ctx.worktree,
+          projectId: ctx.project.id 
+        })
+        // testagent_change end
+        
         const hooks: Hooks[] = []
         const bridge = yield* EffectBridge.make()
 
@@ -261,24 +273,35 @@ export const layer = Layer.effect(
         
         // testagent_change start - notify all plugins loaded with detailed results
         if (plugins.length) {
-          // Build detailed message with plugin names
-          const successMsg = pluginResults.success.length > 0 
-            ? `✅ 成功: ${pluginResults.success.join(", ")}`
-            : ""
-          const failedMsg = pluginResults.failed.length > 0 
-            ? `❌ 失败: ${pluginResults.failed.map(f => f.spec).join(", ")}`
-            : ""
-          
-          const message = [
-            "插件加载完成:",
-            successMsg,
-            failedMsg,
-          ].filter(Boolean).join("\n")
-          
-          if (isVSCodeEnvironment()) {
-            notifyVSCode("info", message)
+          // Only show notification on first load to avoid duplicate notifications
+          // when multiple instances are created (e.g., on session creation)
+          if (!hasShownPluginNotification) {
+            hasShownPluginNotification = true
+            
+            // Build detailed message with plugin names
+            const successMsg = pluginResults.success.length > 0 
+              ? `✅ 成功: ${pluginResults.success.join(", ")}`
+              : ""
+            const failedMsg = pluginResults.failed.length > 0 
+              ? `❌ 失败: ${pluginResults.failed.map(f => f.spec).join(", ")}`
+              : ""
+            
+            const message = [
+              "插件加载完成:",
+              successMsg,
+              failedMsg,
+            ].filter(Boolean).join("\n")
+            
+            if (isVSCodeEnvironment()) {
+              notifyVSCode("info", message)
+            } else {
+              log.info(message)
+            }
           } else {
-            log.info(message)
+            log.debug("skipping duplicate plugin notification", { 
+              directory: ctx.directory,
+              pluginCount: plugins.length 
+            })
           }
         }
         // testagent_change end

@@ -872,10 +872,17 @@ export const layer = Layer.effect(
         if (changed) yield* fs.writeFileString(file, updated).pipe(Effect.orDie)
       }
 
-      // testagent_change start: Always invalidate cache, even if config didn't change
-      // This is needed when marketplace items are removed from config files externally
-      // and we need to force a cache refresh without actually changing the config
-      yield* invalidate()
+      // testagent_change start: Only invalidate cache when config actually changed
+      // This prevents unnecessary cache invalidation and service restarts when config hasn't changed.
+      // Previously, we always invalidated cache even when config was unchanged, which caused
+      // cascading failures: config invalidate → all InstanceState caches cleared → 
+      // Command/Skill/Plugin re-initialized → potential circular dependency → service restart.
+      if (changed) {
+        log.info("config changed, invalidating cache")
+        yield* invalidate()
+      } else {
+        log.debug("config unchanged, skipping cache invalidation")
+      }
       // testagent_change end
       return { info: next, changed }
     })

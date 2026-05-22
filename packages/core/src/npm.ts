@@ -84,10 +84,29 @@ export const layer = Layer.effect(
         const { Arborist } = yield* Effect.promise(() => import("@npmcli/arborist"))
         const add = input.add ?? []
         const npmOptions = yield* NpmConfig.load(input.dir)
-        // testagent_change start - use internal npm registry
-        const registry = process.env.NPM_REGISTRY || "http://central.jaf.cmbchina.cn:80/artifactory/api/npm/group-npm"
-        log.info('current registry',{registry})
+        
+        // testagent_change start - use registry from npm config or env or fallback
+        // Priority: 1. npm config (.npmrc) 2. NPM_REGISTRY env 3. internal registry
+        const configRegistry = typeof npmOptions.registry === "string" ? npmOptions.registry : undefined
+        const envRegistry = process.env.NPM_REGISTRY
+        const fallbackRegistry = "http://central.jaf.cmbchina.cn:80/artifactory/api/npm/group-npm"
+        
+        const registry = configRegistry || envRegistry || fallbackRegistry
+        
+        log.info('npm registry selection', {
+          selected: registry,
+          source: configRegistry ? 'npm-config' : envRegistry ? 'env' : 'fallback',
+          configRegistry,
+          envRegistry,
+          fallbackRegistry,
+          npmOptionsKeys: Object.keys(npmOptions),
+          dir: input.dir
+        })
+        
+        // Log full npm config for debugging (only in debug mode)
+        log.debug('full npm config', { npmOptions })
         // testagent_change end
+        
         const arborist = new Arborist({
           ...npmOptions,
           path: input.dir,
