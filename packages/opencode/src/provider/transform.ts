@@ -1048,6 +1048,12 @@ export function options(input: {
 }): Record<string, any> {
   const result: Record<string, any> = {}
 
+  // testagent_change start - inject user ID set dynamically by VS Code extension
+  const user = User.get()
+  if (user.id) result["user"] = user.id
+  result["tags"] = ["test-design"]
+  // testagent_change end
+  
   if (
     input.model.api.npm === "@ai-sdk/google-vertex/anthropic" ||
     (!input.model.api.id.includes("claude") && input.model.api.npm === "@ai-sdk/anthropic")
