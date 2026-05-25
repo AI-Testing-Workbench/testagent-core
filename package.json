@@ -19,9 +19,14 @@
     "random": "echo 'Random script'",
     "hello": "echo 'Hello World!'",
     "test": "echo 'do not run tests from root' && exit 1",
+    "bun:linux": "cross-env OPENCODE_CHANNEL=latest bun packages/opencode/script/build.ts --target=linux-x64 --skip-models",
+    "bun:linux-arm64": "cross-env OPENCODE_CHANNEL=latest bun packages/opencode/script/build.ts --target=linux-arm64 --skip-models",
+    "bun:alpine": "cross-env OPENCODE_CHANNEL=latest bun packages/opencode/script/build.ts --target=linux-x64-musl --skip-models",
+    "bun:alpine-arm64": "cross-env OPENCODE_CHANNEL=latest bun packages/opencode/script/build.ts --target=linux-arm64-musl --skip-models",
+    "bun:mac": "cross-env OPENCODE_CHANNEL=latest bun packages/opencode/script/build.ts --target=darwin-x64 --skip-models",
+    "bun:mac-arm64": "cross-env OPENCODE_CHANNEL=latest bun packages/opencode/script/build.ts --target=darwin-arm64 --skip-models",
     "bun:windows": "cross-env OPENCODE_CHANNEL=latest bun packages/opencode/script/build.ts --target=win32-x64-baseline --skip-models && mkdir -p ../kilo-vscode/bin/ &&  cp packages/opencode/dist/testagent-windows-x64-baseline/bin/testagent.exe ../kilo-vscode/bin/testagent.exe",
-    "bun:mac": "cross-env OPENCODE_CHANNEL=latest bun packages/opencode/script/build.ts --target=darwin-x64 --skip-models  && mkdir -p ../kilo-vscode/bin/ &&  cp packages/opencode/dist/testagent-darwin-x64/bin/testagent ../kilo-vscode/bin/testagent",
-    "bun:linux":"cross-env OPENCODE_CHANNEL=latest bun packages/opencode/script/build.ts --target=linux-x64 --skip-models"
+    "bun:windows-arm64": "cross-env OPENCODE_CHANNEL=latest bun packages/opencode/script/build.ts --target=win32-arm64 --skip-models"
   },
   "workspaces": {
     "packages": [
