@@ -679,13 +679,54 @@ export const layer: Layer.Layer<
           yield* Effect.gen(function* () {
             ctx.currentText = undefined
             ctx.reasoningMap = {}
+            
+            // testagent_change start - Add stream timing logs
+            const streamStartTime = Date.now()
+            let eventCount = 0
+            let firstEventTime: number | undefined
+            slog.info("📡 Starting LLM stream", {
+              sessionID: streamInput.sessionID,
+              modelID: streamInput.model.id,
+              providerID: streamInput.model.providerID,
+            })
+            // testagent_change end
+            
             const stream = llm.stream(streamInput)
 
             yield* stream.pipe(
-              Stream.tap((event) => handleEvent(event)),
+              Stream.tap((event) => {
+                // testagent_change start - Log first event and periodic updates
+                eventCount++
+                if (!firstEventTime) {
+                  firstEventTime = Date.now()
+                  const ttfb = firstEventTime - streamStartTime
+                  slog.info("⚡ First event received (TTFB)", {
+                    ttfb: `${ttfb}ms`,
+                    eventType: event.type,
+                  })
+                }
+                if (eventCount % 50 === 0) {
+                  slog.info("📊 Stream progress", {
+                    eventCount,
+                    elapsed: `${Date.now() - streamStartTime}ms`,
+                  })
+                }
+                // testagent_change end
+                
+                return handleEvent(event)
+              }),
               Stream.takeUntil(() => ctx.needsCompaction),
               Stream.runDrain,
             )
+            
+            // testagent_change start - Log stream completion
+            const totalElapsed = Date.now() - streamStartTime
+            slog.info("✅ Stream completed", {
+              totalEvents: eventCount,
+              totalElapsed: `${totalElapsed}ms`,
+              avgEventTime: eventCount > 0 ? `${(totalElapsed / eventCount).toFixed(2)}ms` : "N/A",
+            })
+            // testagent_change end
           }).pipe(
             Effect.onInterrupt(() =>
               Effect.gen(function* () {

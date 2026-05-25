@@ -1672,11 +1672,36 @@ const layer: Layer.Layer<
             }
           }
 
+          // testagent_change start - Add detailed HTTP request logging
+          const url = typeof input === "string" ? input : (input instanceof URL ? input.href : input?.url)
+          log.info("🚀 HTTP Request to LLM", {
+            providerID: model.providerID,
+            modelID: model.id,
+            url,
+            method: opts.method || "GET",
+            hasBody: !!opts.body,
+            bodySize: opts.body ? (typeof opts.body === "string" ? opts.body.length : "binary") : 0,
+          })
+          const startTime = Date.now()
+          // testagent_change end
+
           const res = await fetchFn(input, {
             ...opts,
             // @ts-ignore see here: https://github.com/oven-sh/bun/issues/16682
             timeout: false,
           })
+
+          // testagent_change start - Add detailed HTTP response logging
+          const elapsed = Date.now() - startTime
+          log.info("✅ HTTP Response from LLM", {
+            providerID: model.providerID,
+            modelID: model.id,
+            status: res.status,
+            statusText: res.statusText,
+            elapsed: `${elapsed}ms`,
+            contentType: res.headers.get("content-type"),
+          })
+          // testagent_change end
 
           if (!chunkAbortCtl) return res
           return wrapSSE(res, chunkTimeout, chunkAbortCtl)
