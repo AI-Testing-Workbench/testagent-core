@@ -8,6 +8,7 @@ import { containsPath, type InstanceContext } from "../project/instance-context"
 import { InstanceState } from "@/effect/instance-state"
 import { lazy } from "@/util/lazy"
 import { Language, type Node } from "web-tree-sitter"
+
 // testagent_change: Import iconv-lite for GBK encoding support on Windows
 import iconv from "iconv-lite"
 
@@ -29,6 +30,7 @@ export { Parameters } from "./shell/prompt"
 
 const MAX_METADATA_LENGTH = 30_000
 const DEFAULT_TIMEOUT = Flag.OPENCODE_EXPERIMENTAL_BASH_DEFAULT_TIMEOUT_MS || 2 * 60 * 1000
+const BGR_TIMEOUT = 15_000
 const CWD = new Set(["cd", "chdir", "popd", "pushd", "push-location", "set-location"])
 const FILES = new Set([
   ...CWD,
@@ -519,6 +521,7 @@ export const ShellTool = Tool.define(
         env: NodeJS.ProcessEnv
         timeout: number
         description: string
+        background: boolean
       },
       ctx: Tool.Context,
     ) {
@@ -621,7 +624,9 @@ export const ShellTool = Tool.define(
           }
           if (exit.kind === "timeout") {
             expired = true
-            yield* handle.kill({ forceKillAfter: "3 seconds" }).pipe(Effect.orDie)
+            if (!input.background) {
+              yield* handle.kill({ forceKillAfter: "3 seconds" }).pipe(Effect.orDie)
+            }
           }
 
           return exit.kind === "exit" ? exit.code : null
@@ -631,7 +636,9 @@ export const ShellTool = Tool.define(
       const meta: string[] = []
       if (expired) {
         meta.push(
-          `shell tool terminated command after exceeding timeout ${input.timeout} ms. If this command is expected to take longer and is not waiting for interactive input, retry with a larger timeout value in milliseconds.`,
+          input.background
+            ? `shell tool captured initial output (${input.timeout} ms) and detached from the process. The command may still be running in the background.`
+            : `shell tool terminated command after exceeding timeout ${input.timeout} ms. If this command is expected to take longer and is not waiting for interactive input, retry with a larger timeout value in milliseconds.`,
         )
       }
       if (aborted) meta.push("User aborted the command")
@@ -671,6 +678,7 @@ export const ShellTool = Tool.define(
           description: input.description,
           truncated: cut,
           ...(cut && file ? { outputPath: file } : {}),
+          ...(input.background ? { background: true } : {}),
         },
         output,
       }
@@ -697,7 +705,7 @@ export const ShellTool = Tool.define(
               if (params.timeout !== undefined && params.timeout < 0) {
                 throw new Error(`Invalid timeout value: ${params.timeout}. Timeout must be a positive number.`)
               }
-              const timeout = params.timeout ?? DEFAULT_TIMEOUT
+              const timeout = params.timeout ?? (params.background ? BGR_TIMEOUT : DEFAULT_TIMEOUT)
               const ps = Shell.ps(shell)
               yield* Effect.scoped(
                 Effect.gen(function* () {
@@ -718,6 +726,7 @@ export const ShellTool = Tool.define(
                   env: yield* shellEnv(ctx, cwd),
                   timeout,
                   description: params.description,
+                  background: params.background ?? false,
                 },
                 ctx,
               )

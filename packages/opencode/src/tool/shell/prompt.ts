@@ -26,6 +26,10 @@ export function parameterSchema(description: string) {
     workdir: Schema.optional(Schema.String).annotate({
       description: `The working directory to run the command in. Defaults to the current directory. Use this instead of 'cd' commands.`,
     }),
+    background: Schema.optional(Schema.Boolean).annotate({
+      description:
+        "Set to true for commands that never exit (launching browsers, dev servers, watchers). The tool captures initial output then returns without waiting for the process to exit.",
+    }),
     description: Schema.String.annotate({ description }),
   })
 }
@@ -57,7 +61,8 @@ function powershellNotes(name: string) {
 - Use \`$(...)\` for subexpressions. Use \`@(...)\` for array expressions.
 - To call a native executable whose path contains spaces, use the call operator: \`& "path/to/exe" args\`.
 - Escape special characters with the PowerShell backtick character.
-- testagent_change: When writing files with non-ASCII content (Chinese, etc.), always specify \`-Encoding UTF8\` parameter for cmdlets like \`Add-Content\`, \`Set-Content\`, \`Out-File\` to avoid encoding issues. Example: \`Add-Content -Path "file.txt" -Value "内容" -Encoding UTF8\``
+- testagent_change: When writing files with non-ASCII content (Chinese, etc.), always specify \`-Encoding UTF8\` parameter for cmdlets like \`Add-Content\`, \`Set-Content\`, \`Out-File\` to avoid encoding issues. Example: \`Add-Content -Path "file.txt" -Value "内容" -Encoding UTF8\`
+- **Blocking commands**: For commands that launch browsers, servers, or watchers that never exit, set \`background: true\` to capture initial output and return without waiting. As a fallback, use \`Start-Process -NoNewWindow\` or a short \`timeout\`. Example with background: \`playwright-cli open --browser msedge --headed https://example.com\` + \`background: true\``
   }
   if (name === "powershell") {
     return `# Windows PowerShell (5.1) shell notes
@@ -67,7 +72,8 @@ function powershellNotes(name: string) {
 - Use \`$(...)\` for subexpressions. Use \`@(...)\` for array expressions.
 - To call a native executable whose path contains spaces, use the call operator: \`& "path/to/exe" args\`.
 - Escape special characters with the PowerShell backtick character.
-- testagent_change: When writing files with non-ASCII content (Chinese, etc.), always specify \`-Encoding UTF8\` parameter for cmdlets like \`Add-Content\`, \`Set-Content\`, \`Out-File\` to avoid encoding issues. Example: \`Add-Content -Path "file.txt" -Value "内容" -Encoding UTF8\``
+- testagent_change: When writing files with non-ASCII content (Chinese, etc.), always specify \`-Encoding UTF8\` parameter for cmdlets like \`Add-Content\`, \`Set-Content\`, \`Out-File\` to avoid encoding issues. Example: \`Add-Content -Path "file.txt" -Value "内容" -Encoding UTF8\`
+- **Blocking commands**: For commands that launch browsers, servers, or watchers that never exit, set \`background: true\` to capture initial output and return without waiting. As a fallback, use \`Start-Process -NoNewWindow\` or a short \`timeout\`. Example with background: \`playwright-cli open --browser msedge --headed https://example.com\` + \`background: true\``
   }
   return ""
 }
@@ -105,6 +111,7 @@ function bashCommandSection(chain: string, limits: Limits) {
 Usage notes:
   - The command argument is required.
   - You can specify an optional timeout in milliseconds. If not specified, commands will time out after 120000ms (2 minutes).
+  - **Watch out for commands that never exit** — launching browsers (\`open\`, \`start\`, \`playwright-cli open --headed\`), starting dev servers (\`npm run dev\`, \`bun --watch\`), or running watchers stay alive until killed. Use \`background: true\` to capture their initial output and return without waiting. You can also set a short \`timeout\` or run in background (append \`&\` or \`nohup\`).
   - It is very helpful if you write a clear, concise description of what this command does in 5-10 words.
   - If the output exceeds ${limits.maxLines} lines or ${limits.maxBytes} bytes, it will be truncated and the full output will be written to a file. You can use Read with offset/limit to read specific sections or Grep to search the full content. Do NOT use \`head\`, \`tail\`, or other truncation commands to limit output; the full output will already be captured to a file for more precise searching.
 
@@ -151,6 +158,7 @@ Before executing the command, please follow these steps:
 Usage notes:
   - The command argument is required.
   - You can specify an optional timeout in milliseconds. If not specified, commands will time out after 120000ms (2 minutes).
+  - **Watch out for commands that never exit** — launching browsers (\`playwright-cli open --headed\`, \`start http://...\`), starting dev servers (\`npm run dev\`, \`bun --watch\`), or running watchers stay alive until killed. Use \`background: true\` to capture their initial output and return without waiting. You can also set a short \`timeout\` or use \`Start-Process -NoNewWindow\`.
   - It is very helpful if you write a clear, concise description of what this command does in 5-10 words.
   - If the output exceeds ${limits.maxLines} lines or ${limits.maxBytes} bytes, it will be truncated and the full output will be written to a file. You can use Read with offset/limit to read specific sections or Grep to search the full content. Do NOT use \`Select-Object -First\`, \`Select-Object -Last\`, or other truncation commands to limit output; the full output will already be captured to a file for more precise searching.
 
@@ -201,6 +209,7 @@ Before executing the command, please follow these steps:
 Usage notes:
   - The command argument is required.
   - You can specify an optional timeout in milliseconds. If not specified, commands will time out after 120000ms (2 minutes).
+  - **Watch out for commands that never exit** — launching browsers (\`start http://...\`), starting dev servers, or running watchers stay alive until killed. Use \`background: true\` to capture their initial output and return without waiting. You can also set a short \`timeout\` or use \`start /B\`.
   - It is very helpful if you write a clear, concise description of what this command does in 5-10 words.
   - If the output exceeds ${limits.maxLines} lines or ${limits.maxBytes} bytes, it will be truncated and the full output will be written to a file. You can use Read with offset/limit to read specific sections or Grep to search the full content. Do NOT use \`more\` or other pagination commands to limit output; the full output will already be captured to a file for more precise searching.
 
