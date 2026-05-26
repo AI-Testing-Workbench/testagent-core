@@ -5,6 +5,12 @@ export type ClientOptions = {
 }
 
 export type Event =
+  | EventTuiPromptAppend
+  | EventTuiCommandExecute
+  | EventTuiToastShow1
+  | EventTuiSessionSelect
+  | EventServerConnected
+  | EventGlobalDisposed
   | EventServerInstanceDisposed
   | EventFileEdited
   | EventFileWatcherUpdated
@@ -15,8 +21,6 @@ export type Event =
   | EventPermissionReplied
   | EventSessionDiff
   | EventSessionError
-  | EventInstallationUpdated
-  | EventInstallationUpdateAvailable
   | EventQuestionAsked
   | EventQuestionReplied
   | EventQuestionRejected
@@ -24,10 +28,6 @@ export type Event =
   | EventSessionStatus
   | EventSessionIdle
   | EventSessionCompacted
-  | EventTuiPromptAppend
-  | EventTuiCommandExecute
-  | EventTuiToastShow1
-  | EventTuiSessionSelect
   | EventMcpToolsChanged
   | EventMcpBrowserOpenFailed
   | EventCommandExecuted
@@ -42,6 +42,8 @@ export type Event =
   | EventPtyUpdated
   | EventPtyExited
   | EventPtyDeleted
+  | EventInstallationUpdated
+  | EventInstallationUpdateAvailable
   | EventMessageUpdated
   | EventMessageRemoved
   | EventMessagePartUpdated
@@ -75,8 +77,6 @@ export type Event =
   | EventSessionNextCompactionStarted
   | EventSessionNextCompactionDelta
   | EventSessionNextCompactionEnded
-  | EventServerConnected
-  | EventGlobalDisposed
 
 export type OAuth = {
   type: "oauth"
@@ -102,6 +102,61 @@ export type WellKnownAuth = {
 }
 
 export type Auth = OAuth | ApiAuth | WellKnownAuth
+
+export type EventTuiPromptAppend = {
+  id: string
+  type: "tui.prompt.append"
+  properties: {
+    text: string
+  }
+}
+
+export type EventTuiCommandExecute = {
+  id: string
+  type: "tui.command.execute"
+  properties: {
+    command:
+      | "session.list"
+      | "session.new"
+      | "session.share"
+      | "session.interrupt"
+      | "session.compact"
+      | "session.page.up"
+      | "session.page.down"
+      | "session.line.up"
+      | "session.line.down"
+      | "session.half.page.up"
+      | "session.half.page.down"
+      | "session.first"
+      | "session.last"
+      | "prompt.clear"
+      | "prompt.submit"
+      | "agent.cycle"
+      | string
+  }
+}
+
+export type EventTuiToastShow = {
+  id: string
+  type: "tui.toast.show"
+  properties: {
+    title?: string
+    message: string
+    variant: "info" | "success" | "warning" | "error"
+    duration?: number
+  }
+}
+
+export type EventTuiSessionSelect = {
+  id: string
+  type: "tui.session.select"
+  properties: {
+    /**
+     * Session ID to navigate to
+     */
+    sessionID: string
+  }
+}
 
 export type PermissionRequest = {
   id: string
@@ -280,61 +335,6 @@ export type SessionStatus =
       type: "busy"
     }
 
-export type EventTuiPromptAppend = {
-  id: string
-  type: "tui.prompt.append"
-  properties: {
-    text: string
-  }
-}
-
-export type EventTuiCommandExecute = {
-  id: string
-  type: "tui.command.execute"
-  properties: {
-    command:
-      | "session.list"
-      | "session.new"
-      | "session.share"
-      | "session.interrupt"
-      | "session.compact"
-      | "session.page.up"
-      | "session.page.down"
-      | "session.line.up"
-      | "session.line.down"
-      | "session.half.page.up"
-      | "session.half.page.down"
-      | "session.first"
-      | "session.last"
-      | "prompt.clear"
-      | "prompt.submit"
-      | "agent.cycle"
-      | string
-  }
-}
-
-export type EventTuiToastShow = {
-  id: string
-  type: "tui.toast.show"
-  properties: {
-    title?: string
-    message: string
-    variant: "info" | "success" | "warning" | "error"
-    duration?: number
-  }
-}
-
-export type EventTuiSessionSelect = {
-  id: string
-  type: "tui.session.select"
-  properties: {
-    /**
-     * Session ID to navigate to
-     */
-    sessionID: string
-  }
-}
-
 export type Project = {
   id: string
   worktree: string
@@ -385,6 +385,13 @@ export type OutputFormatJsonSchema = {
 
 export type OutputFormat = OutputFormatText | OutputFormatJsonSchema
 
+export type EditorContext = {
+  visibleFiles?: Array<string>
+  openTabs?: Array<string>
+  activeFile?: string
+  shell?: string
+}
+
 export type UserMessage = {
   id: string
   sessionID: string
@@ -408,6 +415,7 @@ export type UserMessage = {
   tools?: {
     [key: string]: boolean
   }
+  editorContext?: EditorContext
 }
 
 export type AssistantMessage = {
@@ -778,6 +786,12 @@ export type GlobalEvent = {
   project?: string
   workspace?: string
   payload:
+    | EventTuiPromptAppend
+    | EventTuiCommandExecute
+    | EventTuiToastShow
+    | EventTuiSessionSelect
+    | EventServerConnected
+    | EventGlobalDisposed
     | EventServerInstanceDisposed
     | EventFileEdited
     | EventFileWatcherUpdated
@@ -788,8 +802,6 @@ export type GlobalEvent = {
     | EventPermissionReplied
     | EventSessionDiff
     | EventSessionError
-    | EventInstallationUpdated
-    | EventInstallationUpdateAvailable
     | EventQuestionAsked
     | EventQuestionReplied
     | EventQuestionRejected
@@ -797,10 +809,6 @@ export type GlobalEvent = {
     | EventSessionStatus
     | EventSessionIdle
     | EventSessionCompacted
-    | EventTuiPromptAppend
-    | EventTuiCommandExecute
-    | EventTuiToastShow
-    | EventTuiSessionSelect
     | EventMcpToolsChanged
     | EventMcpBrowserOpenFailed
     | EventCommandExecuted
@@ -815,6 +823,8 @@ export type GlobalEvent = {
     | EventPtyUpdated
     | EventPtyExited
     | EventPtyDeleted
+    | EventInstallationUpdated
+    | EventInstallationUpdateAvailable
     | EventMessageUpdated
     | EventMessageRemoved
     | EventMessagePartUpdated
@@ -848,8 +858,6 @@ export type GlobalEvent = {
     | EventSessionNextCompactionStarted
     | EventSessionNextCompactionDelta
     | EventSessionNextCompactionEnded
-    | EventServerConnected
-    | EventGlobalDisposed
     | SyncEventMessageUpdated
     | SyncEventMessageRemoved
     | SyncEventMessagePartUpdated
@@ -1051,9 +1059,9 @@ export type ProviderConfig = {
         }
       }
       limit?: {
-        context: number
+        context?: number
         input?: number
-        output: number
+        output?: number
       }
       modalities?: {
         input: Array<"text" | "audio" | "image" | "video" | "pdf">
@@ -1395,6 +1403,20 @@ export type WorktreeRemoveInput = {
 
 export type WorktreeResetInput = {
   directory: string
+}
+
+export type WorktreeDiffItem = {
+  file: string
+  patch: string
+  before: string
+  after: string
+  additions: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+  deletions: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+  status?: "added" | "deleted" | "modified"
+  tracked: boolean
+  generatedLike: boolean
+  summarized: boolean
+  stamp: string
 }
 
 export type ProjectSummary = {
@@ -2318,6 +2340,22 @@ export type SyncEventSessionNextCompactionEnded = {
   }
 }
 
+export type EventServerConnected = {
+  id: string
+  type: "server.connected"
+  properties: {
+    [key: string]: unknown
+  }
+}
+
+export type EventGlobalDisposed = {
+  id: string
+  type: "global.disposed"
+  properties: {
+    [key: string]: unknown
+  }
+}
+
 export type EventServerInstanceDisposed = {
   id: string
   type: "server.instance.disposed"
@@ -2410,22 +2448,6 @@ export type EventSessionError = {
       | StructuredOutputError
       | ContextOverflowError
       | ApiError
-  }
-}
-
-export type EventInstallationUpdated = {
-  id: string
-  type: "installation.updated"
-  properties: {
-    version: string
-  }
-}
-
-export type EventInstallationUpdateAvailable = {
-  id: string
-  type: "installation.update-available"
-  properties: {
-    version: string
   }
 }
 
@@ -2595,6 +2617,22 @@ export type EventPtyDeleted = {
   type: "pty.deleted"
   properties: {
     id: string
+  }
+}
+
+export type EventInstallationUpdated = {
+  id: string
+  type: "installation.updated"
+  properties: {
+    version: string
+  }
+}
+
+export type EventInstallationUpdateAvailable = {
+  id: string
+  type: "installation.update-available"
+  properties: {
+    version: string
   }
 }
 
@@ -3029,22 +3067,6 @@ export type EventSessionNextCompactionEnded = {
     sessionID: string
     text: string
     include?: string
-  }
-}
-
-export type EventServerConnected = {
-  id: string
-  type: "server.connected"
-  properties: {
-    [key: string]: unknown
-  }
-}
-
-export type EventGlobalDisposed = {
-  id: string
-  type: "global.disposed"
-  properties: {
-    [key: string]: unknown
   }
 }
 
@@ -3516,6 +3538,29 @@ export type GlobalUpgradeResponses = {
 
 export type GlobalUpgradeResponse = GlobalUpgradeResponses[keyof GlobalUpgradeResponses]
 
+export type TestagentUserSetData = {
+  body?: {
+    id?: string
+    name?: string
+    token?: string
+  }
+  path?: never
+  query?: {
+    directory?: string
+    workspace?: string
+  }
+  url: "/testagent/user"
+}
+
+export type TestagentUserSetResponses = {
+  /**
+   * User info set successfully
+   */
+  200: boolean
+}
+
+export type TestagentUserSetResponse = TestagentUserSetResponses[keyof TestagentUserSetResponses]
+
 export type EventSubscribeData = {
   body?: never
   path?: never
@@ -3856,6 +3901,94 @@ export type WorktreeResetResponses = {
 }
 
 export type WorktreeResetResponse = WorktreeResetResponses[keyof WorktreeResetResponses]
+
+export type WorktreeDiffData = {
+  body?: never
+  path?: never
+  query?: {
+    directory?: string
+    workspace?: string
+    base?: string
+  }
+  url: "/experimental/worktree/diff"
+}
+
+export type WorktreeDiffErrors = {
+  /**
+   * Bad request
+   */
+  400: BadRequestError
+}
+
+export type WorktreeDiffError = WorktreeDiffErrors[keyof WorktreeDiffErrors]
+
+export type WorktreeDiffResponses = {
+  /**
+   * File diffs
+   */
+  200: Array<SnapshotFileDiff>
+}
+
+export type WorktreeDiffResponse = WorktreeDiffResponses[keyof WorktreeDiffResponses]
+
+export type WorktreeDiffSummaryData = {
+  body?: never
+  path?: never
+  query?: {
+    directory?: string
+    workspace?: string
+    base?: string
+  }
+  url: "/experimental/worktree/diff/summary"
+}
+
+export type WorktreeDiffSummaryErrors = {
+  /**
+   * Bad request
+   */
+  400: BadRequestError
+}
+
+export type WorktreeDiffSummaryError = WorktreeDiffSummaryErrors[keyof WorktreeDiffSummaryErrors]
+
+export type WorktreeDiffSummaryResponses = {
+  /**
+   * Diff summary items
+   */
+  200: Array<WorktreeDiffItem>
+}
+
+export type WorktreeDiffSummaryResponse = WorktreeDiffSummaryResponses[keyof WorktreeDiffSummaryResponses]
+
+export type WorktreeDiffFileData = {
+  body?: never
+  path?: never
+  query: {
+    directory?: string
+    workspace?: string
+    base?: string
+    file: string
+  }
+  url: "/experimental/worktree/diff/file"
+}
+
+export type WorktreeDiffFileErrors = {
+  /**
+   * Bad request
+   */
+  400: BadRequestError
+}
+
+export type WorktreeDiffFileError = WorktreeDiffFileErrors[keyof WorktreeDiffFileErrors]
+
+export type WorktreeDiffFileResponses = {
+  /**
+   * Diff detail item
+   */
+  200: WorktreeDiffItem
+}
+
+export type WorktreeDiffFileResponse = WorktreeDiffFileResponses[keyof WorktreeDiffFileResponses]
 
 export type ExperimentalSessionListData = {
   body?: never
@@ -4251,6 +4384,48 @@ export type AppSkillsResponses = {
 
 export type AppSkillsResponse = AppSkillsResponses[keyof AppSkillsResponses]
 
+export type AppReloadSkillsData = {
+  body?: never
+  path?: never
+  query?: {
+    directory?: string
+    workspace?: string
+  }
+  url: "/skill/reload"
+}
+
+export type AppReloadSkillsResponses = {
+  /**
+   * Skills reloaded successfully
+   */
+  200: {
+    success: boolean
+  }
+}
+
+export type AppReloadSkillsResponse = AppReloadSkillsResponses[keyof AppReloadSkillsResponses]
+
+export type McpReloadData = {
+  body?: never
+  path?: never
+  query?: {
+    directory?: string
+    workspace?: string
+  }
+  url: "/mcp/reload"
+}
+
+export type McpReloadResponses = {
+  /**
+   * MCP servers reloaded successfully
+   */
+  200: {
+    success: boolean
+  }
+}
+
+export type McpReloadResponse = McpReloadResponses[keyof McpReloadResponses]
+
 export type LspStatusData = {
   body?: never
   path?: never
@@ -4288,6 +4463,38 @@ export type FormatterStatusResponses = {
 }
 
 export type FormatterStatusResponse = FormatterStatusResponses[keyof FormatterStatusResponses]
+
+export type EnhancePromptEnhanceData = {
+  body?: {
+    text: string
+  }
+  path?: never
+  query?: {
+    directory?: string
+    workspace?: string
+  }
+  url: "/enhance-prompt"
+}
+
+export type EnhancePromptEnhanceErrors = {
+  /**
+   * Bad request
+   */
+  400: BadRequestError
+}
+
+export type EnhancePromptEnhanceError = EnhancePromptEnhanceErrors[keyof EnhancePromptEnhanceErrors]
+
+export type EnhancePromptEnhanceResponses = {
+  /**
+   * Enhanced prompt text
+   */
+  200: {
+    text: string
+  }
+}
+
+export type EnhancePromptEnhanceResponse = EnhancePromptEnhanceResponses[keyof EnhancePromptEnhanceResponses]
 
 export type McpStatusData = {
   body?: never
@@ -5453,6 +5660,7 @@ export type SessionPromptData = {
     format?: OutputFormat
     system?: string
     variant?: string
+    editorContext?: EditorContext
     parts: Array<TextPartInput | FilePartInput | AgentPartInput | SubtaskPartInput>
   }
   path: {
@@ -5788,6 +5996,7 @@ export type SessionPromptAsyncData = {
     format?: OutputFormat
     system?: string
     variant?: string
+    editorContext?: EditorContext
     parts: Array<TextPartInput | FilePartInput | AgentPartInput | SubtaskPartInput>
   }
   path: {

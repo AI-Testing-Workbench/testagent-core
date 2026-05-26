@@ -7,6 +7,7 @@ import type {
   AppAgentsResponses,
   AppLogErrors,
   AppLogResponses,
+  AppReloadSkillsResponses,
   AppSkillsResponses,
   Auth as Auth3,
   AuthRemoveErrors,
@@ -19,6 +20,9 @@ import type {
   ConfigProvidersResponses,
   ConfigUpdateErrors,
   ConfigUpdateResponses,
+  EditorContext,
+  EnhancePromptEnhanceErrors,
+  EnhancePromptEnhanceResponses,
   EventSubscribeResponses,
   EventTuiCommandExecute2,
   EventTuiPromptAppend2,
@@ -73,6 +77,7 @@ import type {
   McpConnectResponses,
   McpDisconnectResponses,
   McpLocalConfig,
+  McpReloadResponses,
   McpRemoteConfig,
   McpStatusResponses,
   OutputFormat,
@@ -175,6 +180,7 @@ import type {
   SyncStartResponses,
   SyncStealErrors,
   SyncStealResponses,
+  TestagentUserSetResponses,
   TextPartInput,
   ToolIdsErrors,
   ToolIdsResponses,
@@ -214,6 +220,12 @@ import type {
   WorktreeCreateErrors,
   WorktreeCreateInput,
   WorktreeCreateResponses,
+  WorktreeDiffErrors,
+  WorktreeDiffFileErrors,
+  WorktreeDiffFileResponses,
+  WorktreeDiffResponses,
+  WorktreeDiffSummaryErrors,
+  WorktreeDiffSummaryResponses,
   WorktreeListResponses,
   WorktreeRemoveErrors,
   WorktreeRemoveInput,
@@ -427,6 +439,36 @@ export class App extends HeyApiClient {
       ...params,
     })
   }
+
+  /**
+   * Reload skills
+   *
+   * Invalidate skill cache and reload all skills from disk
+   */
+  public reloadSkills<ThrowOnError extends boolean = false>(
+    parameters?: {
+      directory?: string
+      workspace?: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "query", key: "directory" },
+            { in: "query", key: "workspace" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).post<AppReloadSkillsResponses, unknown, ThrowOnError>({
+      url: "/skill/reload",
+      ...options,
+      ...params,
+    })
+  }
 }
 
 export class Config extends HeyApiClient {
@@ -531,6 +573,56 @@ export class Global extends HeyApiClient {
   private _config?: Config
   get config(): Config {
     return (this._config ??= new Config({ client: this.client }))
+  }
+}
+
+export class User extends HeyApiClient {
+  /**
+   * Set testagent user info
+   *
+   * Set the current testagent user information and optionally save authentication token.
+   */
+  public set<ThrowOnError extends boolean = false>(
+    parameters?: {
+      directory?: string
+      workspace?: string
+      id?: string
+      name?: string
+      token?: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "query", key: "directory" },
+            { in: "query", key: "workspace" },
+            { in: "body", key: "id" },
+            { in: "body", key: "name" },
+            { in: "body", key: "token" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).put<TestagentUserSetResponses, unknown, ThrowOnError>({
+      url: "/testagent/user",
+      ...options,
+      ...params,
+      headers: {
+        "Content-Type": "application/json",
+        ...options?.headers,
+        ...params.headers,
+      },
+    })
+  }
+}
+
+export class Testagent extends HeyApiClient {
+  private _user?: User
+  get user(): User {
+    return (this._user ??= new User({ client: this.client }))
   }
 }
 
@@ -1336,6 +1428,104 @@ export class Worktree extends HeyApiClient {
       },
     })
   }
+
+  /**
+   * Get worktree diff
+   *
+   * Get file diffs for a worktree compared to its base branch. Includes uncommitted changes.
+   */
+  public diff<ThrowOnError extends boolean = false>(
+    parameters?: {
+      directory?: string
+      workspace?: string
+      base?: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "query", key: "directory" },
+            { in: "query", key: "workspace" },
+            { in: "query", key: "base" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).get<WorktreeDiffResponses, WorktreeDiffErrors, ThrowOnError>({
+      url: "/experimental/worktree/diff",
+      ...options,
+      ...params,
+    })
+  }
+
+  /**
+   * Get worktree diff summary
+   *
+   * Get lightweight file diff metadata for a worktree compared to its base branch.
+   */
+  public diffSummary<ThrowOnError extends boolean = false>(
+    parameters?: {
+      directory?: string
+      workspace?: string
+      base?: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "query", key: "directory" },
+            { in: "query", key: "workspace" },
+            { in: "query", key: "base" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).get<WorktreeDiffSummaryResponses, WorktreeDiffSummaryErrors, ThrowOnError>({
+      url: "/experimental/worktree/diff/summary",
+      ...options,
+      ...params,
+    })
+  }
+
+  /**
+   * Get worktree diff detail
+   *
+   * Get full diff contents for one worktree file compared to its base branch.
+   */
+  public diffFile<ThrowOnError extends boolean = false>(
+    parameters: {
+      directory?: string
+      workspace?: string
+      base?: string
+      file: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "query", key: "directory" },
+            { in: "query", key: "workspace" },
+            { in: "query", key: "base" },
+            { in: "query", key: "file" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).get<WorktreeDiffFileResponses, WorktreeDiffFileErrors, ThrowOnError>({
+      url: "/experimental/worktree/diff/file",
+      ...options,
+      ...params,
+    })
+  }
 }
 
 export class Find extends HeyApiClient {
@@ -1802,70 +1992,6 @@ export class Command extends HeyApiClient {
   }
 }
 
-export class Lsp extends HeyApiClient {
-  /**
-   * Get LSP status
-   *
-   * Get LSP server status
-   */
-  public status<ThrowOnError extends boolean = false>(
-    parameters?: {
-      directory?: string
-      workspace?: string
-    },
-    options?: Options<never, ThrowOnError>,
-  ) {
-    const params = buildClientParams(
-      [parameters],
-      [
-        {
-          args: [
-            { in: "query", key: "directory" },
-            { in: "query", key: "workspace" },
-          ],
-        },
-      ],
-    )
-    return (options?.client ?? this.client).get<LspStatusResponses, unknown, ThrowOnError>({
-      url: "/lsp",
-      ...options,
-      ...params,
-    })
-  }
-}
-
-export class Formatter extends HeyApiClient {
-  /**
-   * Get formatter status
-   *
-   * Get formatter status
-   */
-  public status<ThrowOnError extends boolean = false>(
-    parameters?: {
-      directory?: string
-      workspace?: string
-    },
-    options?: Options<never, ThrowOnError>,
-  ) {
-    const params = buildClientParams(
-      [parameters],
-      [
-        {
-          args: [
-            { in: "query", key: "directory" },
-            { in: "query", key: "workspace" },
-          ],
-        },
-      ],
-    )
-    return (options?.client ?? this.client).get<FormatterStatusResponses, unknown, ThrowOnError>({
-      url: "/formatter",
-      ...options,
-      ...params,
-    })
-  }
-}
-
 export class Auth2 extends HeyApiClient {
   /**
    * Remove MCP OAuth
@@ -2007,6 +2133,36 @@ export class Auth2 extends HeyApiClient {
 
 export class Mcp extends HeyApiClient {
   /**
+   * Reload MCP servers
+   *
+   * Reload all MCP servers from config file without restarting CLI
+   */
+  public reload<ThrowOnError extends boolean = false>(
+    parameters?: {
+      directory?: string
+      workspace?: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "query", key: "directory" },
+            { in: "query", key: "workspace" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).post<McpReloadResponses, unknown, ThrowOnError>({
+      url: "/mcp/reload",
+      ...options,
+      ...params,
+    })
+  }
+
+  /**
    * Get MCP status
    *
    * Get the status of all Model Context Protocol (MCP) servers.
@@ -2138,6 +2294,113 @@ export class Mcp extends HeyApiClient {
   private _auth?: Auth2
   get auth(): Auth2 {
     return (this._auth ??= new Auth2({ client: this.client }))
+  }
+}
+
+export class Lsp extends HeyApiClient {
+  /**
+   * Get LSP status
+   *
+   * Get LSP server status
+   */
+  public status<ThrowOnError extends boolean = false>(
+    parameters?: {
+      directory?: string
+      workspace?: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "query", key: "directory" },
+            { in: "query", key: "workspace" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).get<LspStatusResponses, unknown, ThrowOnError>({
+      url: "/lsp",
+      ...options,
+      ...params,
+    })
+  }
+}
+
+export class Formatter extends HeyApiClient {
+  /**
+   * Get formatter status
+   *
+   * Get formatter status
+   */
+  public status<ThrowOnError extends boolean = false>(
+    parameters?: {
+      directory?: string
+      workspace?: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "query", key: "directory" },
+            { in: "query", key: "workspace" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).get<FormatterStatusResponses, unknown, ThrowOnError>({
+      url: "/formatter",
+      ...options,
+      ...params,
+    })
+  }
+}
+
+export class EnhancePrompt extends HeyApiClient {
+  /**
+   * Enhance prompt
+   *
+   * Rewrite a user's draft prompt into a clearer, more specific, and more effective prompt.
+   */
+  public enhance<ThrowOnError extends boolean = false>(
+    parameters?: {
+      directory?: string
+      workspace?: string
+      text?: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "query", key: "directory" },
+            { in: "query", key: "workspace" },
+            { in: "body", key: "text" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).post<
+      EnhancePromptEnhanceResponses,
+      EnhancePromptEnhanceErrors,
+      ThrowOnError
+    >({
+      url: "/enhance-prompt",
+      ...options,
+      ...params,
+      headers: {
+        "Content-Type": "application/json",
+        ...options?.headers,
+        ...params.headers,
+      },
+    })
   }
 }
 
@@ -3336,6 +3599,7 @@ export class Session2 extends HeyApiClient {
       format?: OutputFormat
       system?: string
       variant?: string
+      editorContext?: EditorContext
       parts?: Array<TextPartInput | FilePartInput | AgentPartInput | SubtaskPartInput>
     },
     options?: Options<never, ThrowOnError>,
@@ -3356,6 +3620,7 @@ export class Session2 extends HeyApiClient {
             { in: "body", key: "format" },
             { in: "body", key: "system" },
             { in: "body", key: "variant" },
+            { in: "body", key: "editorContext" },
             { in: "body", key: "parts" },
           ],
         },
@@ -3689,6 +3954,7 @@ export class Session2 extends HeyApiClient {
       format?: OutputFormat
       system?: string
       variant?: string
+      editorContext?: EditorContext
       parts?: Array<TextPartInput | FilePartInput | AgentPartInput | SubtaskPartInput>
     },
     options?: Options<never, ThrowOnError>,
@@ -3709,6 +3975,7 @@ export class Session2 extends HeyApiClient {
             { in: "body", key: "format" },
             { in: "body", key: "system" },
             { in: "body", key: "variant" },
+            { in: "body", key: "editorContext" },
             { in: "body", key: "parts" },
           ],
         },
@@ -4831,6 +5098,11 @@ export class OpencodeClient extends HeyApiClient {
     return (this._global ??= new Global({ client: this.client }))
   }
 
+  private _testagent?: Testagent
+  get testagent(): Testagent {
+    return (this._testagent ??= new Testagent({ client: this.client }))
+  }
+
   private _event?: Event
   get event(): Event {
     return (this._event ??= new Event({ client: this.client }))
@@ -4886,6 +5158,11 @@ export class OpencodeClient extends HeyApiClient {
     return (this._command ??= new Command({ client: this.client }))
   }
 
+  private _mcp?: Mcp
+  get mcp(): Mcp {
+    return (this._mcp ??= new Mcp({ client: this.client }))
+  }
+
   private _lsp?: Lsp
   get lsp(): Lsp {
     return (this._lsp ??= new Lsp({ client: this.client }))
@@ -4896,9 +5173,9 @@ export class OpencodeClient extends HeyApiClient {
     return (this._formatter ??= new Formatter({ client: this.client }))
   }
 
-  private _mcp?: Mcp
-  get mcp(): Mcp {
-    return (this._mcp ??= new Mcp({ client: this.client }))
+  private _enhancePrompt?: EnhancePrompt
+  get enhancePrompt(): EnhancePrompt {
+    return (this._enhancePrompt ??= new EnhancePrompt({ client: this.client }))
   }
 
   private _project?: Project
