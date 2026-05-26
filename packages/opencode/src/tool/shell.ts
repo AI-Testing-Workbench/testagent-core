@@ -329,9 +329,10 @@ function decodeWindowsShellOutput(buffer: Uint8Array): string {
 }
 
 function shouldUseWindowsShellDecoding(shell: string): boolean {
-  // testagent_change: Apply smart decoding to both cmd.exe and PowerShell on Windows
-  // Both can output GBK encoding on Chinese Windows systems
-  return process.platform === "win32" && (shell.toLowerCase().includes("cmd") || Shell.ps(shell))
+  // testagent_change: Apply smart decoding to all shells on Windows
+  // Git Bash and other POSIX shells can also output GBK-encoded text
+  // when executing Windows-native commands like powershell.exe
+  return process.platform === "win32"
 }
 // testagent_change end
 
@@ -368,6 +369,24 @@ function cmd(shell: string, command: string, cwd: string, env: NodeJS.ProcessEnv
           // Node.js UTF-8 mode  
           NODE_NO_WARNINGS: "1",
           // Playwright and other tools
+          LANG: "en_US.UTF-8",
+          LC_ALL: "en_US.UTF-8",
+        },
+        stdin: "ignore",
+        detached: false,
+      })
+    }
+    // testagent_change end
+
+    // testagent_change start: Handle POSIX shells on Windows (e.g., Git Bash)
+    // These shells respect LANG/LC_ALL but lack them in the default env,
+    // which can cause UTF-8 output from child processes to be misinterpreted
+    if (Shell.posix(shell)) {
+      return ChildProcess.make(command, [], {
+        shell,
+        cwd,
+        env: {
+          ...env,
           LANG: "en_US.UTF-8",
           LC_ALL: "en_US.UTF-8",
         },
