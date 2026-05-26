@@ -161,7 +161,7 @@ export const layer: Layer.Layer<
         const stage = Effect.fnUntraced(function* (files: string[]) {
           if (!files.length) return
           const result = yield* git(
-            [...cfg, ...args(["add", "--all", "--sparse", "--pathspec-from-file=-", "--pathspec-file-nul"])],
+            [...cfg, ...args(["add", "--all", "--pathspec-from-file=-", "--pathspec-file-nul"])],
             {
               cwd: state.directory,
               stdin: feed(files),
@@ -177,7 +177,12 @@ export const layer: Layer.Layer<
         const exists = (file: string) => fs.exists(file).pipe(Effect.orDie)
         const read = (file: string) => fs.readFileString(file).pipe(Effect.catch(() => Effect.succeed("")))
         const remove = (file: string) => fs.remove(file).pipe(Effect.catch(() => Effect.void))
-        const locked = <A, E, R>(fx: Effect.Effect<A, E, R>) => lock(state.gitdir).withPermits(1)(fx)
+        const locked = <A, E, R>(fx: Effect.Effect<A, E, R>) =>
+          Effect.gen(function* () {
+            const lockFile = path.join(state.gitdir, "index.lock")
+            yield* fs.remove(lockFile).pipe(Effect.catch(() => Effect.void))
+            return yield* lock(state.gitdir).withPermits(1)(fx)
+          })
 
         const enabled = Effect.fnUntraced(function* () {
           if (state.vcs !== "git") return false
