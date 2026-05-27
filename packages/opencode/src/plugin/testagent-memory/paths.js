@@ -171,5 +171,5 @@ export function getOpencodeConfigCommands() {
  * @returns
  */
 export function getPersonalMemoryFile() {
-    return join(getOpencodeConfigHomeDir(), "CLAUDE.md");
+    return join(getOpencodeConfigHomeDir(), "PERSONA.md");
 }
