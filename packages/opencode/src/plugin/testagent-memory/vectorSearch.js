@@ -355,7 +355,7 @@ export async function vectorfilter(worktree, sessionID, query, alreadySurfaced =
         return [];
     }
 }
-// PERSONA.md 匹配配置
+// CLAUDE.md 匹配配置
 const CLAUDE_KEYWORD_BONUS = 0.25;
 const CLAUDE_SUBSTRING_BONUS = 0.18;
 const CLAUDE_PREFIX_BONUS = 0.12;
@@ -363,9 +363,9 @@ const CLAUDE_NGRAM_BONUS = 0.15;
 const CLAUDE_STRUCTURE_BONUS = 0.10; // 结构加分：标题、列表项中的词权重更高
 const MAX_LINE_NUM = 200;
 // =====================================================================
-// PERSONA.md 解析与内容提取
+// CLAUDE.md 解析与内容提取
 // =====================================================================
-// 解析 PERSONA.md 文件，提取章节结构
+// 解析 CLAUDE.md 文件，提取章节结构
 function parseClaudeMd(content) {
     const sections = [];
     const lines = content.split("\n");
@@ -423,7 +423,7 @@ function calcClaudeMatchScore(query, content) {
     const score = matchRate * KEYWORD_BONUS;
     return { score, matchedKeywords };
 }
-// 读取并解析 PERSONA.md 文件
+// 读取并解析 CLAUDE.md 文件
 function readClaudeMd(filePath) {
     try {
         if (!filePath)
@@ -432,17 +432,17 @@ function readClaudeMd(filePath) {
         return parseClaudeMd(content);
     }
     catch {
-        console.debug(`[readClaudeMd] 无法读取 PERSONA.md: ${filePath}`);
+        console.debug(`[readClaudeMd] 无法读取 CLAUDE.md: ${filePath}`);
         return [];
     }
 }
 // =====================================================================
-// PERSONA.md 相关内容提取主方法
+// CLAUDE.md 相关内容提取主方法
 // =====================================================================
 /**
- * 从 PERSONA.md 文件中提取与查询相关的内容
+ * 从 CLAUDE.md 文件中提取与查询相关的内容
  * @param query 查询词
- * @param filePath PERSONA.md 文件路径，默认为 ~/.config/testagent/PERSONA.md
+ * @param filePath CLAUDE.md 文件路径，默认为 ~/.config/testagent/CLAUDE.md
  * @param minScore 匹配系数阈值，低于此分数的结果将被过滤
  * @param topNum 返回结果数量上限，默认为 10
  * @returns 匹配的内容列表，按匹配分数降序排列
@@ -471,7 +471,7 @@ export function extractClaudeContent(query, filePath, minScore = 0.1, topNum = 2
         return results.slice(0, topNum);
     }
     catch (e) {
-        console.debug(`[extractClaudeContent] 无法读取 PERSONA.md，原因: ${e}`);
+        console.debug(`[extractClaudeContent] 无法读取 CLAUDE.md，原因: ${e}`);
         return [];
     }
 }

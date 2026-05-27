@@ -18,9 +18,9 @@ export interface ClaudeProfileMatch {
     }>;
 }
 /**
- * 从 PERSONA.md 文件中提取与查询相关的内容
+ * 从 CLAUDE.md 文件中提取与查询相关的内容
  * @param query 查询词
- * @param filePath PERSONA.md 文件路径，默认为 ~/.config/testagent/PERSONA.md
+ * @param filePath CLAUDE.md 文件路径，默认为 ~/.config/testagent/CLAUDE.md
  * @param minScore 匹配系数阈值，低于此分数的结果将被过滤
  * @param topNum 返回结果数量上限，默认为 10
  * @returns 匹配的内容列表，按匹配分数降序排列

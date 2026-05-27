@@ -20,7 +20,7 @@ import { PoeAuthPlugin } from "opencode-poe-auth"
 import { CloudflareAIGatewayAuthPlugin, CloudflareWorkersAuthPlugin } from "./cloudflare"
 import { AzureAuthPlugin } from "./azure"
 import { LangfusePlugin } from "./langfuse" // testagent_change
-import { MemoryPlugin } from "./testagent-memory/memory-plugin" // testagent_change
+import { MemoryPlugin } from "./testagent-memory/index.js" // testagent_change
 import { Effect, Layer, Context, Stream } from "effect"
 import { EffectBridge } from "@/effect/bridge"
 import { InstanceState } from "@/effect/instance-state"
