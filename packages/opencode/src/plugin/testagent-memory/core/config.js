@@ -43,7 +43,7 @@ export const MemoryConfig = z.object({
         providerID: z.string(),
         modelID: z.string(),
     })
-        .default({ providerID: "", modelID: "" }),
+        .default({ recallEnable: true, llmRecall: false, providerID: "", modelID: "" }),
 });
 let current = MemoryConfig.parse({});
 // 获取配置
