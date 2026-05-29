@@ -261,6 +261,61 @@ test("updates global config and omits empty shell key in jsonc", async () => {
   }
 })
 
+test("empty global update invalidates cached global config", async () => {
+  await using tmp = await tmpdir({
+    init: async (dir) => {
+      await Filesystem.write(
+        path.join(dir, "testagent.jsonc"),
+        JSON.stringify(
+          {
+            $schema: "https://opencode.ai/config.json",
+            model: "old/model",
+          },
+          null,
+          2,
+        ),
+      )
+    },
+  })
+
+  const prev = Global.Path.config
+  ;(Global.Path as { config: string }).config = tmp.path
+  await clear(true)
+
+  try {
+    const result = await Effect.runPromise(
+      Config.Service.use((svc) =>
+        Effect.gen(function* () {
+          const before = yield* svc.getGlobal()
+          yield* Effect.promise(() =>
+            Filesystem.write(
+              path.join(tmp.path, "testagent.jsonc"),
+              JSON.stringify(
+                {
+                  $schema: "https://opencode.ai/config.json",
+                  model: "new/model",
+                },
+                null,
+                2,
+              ),
+            ),
+          )
+          const update = yield* svc.updateGlobal({})
+          const after = yield* svc.getGlobal()
+          return { before, update, after }
+        }),
+      ).pipe(Effect.scoped, Effect.provide(layer)),
+    )
+
+    expect(result.before.model).toBe("old/model")
+    expect(result.update.changed).toBe(false)
+    expect(result.after.model).toBe("new/model")
+  } finally {
+    ;(Global.Path as { config: string }).config = prev
+    await clear(true)
+  }
+})
+
 test("loads formatter boolean config", async () => {
   await using tmp = await tmpdir({
     init: async (dir) => {

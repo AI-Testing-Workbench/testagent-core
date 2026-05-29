@@ -85,7 +85,12 @@ export const globalHandlers = HttpApiBuilder.group(RootHttpApi, "global", (handl
     })
 
     const configUpdate = Effect.fn("GlobalHttpApi.configUpdate")(function* (ctx) {
+      log.info("global.config.update received", {
+        keys: Object.keys(ctx.payload ?? {}),
+        empty: Object.keys(ctx.payload ?? {}).length === 0,
+      })
       const result = yield* config.updateGlobal(ctx.payload)
+      log.info("global.config.update completed", { changed: result.changed })
       if (result.changed) bridge.fork(disposeAllInstancesAndEmitGlobalDisposed({ swallowErrors: true }))
       return result.info
     })

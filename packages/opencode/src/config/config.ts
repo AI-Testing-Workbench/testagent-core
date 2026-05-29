@@ -352,8 +352,8 @@ export interface Interface {
 export class Service extends Context.Service<Service, Interface>()("@opencode/Config") {}
 
 function globalConfigFile() {
-  const candidates = ["testagent.jsonc", "testagent.json", "opencode.jsonc", "opencode.json", "config.json"].map((file) =>
-    path.join(Global.Path.config, file),
+  const candidates = ["testagent.jsonc", "testagent.json", "opencode.jsonc", "opencode.json", "config.json"].map(
+    (file) => path.join(Global.Path.config, file),
   )
   for (const file of candidates) {
     if (existsSync(file)) return file
@@ -855,7 +855,9 @@ export const layer = Layer.effect(
       const file = globalConfigFile()
       const before = (yield* readConfigFile(file)) ?? "{}"
       const patch = writableGlobal(config)
-
+      const force = Object.keys(patch).length === 0
+      log.info("updateGlobal called", { file, keys: Object.keys(patch), force })
+      log.info("更新配置updating global config", { file, patch, force })
       let next: Info
       let changed: boolean
       if (!file.endsWith(".jsonc")) {
@@ -872,16 +874,21 @@ export const layer = Layer.effect(
         if (changed) yield* fs.writeFileString(file, updated).pipe(Effect.orDie)
       }
 
-      // testagent_change start: Only invalidate cache when config actually changed
+      // testagent_change start: Invalidate cache when config changed or when callers explicitly send an empty patch
       // This prevents unnecessary cache invalidation and service restarts when config hasn't changed.
       // Previously, we always invalidated cache even when config was unchanged, which caused
-      // cascading failures: config invalidate → all InstanceState caches cleared → 
+      // cascading failures: config invalidate → all InstanceState caches cleared →
       // Command/Skill/Plugin re-initialized → potential circular dependency → service restart.
-      if (changed) {
-        log.info("config changed, invalidating cache")
+      // An empty patch is used by clients after they mutate marketplace config files directly;
+      // it must refresh cachedGlobal even though this update call itself did not change the file.
+      if (changed || force) {
+        log.info(changed ? "config changed, invalidating cache" : "config refresh requested, invalidating cache", {
+          changed,
+          force,
+        })
         yield* invalidate()
       } else {
-        log.debug("config unchanged, skipping cache invalidation")
+        log.info("config unchanged, skipping cache invalidation", { changed, force })
       }
       // testagent_change end
       return { info: next, changed }
