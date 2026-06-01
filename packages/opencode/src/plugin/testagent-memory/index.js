@@ -149,6 +149,24 @@ function consumeRecallPrefetch(ctx) {
     prefetch.consumed = true;
     return prefetch.result;
 }
+const states = new Map();
+function getState(projectPath) {
+    const existing = states.get(projectPath);
+    if (existing)
+        return existing;
+    const state = {
+        activeSessions: new Set(),
+        skipSessions: new Set(),
+        buffer: new MessageBuffer(),
+        turnContextBySession: new Map(),
+        modelCache: new Map(),
+        distilling: false,
+        lastExtraction: 0,
+        turnsSinceCuration: 0,
+    };
+    states.set(projectPath, state);
+    return state;
+}
 export const MemoryPlugin = async (params) => {
     const worktreeOrigin = params.worktree || params;
     const directory = params.directory || params;
@@ -165,11 +183,12 @@ export const MemoryPlugin = async (params) => {
     }
     // 初始化命令
     initMemCmd();
-    const activeSessions = new Set();
-    const skipSessions = new Set();
-    const buffer = new MessageBuffer();
-    const turnContextBySession = new Map();
-    const modelCache = new Map();
+    const state = getState(projectPath);
+    const activeSessions = state.activeSessions;
+    const skipSessions = state.skipSessions;
+    const buffer = state.buffer;
+    const turnContextBySession = state.turnContextBySession;
+    const modelCache = state.modelCache;
     async function shouldSkip(sessionID) {
         if (isWorkerSession(sessionID))
             return true;
@@ -192,23 +211,21 @@ export const MemoryPlugin = async (params) => {
         return false;
     }
     // Background distillation — debounced, non-blocking
-    let distilling = false;
-    let lastExtraction = 0;
     async function autoExtraction(sessionID) {
-        if (distilling)
+        if (state.distilling)
             return;
-        distilling = true;
+        state.distilling = true;
         // 缓存满足判断
         log.info(`[autoExtraction] buffer.size: ${buffer.size}`);
         if (buffer.size < config().memory.autoExtractBufferSize) {
-            distilling = false;
+            state.distilling = false;
             return;
         }
         // 自动提取触发时间间隔判断
-        const timeDiff = Date.now() - lastExtraction;
+        const timeDiff = Date.now() - state.lastExtraction;
         log.info(`[autoExtraction] last extract pass second: ${Math.floor(timeDiff / 1000)}`);
         if (timeDiff < CAPACITY.MIN_EXTRACT_INTERVAL_MS) {
-            distilling = false;
+            state.distilling = false;
             return;
         }
         try {
@@ -220,17 +237,15 @@ export const MemoryPlugin = async (params) => {
                 model: modelCache.get("currentModel"),
                 force: false,
             });
-            lastExtraction = Date.now();
+            state.lastExtraction = Date.now();
         }
         catch (e) {
             log.error("distillation error:", e);
         }
         finally {
-            distilling = false;
+            state.distilling = false;
         }
     }
-    // Track user turns for periodic curation
-    let turnsSinceCuration = 0;
     // 记忆自动整理 
     async function autoDream(sessionID) {
         try {
@@ -340,7 +355,7 @@ export const MemoryPlugin = async (params) => {
                             activeSessions.add(msg.sessionID);
                             // 记录用户轮次
                             if (msg.role === "user") {
-                                turnsSinceCuration++;
+                                state.turnsSinceCuration++;
                                 if (msg.model.providerID && msg.model.modelID) {
                                     modelCache.set("currentModel", { providerID: msg.model.providerID, modelID: msg.model.modelID });
                                 }
@@ -375,7 +390,7 @@ export const MemoryPlugin = async (params) => {
                 if (config().enable) {
                     if (await shouldSkip(sessionID))
                         return;
-                    log.info(`[session.idle] trigger now, session id: ${sessionID} , turnsSinceCuration is: ${turnsSinceCuration}`);
+                    log.info(`[session.idle] trigger now, session id: ${sessionID} , turnsSinceCuration is: ${state.turnsSinceCuration}`);
                     if (!activeSessions.has(sessionID)) {
                         log.info(`session ${sessionID.substring(0, 16)} idle but not in activeSessions — skipping`);
                         return;
@@ -385,7 +400,7 @@ export const MemoryPlugin = async (params) => {
                         await autoExtraction(sessionID);
                     }
                     // 触发记忆整理
-                    if (turnsSinceCuration >= 3) {
+                    if (state.turnsSinceCuration >= 3) {
                         // 项目记忆整理
                         if (config().memory.autoDreamEnable) {
                             await autoDream(sessionID);
@@ -394,10 +409,10 @@ export const MemoryPlugin = async (params) => {
                         if (config().memory.personalMemoryEnable) {
                             await autoPersonal(sessionID);
                         }
-                        turnsSinceCuration = 0;
+                        state.turnsSinceCuration = 0;
                     }
                     else {
-                        log.info(`[autoDream] skipped: ${turnsSinceCuration}/3 user turns since last auto dream`);
+                        log.info(`[autoDream] skipped: ${state.turnsSinceCuration}/3 user turns since last auto dream`);
                     }
                 }
             }
