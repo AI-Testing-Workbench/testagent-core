@@ -1,0 +1,19 @@
+packages/opencode/src/plugin/testagent-memory/index.js
+  s_607cafc041e602::t_bbf56956833fed 152-169,186-191,215,217,221,225,228,240,246,358,393,403,412,415
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "493eaf73b9716debde53b168459fc7eaa54e72b2",
+  "prompts": {},
+  "sessions": {
+    "s_607cafc041e602": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_17d9f7449ffes8Ocm2AhrXJiE1",
+        "model": "gpt-5.5"
+      },
+      "human_author": "邱文斌 <qiuwenbin@piscifun.com>"
+    }
+  }
+}
