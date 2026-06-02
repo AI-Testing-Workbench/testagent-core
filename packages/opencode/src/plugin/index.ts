@@ -7,6 +7,7 @@ import type {
 } from "@opencode-ai/plugin"
 import { Config } from "@/config/config"
 import { Bus } from "../bus"
+import { GlobalBus, type GlobalEvent } from "@/bus/global" // testagent_change
 import * as Log from "@opencode-ai/core/util/log"
 import { createOpencodeClient } from "@opencode-ai/sdk"
 import { Flag } from "@opencode-ai/core/flag/flag"
@@ -21,7 +22,7 @@ import { CloudflareAIGatewayAuthPlugin, CloudflareWorkersAuthPlugin } from "./cl
 import { AzureAuthPlugin } from "./azure"
 import { LangfusePlugin } from "./langfuse" // testagent_change
 import { MemoryPlugin } from "./testagent-memory/index.js" // testagent_change
-import { Effect, Layer, Context, Stream } from "effect"
+import { Effect, Layer, Context, Queue, Stream } from "effect"
 import { EffectBridge } from "@/effect/bridge"
 import { InstanceState } from "@/effect/instance-state"
 import { errorMessage } from "@/util/error"
@@ -46,6 +47,16 @@ function notifyVSCode(type: "info" | "error", message: string) {
   // Output JSON to stderr with special prefix for VS Code extension to parse
   const notification = JSON.stringify({ type: "plugin-notification", level: type, message })
   console.error(`[TESTAGENT_NOTIFICATION] ${notification}`)
+}
+
+function isMessageSyncEvent(type: string) {
+  return type === "message.updated" || type === "message.part.updated"
+}
+
+function sendEvent(hooks: Hooks[], event: unknown) {
+  for (const hook of hooks) {
+    void hook["event"]?.({ event: event as any })
+  }
 }
 // testagent_change end
 
@@ -135,13 +146,13 @@ export const layer = Layer.effect(
     const state = yield* InstanceState.make<State>(
       Effect.fn("Plugin.state")(function* (ctx) {
         // testagent_change start - log directory to understand multiple initializations
-        log.info("Plugin.state initializing", { 
+        log.info("Plugin.state initializing", {
           directory: ctx.directory,
           worktree: ctx.worktree,
-          projectId: ctx.project.id 
+          projectId: ctx.project.id,
         })
         // testagent_change end
-        
+
         const hooks: Hooks[] = []
         const bridge = yield* EffectBridge.make()
 
@@ -272,37 +283,30 @@ export const layer = Layer.effect(
             },
           }),
         )
-        
+
         // testagent_change start - notify all plugins loaded with detailed results
         if (plugins.length) {
           // Only show notification on first load to avoid duplicate notifications
           // when multiple instances are created (e.g., on session creation)
           if (!hasShownPluginNotification) {
             hasShownPluginNotification = true
-            
+
             // Build detailed message with plugin names
-            const successMsg = pluginResults.success.length > 0 
-              ? `✅ 成功: ${pluginResults.success.join(", ")}`
-              : ""
-            const failedMsg = pluginResults.failed.length > 0 
-              ? `❌ 失败: ${pluginResults.failed.map(f => f.spec).join(", ")}`
-              : ""
-            
-            const message = [
-              "插件加载完成:",
-              successMsg,
-              failedMsg,
-            ].filter(Boolean).join("\n")
-            
+            const successMsg = pluginResults.success.length > 0 ? `✅ 成功: ${pluginResults.success.join(", ")}` : ""
+            const failedMsg =
+              pluginResults.failed.length > 0 ? `❌ 失败: ${pluginResults.failed.map((f) => f.spec).join(", ")}` : ""
+
+            const message = ["插件加载完成:", successMsg, failedMsg].filter(Boolean).join("\n")
+
             if (isVSCodeEnvironment()) {
               notifyVSCode("info", message)
             } else {
               log.info(message)
             }
           } else {
-            log.debug("skipping duplicate plugin notification", { 
+            log.debug("skipping duplicate plugin notification", {
               directory: ctx.directory,
-              pluginCount: plugins.length 
+              pluginCount: plugins.length,
             })
           }
         }
@@ -343,16 +347,48 @@ export const layer = Layer.effect(
         }
 
         // Subscribe to bus events, fiber interrupted when scope closes
+        // testagent_change start - dedupe message sync events forwarded through GlobalBus fallback
+        const seen = new Set<string>()
+        function shouldForward(input: { id?: string; type?: string }) {
+          if (!input.id || !input.type || !isMessageSyncEvent(input.type)) return true
+          if (seen.has(input.id)) return false
+          seen.add(input.id)
+          return true
+        }
+        // testagent_change end
+
         yield* bus.subscribeAll().pipe(
           Stream.runForEach((input) =>
             Effect.sync(() => {
-              for (const hook of hooks) {
-                void hook["event"]?.({ event: input as any })
-              }
+              if (!shouldForward(input)) return
+              sendEvent(hooks, input)
             }),
           ),
           Effect.forkScoped,
         )
+
+        // testagent_change start - forward message sync events from global bus to plugins
+        const workspace = yield* InstanceState.workspaceID
+        yield* Stream.callback<GlobalEvent>((queue) => {
+          const handler = (event: GlobalEvent) => {
+            if (event.directory && event.directory !== ctx.directory) return
+            if (event.project && event.project !== ctx.project.id) return
+            if (event.workspace && event.workspace !== workspace) return
+            const payload = event.payload
+            if (!payload || typeof payload !== "object") return
+            if (!isMessageSyncEvent(String((payload as { type?: string }).type))) return
+            if (!shouldForward(payload as { id?: string; type?: string })) return
+            Queue.offerUnsafe(queue, event)
+          }
+          return Effect.acquireRelease(
+            Effect.sync(() => GlobalBus.on("event", handler)),
+            () => Effect.sync(() => GlobalBus.off("event", handler)),
+          )
+        }).pipe(
+          Stream.runForEach((input) => Effect.sync(() => sendEvent(hooks, input.payload))),
+          Effect.forkScoped,
+        )
+        // testagent_change end
 
         return { hooks }
       }),
