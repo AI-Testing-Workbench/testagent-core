@@ -21,6 +21,7 @@ import {
   sanitizedProcessEnv,
 } from "@opencode-ai/core/util/opencode-process"
 import { validateSession } from "./validate-session"
+import { ExternalAuth } from "@/external-auth" // testagent_change
 
 declare global {
   const OPENCODE_WORKER_PATH: string
