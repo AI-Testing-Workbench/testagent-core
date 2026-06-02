@@ -289,7 +289,6 @@ export const MemoryPlugin = async (params) => {
         role = full.data.info.role
       }
       buffer.push({ role, content: text, timestamp: Date.now() })
-      log.info("push text===12312321", text)
       log.info(`[message.part.updated] buffer size is: ${buffer.size}`)
     } catch (e) {
       log.error("[appendBufferMessage] error: ", e)
