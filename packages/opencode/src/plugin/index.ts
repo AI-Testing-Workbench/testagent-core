@@ -58,6 +58,24 @@ function sendEvent(hooks: Hooks[], event: unknown) {
     void hook["event"]?.({ event: event as any })
   }
 }
+
+function eventKey(input: { id?: string; type?: string; properties?: unknown }) {
+  if (!input.type || !isMessageSyncEvent(input.type)) return
+  if (input.id) return `${input.type}:${input.id}`
+  if (!input.properties || typeof input.properties !== "object") return
+  const props = input.properties as {
+    info?: { id?: string; sessionID?: string }
+    part?: { id?: string; messageID?: string; sessionID?: string; type?: string; text?: string }
+  }
+  if (input.type === "message.updated") {
+    const info = props.info
+    if (!info) return
+    return `${input.type}:${info.sessionID ?? ""}:${info.id ?? ""}`
+  }
+  const part = props.part
+  if (!part) return
+  return `${input.type}:${part.sessionID ?? ""}:${part.messageID ?? ""}:${part.id ?? ""}:${part.type ?? ""}:${part.text ?? ""}`
+}
 // testagent_change end
 
 type State = {
@@ -349,10 +367,11 @@ export const layer = Layer.effect(
         // Subscribe to bus events, fiber interrupted when scope closes
         // testagent_change start - dedupe message sync events forwarded through GlobalBus fallback
         const seen = new Set<string>()
-        function shouldForward(input: { id?: string; type?: string }) {
-          if (!input.id || !input.type || !isMessageSyncEvent(input.type)) return true
-          if (seen.has(input.id)) return false
-          seen.add(input.id)
+        function shouldForward(input: { id?: string; type?: string; properties?: unknown }) {
+          const key = eventKey(input)
+          if (!key) return true
+          if (seen.has(key)) return false
+          seen.add(key)
           return true
         }
         // testagent_change end
@@ -377,7 +396,7 @@ export const layer = Layer.effect(
             const payload = event.payload
             if (!payload || typeof payload !== "object") return
             if (!isMessageSyncEvent(String((payload as { type?: string }).type))) return
-            if (!shouldForward(payload as { id?: string; type?: string })) return
+            if (!shouldForward(payload as { id?: string; type?: string; properties?: unknown })) return
             Queue.offerUnsafe(queue, event)
           }
           return Effect.acquireRelease(
