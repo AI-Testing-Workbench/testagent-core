@@ -19,6 +19,7 @@ import { dirname, join } from "path"
 import { homedir } from "os"
 
 const LANGFUSE_BASE_URL = "http://testhub-agent-trace.paasuat.cmbchina.cn";
+const LANGFUSE_FINAL_BATCH_UPLOAD_PATH = "/batch/upload"
 
 let baseMetadata: () => Record<string, string>
 
@@ -29,6 +30,7 @@ let rootSessionId: string | null = null // 主session ID
 const sessionToTrace = new Map<string, string>() // sessionId -> traceId
 const sessionToAgentSpan = new Map<string, string>() // subagent session -> agent span id
 const pendingSubagents = new Map<string, { traceId: string; agentSpanId: string }[]>() // parent session -> pending subagents
+const generatedTraceIds = new Set<string>() // trace ids generated as fallback before opencode messageID is available
 
 function generateSessionId(): string {
   return generateUUID()
@@ -106,6 +108,7 @@ interface SpanData {
 interface GenInfo {
   traceId: string
   genId: string
+  sessionId: string
   parentObservationId?: string
   modelName: string
   startTime: Date
@@ -118,6 +121,7 @@ interface GenInfo {
   isSkillChild: boolean
   hasUsage: boolean
   finalOutput: { text: string; tool_calls?: any[]; usage?: any } | null
+  assistantMessageId?: string
   modelParameters: Record<string, any>
   input: any
 }
@@ -150,8 +154,8 @@ const skillStack: { callID: string; context: SkillContext }[] = []
 // 全局 generation 列表
 const allGenerations: GenInfo[] = []
 
-// 当前活跃的 generation（按 session 维护，避免主/子 agent 相互覆盖）
-const activeGenerations = new Map<string, GenInfo>()
+// 当前活跃的 generation 队列（按 session 维护，避免主/子 agent 相互覆盖，也避免多 step 事件交错互相覆盖）
+const activeGenerations = new Map<string, GenInfo[]>()
 
 // 当前活跃的 Trace ID
 let currentTraceId: string | null = null
@@ -166,6 +170,13 @@ let failedIngestionQueueFile = join(homedir(), ".testagent", "langfuse-ingestion
 let failedIngestionQueueLoaded = false
 const MAX_FAILED_INGESTION_EVENTS = 5000
 
+// 最终完整 trace 汇总上报到后端批处理接口，用于兼容 Kafka 消费完整数据的逻辑。
+const finalBatchUploads: any[] = []
+let retryingFinalBatchUploads = false
+let finalBatchUploadQueueFile = join(homedir(), ".testagent", "langfuse-final-batch-upload-queue.json")
+let finalBatchUploadQueueLoaded = false
+const MAX_FINAL_BATCH_UPLOADS = 500
+
 function getActiveParentId(): string | undefined {
   const activeSkill = skillStack[skillStack.length - 1]
   return activeSkill?.context.spanId
@@ -175,16 +186,118 @@ function getCurrentSkillContext(): SkillContext | null {
   return skillStack[skillStack.length - 1]?.context ?? null
 }
 
-function getTraceIdForSession(sessionId: string): string {
+function getLatestActiveGeneration(sessionId: string): GenInfo | undefined {
+  const active = activeGenerations.get(sessionId)
+  return active?.[active.length - 1]
+}
+
+function getNextFinishingGeneration(sessionId: string): GenInfo | undefined {
+  const active = activeGenerations.get(sessionId)
+  return active?.find((g) => !g.finalOutput) ?? active?.[0]
+}
+
+function getActiveGenerationForPart(sessionId: string, part: any): GenInfo | undefined {
+  const active = activeGenerations.get(sessionId)
+  const messageId = part?.messageID
+
+  if (messageId && active?.length) {
+    const matching = active.find((g) => g.assistantMessageId === messageId)
+    if (matching) return matching
+
+    const unbound = part.type === "step-finish"
+      ? active.find((g) => !g.assistantMessageId && !g.finalOutput)
+      : [...active].reverse().find((g) => !g.assistantMessageId && !g.finalOutput)
+    if (unbound) {
+      unbound.assistantMessageId = messageId
+      return unbound
+    }
+  }
+
+  return part.type === "step-finish" ? getNextFinishingGeneration(sessionId) : getLatestActiveGeneration(sessionId)
+}
+
+function addActiveGeneration(sessionId: string, gen: GenInfo) {
+  const active = activeGenerations.get(sessionId) ?? []
+  active.push(gen)
+  activeGenerations.set(sessionId, active)
+}
+
+function deleteActiveGeneration(sessionId: string, gen: GenInfo) {
+  const active = activeGenerations.get(sessionId)
+  if (!active) return
+
+  const remaining = active.filter((item) => item.genId !== gen.genId)
+  if (remaining.length === 0) activeGenerations.delete(sessionId)
+  else activeGenerations.set(sessionId, remaining)
+}
+
+function migrateTraceId(oldTraceId: string, newTraceId: string) {
+  if (oldTraceId === newTraceId || traceBatches.has(newTraceId)) return
+
+  const batch = traceBatches.get(oldTraceId)
+  if (batch) {
+    batch.id = newTraceId
+    for (const gen of batch.generations) gen.traceId = newTraceId
+    for (const span of batch.spans) span.traceId = newTraceId
+    traceBatches.delete(oldTraceId)
+    traceBatches.set(newTraceId, batch)
+  }
+
+  const genList = gens.get(oldTraceId)
+  if (genList) {
+    for (const gen of genList) gen.traceId = newTraceId
+    gens.delete(oldTraceId)
+    gens.set(newTraceId, genList)
+  }
+
+  const genIndex = currentGenIdx.get(oldTraceId)
+  if (genIndex !== undefined) {
+    currentGenIdx.delete(oldTraceId)
+    currentGenIdx.set(newTraceId, genIndex)
+  }
+
+  for (const gen of allGenerations) {
+    if (gen.traceId === oldTraceId) gen.traceId = newTraceId
+  }
+  for (const active of activeGenerations.values()) {
+    for (const gen of active) {
+      if (gen.traceId === oldTraceId) gen.traceId = newTraceId
+    }
+  }
+  for (const context of skillStack) {
+    if (context.context.traceId === oldTraceId) context.context.traceId = newTraceId
+  }
+  for (const [parentSessionId, pending] of pendingSubagents) {
+    pendingSubagents.set(
+      parentSessionId,
+      pending.map((entry) => (entry.traceId === oldTraceId ? { ...entry, traceId: newTraceId } : entry)),
+    )
+  }
+  for (const [sid, traceId] of sessionToTrace) {
+    if (traceId === oldTraceId) sessionToTrace.set(sid, newTraceId)
+  }
+  if (currentTraceId === oldTraceId) currentTraceId = newTraceId
+  uploadedTraceIds.delete(oldTraceId)
+  generatedTraceIds.delete(oldTraceId)
+}
+
+function getTraceIdForSession(sessionId: string, preferredTraceId?: string): string {
   const existing = sessionToTrace.get(sessionId)
-  if (existing) return existing
+  if (existing) {
+    if (preferredTraceId && sessionId === rootSessionId && existing !== preferredTraceId && generatedTraceIds.has(existing)) {
+      migrateTraceId(existing, preferredTraceId)
+      return preferredTraceId
+    }
+    return existing
+  }
 
   if (!rootSessionId) {
     rootSessionId = sessionId
   }
 
   const rootTraceId = rootSessionId ? sessionToTrace.get(rootSessionId) : undefined
-  const traceId = rootTraceId ?? generateUUID()
+  const traceId = rootTraceId ?? preferredTraceId ?? generateUUID()
+  if (!rootTraceId && !preferredTraceId) generatedTraceIds.add(traceId)
 
   sessionToTrace.set(sessionId, traceId)
   if (sessionId === rootSessionId || !currentTraceId) {
@@ -196,7 +309,7 @@ function getTraceIdForSession(sessionId: string): string {
 
 function getSessionObservationParent(sessionId: string, options?: { preferActiveGeneration?: boolean }): string | undefined {
   if (options?.preferActiveGeneration) {
-    const activeGeneration = activeGenerations.get(sessionId)
+    const activeGeneration = getLatestActiveGeneration(sessionId)
     if (activeGeneration) return activeGeneration.genId
   }
 
@@ -313,6 +426,14 @@ function createTraceBatch(sessionId: string, input: string, ctx: any, traceId: s
 /**
  * 上传事件批次到 Langfuse  ingestion API
  */
+async function readResponseTextSafe(res: Response): Promise<string> {
+  try {
+    return await res.text()
+  } catch (e) {
+    return `[failed to read response body: ${String(e)}]`
+  }
+}
+
 async function uploadToIngestion(events: any[]) {
   // console.log("进入uploadToIngestion")
   if (events.length === 0) return { successes: [], errors: [] }
@@ -326,6 +447,7 @@ async function uploadToIngestion(events: any[]) {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
+        "Accept-Encoding": "identity",
         Authorization: `Basic ${credentials}`,
       },
       body,
@@ -334,15 +456,166 @@ async function uploadToIngestion(events: any[]) {
     //console.log("已发送/api/public/ingestion接口")
     if (res.ok) {
       //console.log("[langfuse] Ingestion success")
-      return await res.json()
+      return { successes: events.map((event) => ({ id: event.id })), errors: [] }
     }
 
-    const text = await res.text()
+    const text = await readResponseTextSafe(res)
     //console.error("[langfuse] Ingestion failed", { status: res.status, body: text })
     return { successes: [], errors: [{ id: "batch", status: res.status, error: text }] }
   } catch (e) {
     //console.error("[langfuse] Ingestion error", e)
     return { successes: [], errors: [{ id: "batch", status: 500, error: String(e) }] }
+  }
+}
+
+async function postJsonWithAuth(path: string, payload: any) {
+  const credentials = btoa(`${publicKey}:${secretKey}`)
+  try {
+    const res = await fetch(`${LANGFUSE_BASE_URL}${path}`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Accept-Encoding": "identity",
+        Authorization: `Basic ${credentials}`,
+      },
+      body: JSON.stringify(payload),
+    })
+
+    if (res.ok) {
+      return { ok: true, body: null }
+    }
+
+    const text = await readResponseTextSafe(res)
+    return { ok: false, status: res.status, error: text }
+  } catch (e) {
+    return { ok: false, status: 500, error: String(e) }
+  }
+}
+
+function buildFinalBatchUpload(batch: TraceBatch) {
+  const events: any[] = [
+    buildIngestionEvent("trace-create", traceEventBody(batch)),
+  ]
+
+  const sortedGenerations = [...batch.generations].sort(
+    (a, b) => new Date(a.startTime).getTime() - new Date(b.startTime).getTime(),
+  )
+  const sortedSpans = [...batch.spans].sort(
+    (a, b) => new Date(a.startTime).getTime() - new Date(b.startTime).getTime(),
+  )
+
+  for (const generation of sortedGenerations) {
+    events.push(buildIngestionEvent("generation-create", generationEventBody(generation), generation.startTime))
+  }
+
+  for (const span of sortedSpans) {
+    events.push(buildIngestionEvent("span-create", spanEventBody(span), span.startTime))
+  }
+
+  return events
+}
+
+function configureFinalBatchUploadQueue(projectKey: string) {
+  const safeProjectKey = projectKey.replace(/[^a-zA-Z0-9_-]/g, "_")
+  finalBatchUploadQueueFile = join(homedir(), ".testagent", `langfuse-final-batch-upload-queue-${safeProjectKey}.json`)
+  finalBatchUploadQueueLoaded = false
+  finalBatchUploads.splice(0)
+}
+
+function persistFinalBatchUploads() {
+  try {
+    mkdirSync(dirname(finalBatchUploadQueueFile), { recursive: true })
+    const tmpFile = `${finalBatchUploadQueueFile}.tmp`
+    writeFileSync(tmpFile, JSON.stringify(finalBatchUploads, null, 2), "utf-8")
+    renameSync(tmpFile, finalBatchUploadQueueFile)
+  } catch (e) {
+    console.error("[langfuse] Failed to persist final batch upload queue", e)
+  }
+}
+
+function isValidFinalBatchUpload(item: any) {
+  return (
+    !!item &&
+    typeof item === "object" &&
+    typeof item.id === "string" &&
+    ["trace-create", "generation-create", "span-create"].includes(item.type) &&
+    !!item.body
+  )
+}
+
+function enqueueFinalBatchUploads(items: any[], options?: { persist?: boolean }) {
+  if (items.length === 0) return
+
+  const existingIds = new Set(finalBatchUploads.map((item) => item.id))
+  for (const item of items) {
+    if (!isValidFinalBatchUpload(item) || existingIds.has(item.id)) continue
+    finalBatchUploads.push(item)
+    existingIds.add(item.id)
+  }
+
+  if (finalBatchUploads.length > MAX_FINAL_BATCH_UPLOADS) {
+    finalBatchUploads.splice(0, finalBatchUploads.length - MAX_FINAL_BATCH_UPLOADS)
+  }
+
+  if (options?.persist !== false) {
+    persistFinalBatchUploads()
+  }
+}
+
+function replaceFinalBatchUploads(items: any[]) {
+  finalBatchUploads.splice(0, finalBatchUploads.length, ...items)
+  persistFinalBatchUploads()
+}
+
+function loadFinalBatchUploadsFromDisk() {
+  if (finalBatchUploadQueueLoaded) return
+  finalBatchUploadQueueLoaded = true
+  if (!existsSync(finalBatchUploadQueueFile)) return
+
+  try {
+    const raw = readFileSync(finalBatchUploadQueueFile, "utf-8")
+    const persistedItems = JSON.parse(raw)
+    if (!Array.isArray(persistedItems)) return
+
+    enqueueFinalBatchUploads(persistedItems.filter(isValidFinalBatchUpload), { persist: false })
+    persistFinalBatchUploads()
+  } catch (e) {
+    console.error("[langfuse] Failed to load final batch upload queue", e)
+  }
+}
+
+async function uploadFinalBatchItems(items: any[]) {
+  if (items.length === 0) return []
+
+  const result = await postJsonWithAuth(LANGFUSE_FINAL_BATCH_UPLOAD_PATH, { batch: items })
+  return result.ok ? [] : items
+}
+
+async function retryFinalBatchUploads() {
+  loadFinalBatchUploadsFromDisk()
+  if (retryingFinalBatchUploads || finalBatchUploads.length === 0) return
+
+  retryingFinalBatchUploads = true
+  const items = [...finalBatchUploads]
+  try {
+    const failedItems = await uploadFinalBatchItems(items)
+    const failedIds = new Set(failedItems.map((item) => item.id))
+    replaceFinalBatchUploads(finalBatchUploads.filter((item) => !items.some((attempted) => attempted.id === item.id) || failedIds.has(item.id)))
+  } finally {
+    retryingFinalBatchUploads = false
+  }
+}
+
+async function uploadFinalTraceBatch(batch: TraceBatch) {
+  await retryFinalBatchUploads()
+
+  const items = buildFinalBatchUpload(batch)
+  enqueueFinalBatchUploads(items)
+
+  const failedItems = await uploadFinalBatchItems(items)
+  if (failedItems.length === 0) {
+    const uploadedIds = new Set(items.map((item) => item.id))
+    replaceFinalBatchUploads(finalBatchUploads.filter((queuedItem) => !uploadedIds.has(queuedItem.id)))
   }
 }
 
@@ -556,6 +829,134 @@ async function updateSpanImmediately(traceId: string, spanId: string, updates: P
   await ingestEvent("span-update", { id: spanId, traceId, ...updates })
 }
 
+function normalizeUsage(tokens: any): { input: number; output: number; total: number } | undefined {
+  if (!tokens || typeof tokens !== "object") return undefined
+
+  const input = tokens.input ?? tokens.inputTokens ?? tokens.promptTokens ?? tokens.prompt_tokens
+  const output = tokens.output ?? tokens.outputTokens ?? tokens.completionTokens ?? tokens.completion_tokens
+  const total = tokens.total ?? tokens.totalTokens ?? tokens.total_tokens
+
+  if (input === undefined && output === undefined && total === undefined) return undefined
+
+  const normalizedInput = Number(input ?? 0)
+  const normalizedOutput = Number(output ?? 0)
+  const normalizedTotal = Number(total ?? normalizedInput + normalizedOutput)
+
+  if (![normalizedInput, normalizedOutput, normalizedTotal].every(Number.isFinite)) return undefined
+
+  return {
+    input: normalizedInput,
+    output: normalizedOutput,
+    total: normalizedTotal,
+  }
+}
+
+function toOutputUsage(usage?: { input: number; output: number; total: number }) {
+  if (!usage) return undefined
+  return {
+    input_tokens: usage.input,
+    output_tokens: usage.output,
+    total_tokens: usage.total,
+  }
+}
+
+function buildGenerationText(g: GenInfo) {
+  const textContent = g.parts
+    .filter((p) => !p.startsWith("Tool Call:") && !p.startsWith("Tool Result:") && !p.startsWith("Reasoning:"))
+    .join("\n\n")
+  const reasonText = g.parts
+    .filter((p) => p.startsWith("Reasoning:"))
+    .map((p) => p.replace(/^Reasoning: /, ""))
+    .join("\n")
+
+  const combinedText = reasonText ? `<think>\n${reasonText}\n</think>\n\n${textContent}` : textContent
+  return combinedText || g.output || ""
+}
+
+async function finalizeGeneration(sessionId: string, g: GenInfo, options?: { tokens?: any; endTime?: Date; removeActive?: boolean }) {
+  const endTime = options?.endTime ?? new Date()
+
+  if (!g.completionStartTime) {
+    g.completionStartTime = endTime
+    updateGenerationInBatch(g.traceId, g.genId, {
+      completionStartTime: endTime.toISOString(),
+    })
+  }
+
+  const fullText = buildGenerationText(g)
+  const usage = normalizeUsage(options?.tokens) ?? { input: 0, output: 0, total: 0 }
+
+  const toolCallsOutput = g.toolCalls.map((tc) => ({
+    type: "function",
+    function: {
+      name: tc.name,
+      arguments: tc.args || {},
+    },
+  }))
+
+  const structuredOutput = {
+    text: fullText,
+    tool_calls: toolCallsOutput.length > 0 ? toolCallsOutput : undefined,
+    usage: toOutputUsage(usage),
+  }
+
+  const cachedMessages = llmInputs.get(sessionId)
+  const metadataMessages = g.input?.messages || []
+  const system = systemPrompts.get(sessionId) || []
+  const tools = [...allToolDefs.values()]
+
+  let fullInputMessages: any[] = []
+  if (cachedMessages && cachedMessages.length > 0) {
+    const built = buildLLMInput(cachedMessages, system, tools)
+    fullInputMessages = (built.dict as any).messages || []
+  } else if (metadataMessages.length > 0) {
+    fullInputMessages = metadataMessages
+  }
+
+  const hasToolResult = fullInputMessages.some((m: any) => m.role === "tool")
+  if (!hasToolResult && g.toolResults && g.toolResults.length > 0) {
+    const toolResultMessages = g.toolResults.map((tr: any) => ({
+      role: "tool",
+      content: [{ type: "tool-result", content: tr.output }],
+    }))
+    fullInputMessages = [...fullInputMessages, ...toolResultMessages]
+  }
+
+  const updatedInput = {
+    messages: fullInputMessages,
+    tools: g.input?.tools || [],
+  }
+
+  const generationUpdates: Partial<GenerationData> = {
+    endTime: endTime.toISOString(),
+    completionStartTime: g.completionStartTime?.toISOString(),
+    usage,
+    output: JSON.stringify(structuredOutput, null, 2),
+    metadata: {
+      spanKind: "LLM",
+      model: {
+        name: g.modelName,
+        provider: g.modelName.split("/")[0],
+        id: g.modelName.split("/")[1],
+        parameters: g.modelParameters,
+      },
+      input: updatedInput,
+      output: structuredOutput,
+      tags: OBSERVATION_TAGS,
+      ...baseMetadata(),
+    },
+  }
+
+  updateGenerationInBatch(g.traceId, g.genId, generationUpdates)
+  await updateGenerationImmediately(g.traceId, g.genId, generationUpdates)
+
+  g.finalOutput = structuredOutput
+  g.hasUsage = true
+  if (options?.removeActive !== false) {
+    deleteActiveGeneration(sessionId, g)
+  }
+}
+
 /**
  * 批量上传 Trace 数据到 Langfuse（直接 API 方式）
  */
@@ -583,6 +984,7 @@ async function flushAllTraces() {
     await flushTrace(traceId)
   }
   await retryFailedIngestionEvents()
+  await retryFinalBatchUploads()
 }
 
 /**
@@ -667,7 +1069,7 @@ function convertToLLMMessages(messages: any[]): any[] {
       if (p.type === "text") {
         if (typeof p.text === "string") textBuffer += p.text
       } else if (p.type === "reasoning") {
-        if (typeof p.text === "string") textBuffer += p.text
+        if (typeof p.text === "string") textBuffer += `<think>\n${p.text}\n</think>\n\n`
       } else if (p.type === "tool") {
         flushTextBuffer()
         if (p.state?.input !== undefined) {
@@ -1232,13 +1634,15 @@ export const LangfusePlugin: Plugin = async (ctx) => {
     const m: Record<string, string> = {}
     if (project_id) m.projectId = project_id
     if (userIdMetadata) m.user_id = userIdMetadata
-    if (currentSessionId) m["session.id"] = currentSessionId
+    if (currentSessionId) m["sessionId"] = currentSessionId
     m.source = "testagent"
     return m
   }
 
   configureFailedIngestionQueue(publicKey)
+  configureFinalBatchUploadQueue(publicKey)
   await retryFailedIngestionEvents()
+  await retryFinalBatchUploads()
 
   // 注册兜底机制：进程退出时刷新所有数据
   const exitHandler = async () => {
@@ -1274,7 +1678,7 @@ export const LangfusePlugin: Plugin = async (ctx) => {
         rootSessionId = sessionId
       }
 
-      const traceId = getTraceIdForSession(sessionId)
+      const traceId = getTraceIdForSession(sessionId, sessionId === rootSessionId ? input.messageID : undefined)
       const textContent = output.parts
         .filter((p: any) => p?.type === "text" && typeof p?.text === "string")
         .map((p: any) => p.text)
@@ -1408,6 +1812,7 @@ export const LangfusePlugin: Plugin = async (ctx) => {
       const genInfo: GenInfo = {
         traceId,
         genId,
+        sessionId,
         parentObservationId,
         modelName,
         startTime,
@@ -1428,7 +1833,7 @@ export const LangfusePlugin: Plugin = async (ctx) => {
       gens.set(traceId, genList)
 
       allGenerations.push(genInfo)
-      activeGenerations.set(sessionId, genInfo)
+      addActiveGeneration(sessionId, genInfo)
     },
 
     /**
@@ -1626,7 +2031,7 @@ export const LangfusePlugin: Plugin = async (ctx) => {
       const sessionId = input.sessionID || currentSessionId
       if (!sessionId) return
 
-      const g = activeGenerations.get(sessionId)
+      const g = getLatestActiveGeneration(sessionId)
       if (!g) return
 
       g.output = output.text
@@ -1695,7 +2100,7 @@ export const LangfusePlugin: Plugin = async (ctx) => {
         const sessionId = part.sessionID || currentSessionId
         if (!sessionId) return
 
-        const g = activeGenerations.get(sessionId)
+        const g = getActiveGenerationForPart(sessionId, part)
 
         if (g && part.type !== "step-finish") {
           if (part.type === "text" && part.text) {
@@ -1714,7 +2119,7 @@ export const LangfusePlugin: Plugin = async (ctx) => {
               updateGenerationInBatch(g.traceId, g.genId, generationUpdates)
               await updateGenerationImmediately(g.traceId, g.genId, generationUpdates)
             }
-            g.parts.push(`Reasoning: ${part.text.substring(0, 500)}`)
+            g.parts.push(`Reasoning: ${part.text}`)
           }
           if (part.type === "tool" && part.state?.status === "running") {
             if (!g.completionStartTime) {
@@ -1751,7 +2156,7 @@ export const LangfusePlugin: Plugin = async (ctx) => {
           }
         }
 
-        if (part.type === "step-finish" && part.tokens && g) {
+        if (part.type === "step-finish" && g) {
           if (part.reason !== "tool-calls" && skillStack.length > 0) {
             const popped = skillStack.pop()
             if (popped) {
@@ -1759,101 +2164,7 @@ export const LangfusePlugin: Plugin = async (ctx) => {
             }
           }
 
-          const endTime = new Date()
-
-          if (!g.completionStartTime) {
-            g.completionStartTime = endTime
-            const generationUpdates = { completionStartTime: endTime.toISOString() }
-            updateGenerationInBatch(g.traceId, g.genId, generationUpdates)
-            await updateGenerationImmediately(g.traceId, g.genId, generationUpdates)
-          }
-
-          // 从 parts 中提取内容
-          const textContent = g.parts
-            .filter((p) => !p.startsWith("Tool Call:") && !p.startsWith("Tool Result:") && !p.startsWith("Reasoning:"))
-            .join("\n\n")
-          const reasonText = g.parts
-            .filter((p) => p.startsWith("Reasoning:"))
-            .map((p) => p.replace(/^Reasoning: /, ""))
-            .join("\n")
-          const fullText = reasonText ? `${reasonText}\n\n${textContent}` : textContent
-
-          const toolCallsOutput = g.toolCalls.map((tc) => ({
-            // id: tc.toolCallId || `call_${Math.random().toString(36).substring(2, 12)}`,
-            type: "function",
-            function: {
-              name: tc.name,
-              arguments: tc.args || {},
-            },
-          }))
-
-          const structuredOutput = {
-            text: fullText,
-            tool_calls: toolCallsOutput.length > 0 ? toolCallsOutput : undefined,
-            usage: {
-              input_tokens: part.tokens.input ?? 0,
-              output_tokens: part.tokens.output ?? 0,
-              total_tokens: part.tokens.total ?? 0,
-            },
-          }
-
-          // 构建 input messages
-          const cachedMessages = llmInputs.get(sessionId)
-          const metadataMessages = g.input?.messages || []
-          const system = systemPrompts.get(sessionId) || []
-          const tools = [...allToolDefs.values()]
-
-          let fullInputMessages: any[] = []
-          if (cachedMessages && cachedMessages.length > 0) {
-            const built = buildLLMInput(cachedMessages, system, tools)
-            fullInputMessages = (built.dict as any).messages || []
-          } else if (metadataMessages.length > 0) {
-            fullInputMessages = metadataMessages
-          }
-
-          const hasToolResult = fullInputMessages.some((m: any) => m.role === "tool")
-          if (!hasToolResult && g.toolResults && g.toolResults.length > 0) {
-            const toolResultMessages = g.toolResults.map((tr: any) => ({
-              role: "tool",
-              content: [{ type: "tool-result", content: tr.output }],
-            }))
-            fullInputMessages = [...fullInputMessages, ...toolResultMessages]
-          }
-
-          const updatedInput = {
-            messages: fullInputMessages,
-            tools: g.input?.tools || [],
-          }
-
-          const generationUpdates: Partial<GenerationData> = {
-            endTime: endTime.toISOString(),
-            usage: {
-              input: part.tokens.input ?? 0,
-              output: part.tokens.output ?? 0,
-              total: part.tokens.total ?? 0,
-            },
-            output: JSON.stringify(structuredOutput, null, 2),
-            metadata: {
-              spanKind: "LLM",
-              model: {
-                name: g.modelName,
-                provider: g.modelName.split("/")[0],
-                id: g.modelName.split("/")[1],
-                parameters: g.modelParameters,
-              },
-              input: updatedInput,
-              output: structuredOutput,
-              tags: OBSERVATION_TAGS,
-              ...baseMetadata(),
-            },
-          }
-
-          updateGenerationInBatch(g.traceId, g.genId, generationUpdates)
-          await updateGenerationImmediately(g.traceId, g.genId, generationUpdates)
-
-          g.finalOutput = structuredOutput
-          g.hasUsage = true
-          activeGenerations.delete(sessionId)
+          await finalizeGeneration(sessionId, g, { tokens: part.tokens, endTime: new Date() })
         }
       }
 
@@ -1866,6 +2177,10 @@ export const LangfusePlugin: Plugin = async (ctx) => {
         if (!traceId) return
 
         if (sessionId !== rootSessionId) {
+          for (const g of allGenerations.filter((gen) => gen.sessionId === sessionId && gen.traceId === traceId && !gen.finalOutput)) {
+            await finalizeGeneration(sessionId, g)
+          }
+
           const agentSpanId = sessionToAgentSpan.get(sessionId)
           if (agentSpanId) {
             const childGenerations = allGenerations.filter((g) => g.parentObservationId === agentSpanId && g.traceId === traceId)
@@ -1889,50 +2204,7 @@ export const LangfusePlugin: Plugin = async (ctx) => {
 
         for (const g of allGenerations) {
           if (!g.finalOutput) {
-            const textContent = g.parts
-              .filter((p) => !p.startsWith("Tool Call:") && !p.startsWith("Tool Result:") && !p.startsWith("Reasoning:"))
-              .join("\n\n")
-            const reasonText = g.parts
-              .filter((p) => p.startsWith("Reasoning:"))
-              .map((p) => p.replace(/^Reasoning: /, ""))
-              .join("\n")
-            const fullText = reasonText ? `reasoning\n${reasonText}\n\n${textContent}` : textContent
-
-            const toolCallsOutput = g.toolCalls.map((tc) => ({
-              id: tc.toolCallId || `call_${Math.random().toString(36).substring(2, 12)}`,
-              type: "function",
-              function: {
-                name: tc.name,
-                arguments: tc.args || {},
-              },
-            }))
-
-            const out = {
-              text: fullText || g.output,
-              tool_calls: toolCallsOutput.length > 0 ? toolCallsOutput : undefined,
-              usage: { input_tokens: 0, output_tokens: 0, total_tokens: 0 },
-            }
-
-            const generationUpdates: Partial<GenerationData> = {
-              output: JSON.stringify(out, null, 2),
-              metadata: {
-                spanKind: "LLM",
-                model: {
-                  name: g.modelName,
-                  provider: g.modelName.split("/")[0],
-                  id: g.modelName.split("/")[1],
-                  parameters: g.modelParameters,
-                },
-                output: out,
-                tags: OBSERVATION_TAGS,
-                ...baseMetadata(),
-              },
-            }
-
-            updateGenerationInBatch(g.traceId, g.genId, generationUpdates)
-            await updateGenerationImmediately(g.traceId, g.genId, generationUpdates)
-
-            g.finalOutput = out
+            await finalizeGeneration(g.sessionId || sessionId, g)
           }
         }
 
@@ -1940,7 +2212,7 @@ export const LangfusePlugin: Plugin = async (ctx) => {
           const last = allGenerations[allGenerations.length - 1]
           if (last && last.finalOutput) {
             const rawText = last.finalOutput.text || ""
-            const finalText = rawText.replace(/reasoning[\s\S]*?reasoning/g, "").trim()
+            const finalText = rawText.replace(/<think>[\s\S]*?<\/think>/g, "").trim()
             updateTraceBatch(traceId, { output: finalText })
             const batch = traceBatches.get(traceId)
             if (batch) {
@@ -1949,7 +2221,13 @@ export const LangfusePlugin: Plugin = async (ctx) => {
           }
         }
 
+        const finalBatch = traceBatches.get(traceId)
+        if (finalBatch) {
+          await uploadFinalTraceBatch(finalBatch)
+        }
+
         await retryFailedIngestionEvents()
+        await retryFinalBatchUploads()
 
         traceBatches.delete(traceId)
         gens.delete(traceId)
@@ -1971,6 +2249,7 @@ export const LangfusePlugin: Plugin = async (ctx) => {
         currentTraceId = null
         rootSessionId = null
         sessionToTrace.clear()
+        generatedTraceIds.clear()
       }
 
       if (evt.type === "session.error") {
