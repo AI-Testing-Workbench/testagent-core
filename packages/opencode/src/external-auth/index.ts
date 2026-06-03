@@ -98,8 +98,8 @@ export namespace ExternalAuth {
     pollTimeout?: number
   }
 
-  const DEFAULT_BASE_URL = "https://testhub-dev.paas.cmbchina.cn"
-  const DEFAULT_GATEWAY_BASE_URL = "https://testhub-gateway-dev.paas.cmbchina.cn"
+  const DEFAULT_BASE_URL = "https://testhub.paas.cmbchina.cn"
+  const DEFAULT_GATEWAY_BASE_URL = "https://testhub-gateway.paas.cmbchina.cn"
 
   // ── main flow ─────────────────────────────────────────────────────────────
 
