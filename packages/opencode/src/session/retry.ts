@@ -63,11 +63,22 @@ export function delay(attempt: number, error?: MessageV2.APIError) {
   return cap(Math.min(RETRY_INITIAL_DELAY * Math.pow(RETRY_BACKOFF_FACTOR, attempt - 1), RETRY_MAX_DELAY_NO_HEADERS))
 }
 
+export const LAI_DELAY = 20_000 // 20 seconds
+
 export function retryable(error: Err, provider: string) {
   // context overflow errors should not be retried
   if (MessageV2.ContextOverflowError.isInstance(error)) return undefined
   if (MessageV2.APIError.isInstance(error)) {
     const status = error.data.statusCode
+    // testagent_change start - LAI 极算错误，等待重新认证后重试
+    const bodyJson = parseJSON(error.data.responseBody)
+    const msgJson = parseJSON(error.data.message) ?? parseJSON(error.data.message?.replace(/^[^{]*/, ""))
+    const body = (bodyJson ?? msgJson) as any
+    if (body && typeof body === "object" && typeof body.returnCode === "string" && body.returnCode.startsWith("LAI")) {
+      const errorMsg = typeof body.errorMsg === "string" ? body.errorMsg : error.data.message
+      return { message: `【极算】${errorMsg}` }
+    }
+    // testagent_change end
     // 5xx errors are transient server failures and should always be retried,
     // even when the provider SDK doesn't explicitly mark them as retryable.
     if (!error.data.isRetryable && !(status !== undefined && status >= 500)) return undefined
@@ -182,7 +193,10 @@ export function policy(opts: {
       const retry = retryable(error, opts.provider)
       if (!retry) return Cause.done(meta.attempt)
       return Effect.gen(function* () {
-        const wait = delay(meta.attempt, MessageV2.APIError.isInstance(error) ? error : undefined)
+        // testagent_change start - 固定等待 20s
+        const isLailgw = retry.message.startsWith("【极算】")
+        const wait = isLailgw ? LAI_DELAY : delay(meta.attempt, MessageV2.APIError.isInstance(error) ? error : undefined)
+        // testagent_change end
         const now = yield* Clock.currentTimeMillis
         yield* opts.set({
           attempt: meta.attempt,

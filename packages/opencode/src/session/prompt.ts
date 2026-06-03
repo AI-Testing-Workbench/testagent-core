@@ -88,6 +88,9 @@ export interface Interface {
   readonly shell: (input: ShellInput) => Effect.Effect<MessageV2.WithParts>
   readonly command: (input: CommandInput) => Effect.Effect<MessageV2.WithParts>
   readonly resolvePromptParts: (template: string) => Effect.Effect<PromptInput["parts"]>
+  // testagent_change start - 添加 resume 方法
+  readonly resume: (input: ResumeInput) => Effect.Effect<MessageV2.WithParts>
+  // testagent_change end
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/SessionPrompt") {}
@@ -1668,6 +1671,51 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       return yield* state.ensureRunning(input.sessionID, lastAssistant(input.sessionID), runLoop(input.sessionID))
     })
 
+    // testagent_change start - 添加 resume 函数实现
+    // "继续" 的正确语义：删掉指定的 assistant 消息，然后重新跑 loop。
+    // loop 会重新找到最后一条 user 消息，重新发起 LLM 请求，生成全新的 assistant 消息。
+    const resume: (input: ResumeInput) => Effect.Effect<MessageV2.WithParts> = Effect.fn("SessionPrompt.resume")(
+      function* (input: ResumeInput) {
+        return yield* state.ensureRunning(
+          input.sessionID,
+          lastAssistant(input.sessionID),
+          Effect.gen(function* () {
+            yield* elog.info("resume", { sessionID: input.sessionID, messageID: input.messageID })
+
+            // 找到要删除的 assistant 消息，取出它的 parentID（即对应的 user 消息 ID）
+            const allMsgs = yield* MessageV2.filterCompactedEffect(input.sessionID)
+            const target = allMsgs.find((m) => m.info.id === input.messageID)
+            const userMsgID = target?.info.role === "assistant" ? target.info.parentID : undefined
+
+            // 删掉要重试的 assistant 消息，让 loop 重新生成
+            yield* sessions.removeMessage({ sessionID: input.sessionID, messageID: input.messageID })
+
+            // 重新触发 chat.message 事件，让 langfuse 用 user 消息 ID 建立新的 trace
+            if (userMsgID) {
+              const userMsg = allMsgs.find((m) => m.info.id === userMsgID)
+              if (userMsg) {
+                yield* plugin.trigger(
+                  "chat.message",
+                  {
+                    sessionID: input.sessionID,
+                    messageID: userMsgID,
+                    agent: userMsg.info.role === "user" ? userMsg.info.agent : undefined,
+                    model: userMsg.info.role === "user" ? userMsg.info.model : undefined,
+                    variant: userMsg.info.role === "user" ? userMsg.info.model?.variant : undefined,
+                  },
+                  { message: userMsg.info, parts: userMsg.parts },
+                )
+              }
+            }
+
+            // 重新跑 loop，它会找到最后一条 user 消息并重新发起 LLM 请求
+            return yield* runLoop(input.sessionID)
+          }),
+        )
+      },
+    )
+    // testagent_change end
+
     const shell: (input: ShellInput) => Effect.Effect<MessageV2.WithParts> = Effect.fn("SessionPrompt.shell")(
       function* (input: ShellInput) {
         const ready = yield* Latch.make()
@@ -1799,6 +1847,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       shell,
       command,
       resolvePromptParts,
+      resume, // testagent_change - 添加 resume 方法
     })
   }),
 )
@@ -1871,6 +1920,14 @@ export class LoopInput extends Schema.Class<LoopInput>("SessionPrompt.LoopInput"
 }) {
   static readonly zod = zod(this)
 }
+
+// testagent_change start - 添加 ResumeInput Schema
+export const ResumeInput = Schema.Struct({
+  sessionID: SessionID,
+  messageID: MessageID,
+}).pipe(withStatics((s) => ({ zod: zod(s) })))
+export type ResumeInput = Schema.Schema.Type<typeof ResumeInput>
+// testagent_change end
 
 export const ShellInput = Schema.Struct({
   sessionID: SessionID,

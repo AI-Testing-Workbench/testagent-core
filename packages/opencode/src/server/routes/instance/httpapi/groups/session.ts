@@ -64,6 +64,9 @@ export const PromptPayload = Schema.Struct(Struct.omit(SessionPrompt.PromptInput
 export const CommandPayload = Schema.Struct(Struct.omit(SessionPrompt.CommandInput.fields, ["sessionID"]))
 export const ShellPayload = Schema.Struct(Struct.omit(SessionPrompt.ShellInput.fields, ["sessionID"]))
 export const RevertPayload = Schema.Struct(Struct.omit(SessionRevert.RevertInput.fields, ["sessionID"]))
+// testagent_change start - 添加 ResumePayload
+export const ResumePayload = Schema.Struct(Struct.omit(SessionPrompt.ResumeInput.fields, ["sessionID"]))
+// testagent_change end
 export const PermissionResponsePayload = Schema.Struct({
   response: Permission.Reply,
 })
@@ -91,6 +94,7 @@ export const SessionPaths = {
   shell: `${root}/:sessionID/shell`,
   revert: `${root}/:sessionID/revert`,
   unrevert: `${root}/:sessionID/unrevert`,
+  resume: `${root}/:sessionID/resume`, // testagent_change - 添加 resume 路径
   permissions: `${root}/:sessionID/permissions/:permissionID`,
   deleteMessage: `${root}/:sessionID/message/:messageID`,
   deletePart: `${root}/:sessionID/message/:messageID/part/:partID`,
@@ -365,6 +369,20 @@ export const SessionApi = HttpApi.make("session")
             description: "Restore all previously reverted messages in a session.",
           }),
         ),
+        // testagent_change start - 添加 resume 端点
+        HttpApiEndpoint.post("resume", SessionPaths.resume, {
+          params: { sessionID: SessionID },
+          payload: ResumePayload,
+          success: described(MessageV2.WithParts, "Resumed message"),
+          error: [HttpApiError.BadRequest, HttpApiError.NotFound],
+        }).annotateMerge(
+          OpenApi.annotations({
+            identifier: "session.resume",
+            summary: "Resume message generation",
+            description: "Continue generating from an existing assistant message without creating a new message.",
+          }),
+        ),
+        // testagent_change end
         HttpApiEndpoint.post("permissionRespond", SessionPaths.permissions, {
           params: { sessionID: SessionID, permissionID: PermissionID },
           payload: PermissionResponsePayload,

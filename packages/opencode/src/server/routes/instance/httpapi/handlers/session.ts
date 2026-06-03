@@ -32,6 +32,7 @@ import {
   MessagesQuery,
   PermissionResponsePayload,
   PromptPayload,
+  ResumePayload, // testagent_change - 添加 ResumePayload
   RevertPayload,
   ShellPayload,
   SummarizePayload,
@@ -318,6 +319,15 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       return yield* revertSvc.unrevert({ sessionID: ctx.params.sessionID })
     })
 
+    // testagent_change start - 添加 resume handler
+    const resume = Effect.fn("SessionHttpApi.resume")(function* (ctx: {
+      params: { sessionID: SessionID }
+      payload: typeof ResumePayload.Type
+    }) {
+      return yield* promptSvc.resume({ sessionID: ctx.params.sessionID, ...ctx.payload })
+    })
+    // testagent_change end
+
     const permissionRespond = Effect.fn("SessionHttpApi.permissionRespond")(function* (ctx: {
       params: { permissionID: PermissionID }
       payload: typeof PermissionResponsePayload.Type
@@ -382,6 +392,7 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       .handle("shell", shell)
       .handle("revert", revert)
       .handle("unrevert", unrevert)
+      .handle("resume", resume) // testagent_change - 添加 resume handler
       .handle("permissionRespond", permissionRespond)
       .handle("deleteMessage", deleteMessage)
       .handle("deletePart", deletePart)
