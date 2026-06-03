@@ -16,7 +16,6 @@ import * as Log from "@opencode-ai/core/util/log"
 
 const log = Log.create({ service: "models fetch" })
 
-
 const Cost = Schema.Struct({
   input: Schema.Finite,
   output: Schema.Finite,
@@ -94,6 +93,8 @@ export const Provider = Schema.Struct({
   npm: Schema.optional(Schema.String),
   models: Schema.Record(Schema.String, Model),
 })
+const Providers = Schema.Record(Schema.String, Provider) // testagent_change
+const decodeProviders = Schema.decodeUnknownSync(Providers) // testagent_change
 
 export type Provider = Schema.Schema.Type<typeof Provider>
 
@@ -112,8 +113,8 @@ export const layer: Layer.Layer<Service, never, AppFileSystem.Service> = Layer.e
     // testagent_change - http client not needed, no remote fetch
     // const http = HttpClient.filterStatusOk(withTransientReadRetry(yield* HttpClient.HttpClient))
 
-    // testagent_change - simplified filepath, no hash needed
-    const filepath = path.join(Global.Path.cache, "models.json")
+    // testagent_change - keep model cache separate from opencode's shared cache
+    const filepath = path.join(Global.Path.data, "models.json")
     // testagent_change - no ttl/lockKey needed for local-only cache
     // const ttl = Duration.minutes(5)
     // const lockKey = `models-dev:${filepath}`
@@ -123,10 +124,54 @@ export const layer: Layer.Layer<Service, never, AppFileSystem.Service> = Layer.e
     // const fetchApi = Effect.fn("ModelsDev.fetchApi")(function* () { ... })
     // const fetchAndWrite = Effect.fn("ModelsDev.fetchAndWrite")(function* () { ... })
 
-    const loadFromDisk = fs.readJson(Flag.OPENCODE_MODELS_PATH ?? filepath).pipe(
-      Effect.catch(() => Effect.succeed(undefined)),
-      Effect.map((v) => v as Record<string, Provider> | undefined),
-    )
+    // testagent_change start - ignore and clear invalid local model caches
+    const source = Flag.OPENCODE_MODELS_PATH ?? filepath
+    const clear = Effect.fn("ModelsDev.clearInvalidCache")(function* (error: unknown) {
+      log.warn("ignoring invalid models cache", { error, filepath: source })
+      if (source !== filepath) return
+      yield* fs.remove(source, { force: true }).pipe(
+        Effect.catch((error) => {
+          log.warn("failed to remove invalid models cache", { error, filepath: source })
+          return Effect.void
+        }),
+      )
+    })
+    const loadFromDisk = Effect.gen(function* () {
+      if (!(yield* fs.existsSafe(source))) return undefined
+      const text = yield* fs.readFileString(source).pipe(
+        Effect.catch((error) =>
+          Effect.gen(function* () {
+            yield* clear(error)
+            return undefined
+          }),
+        ),
+      )
+      if (!text) return undefined
+      const value = yield* Effect.try({
+        try: () => JSON.parse(text) as unknown,
+        catch: (error) => error,
+      }).pipe(
+        Effect.catch((error) =>
+          Effect.gen(function* () {
+            yield* clear(error)
+            return undefined
+          }),
+        ),
+      )
+      if (!value) return undefined
+      return yield* Effect.try({
+        try: () => decodeProviders(value),
+        catch: (error) => error,
+      }).pipe(
+        Effect.catch((error) =>
+          Effect.gen(function* () {
+            yield* clear(error)
+            return undefined
+          }),
+        ),
+      )
+    })
+    // testagent_change end
 
     // testagent_change - no snapshot loading needed
     // const loadSnapshot = Effect.tryPromise({ ... })
@@ -148,28 +193,29 @@ export const layer: Layer.Layer<Service, never, AppFileSystem.Service> = Layer.e
       const baseURL = (process.env.TEST_LLM_BASE_URL ?? "http://test-llm.platform.cmbchina.cn/v1").replace(/\/+$/, "")
       const userId = User.get().id ?? ""
       const url = `${baseURL}/models?user_id=${encodeURIComponent(userId)}`
-      
+
       log.info("[testagent] fetchTestLLMModels:", { url, userId, baseURL })
       // testagent_change - use native fetch instead of Effect HttpClient
       const response = yield* Effect.tryPromise({
-        try: () => fetch(url, {
-          headers: { Authorization: `Bearer ${apiKey}` },
-          signal: AbortSignal.timeout(10_000),
-        }),
+        try: () =>
+          fetch(url, {
+            headers: { Authorization: `Bearer ${apiKey}` },
+            signal: AbortSignal.timeout(10_000),
+          }),
         catch: (error) => error,
       })
-      
+
       if (!response.ok) {
         throw new Error(`test-llm /models returned HTTP ${response.status}`)
       }
-      
+
       const json = (yield* Effect.tryPromise({
         try: () => response.json(),
         catch: (error) => error,
       })) as { data?: Array<{ id: string; owned_by?: string; limit?: { context: number; output?: number } }> }
-      
+
       const result: Record<string, Model> = {}
-      
+
       for (const item of json.data ?? []) {
         if (!item.id) continue
         result[item.id] = {
@@ -189,16 +235,16 @@ export const layer: Layer.Layer<Service, never, AppFileSystem.Service> = Layer.e
           },
         }
       }
-      
+
       return result
     })
     // testagent_change end
 
-    const get = (): Effect.Effect<Record<string, Provider>> => 
+    const get = (): Effect.Effect<Record<string, Provider>> =>
       // testagent_change start - inject test-llm provider dynamically every time
       Effect.gen(function* () {
         const providers = yield* cachedGet
-        
+
         // Always check and inject test-llm if not present
         if (!providers["test-llm"]) {
           const models = yield* fetchTestLLMModels().pipe(
@@ -207,7 +253,7 @@ export const layer: Layer.Layer<Service, never, AppFileSystem.Service> = Layer.e
               return Effect.succeed({} as Record<string, Model>)
             }),
           )
-          
+
           const mutableProviders = { ...providers } as Record<string, Provider>
           mutableProviders["test-llm"] = {
             id: "test-llm",
@@ -219,10 +265,10 @@ export const layer: Layer.Layer<Service, never, AppFileSystem.Service> = Layer.e
           }
           return mutableProviders
         }
-        
+
         return providers
       })
-      // testagent_change end
+    // testagent_change end
 
     // testagent_change start - refresh disabled, models come from local cache only
     const refresh = Effect.fn("ModelsDev.refresh")(function* (_force = false) {
