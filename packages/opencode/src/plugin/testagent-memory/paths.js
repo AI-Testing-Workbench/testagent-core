@@ -173,3 +173,10 @@ export function getOpencodeConfigCommands() {
 export function getPersonalMemoryFile() {
     return join(getOpencodeConfigHomeDir(), "PERSONA.md");
 }
+/**
+ * 个人全局记忆文件-备份
+ * @returns
+ */
+export function getPersonalMemoryFileBackup() {
+    return join(getOpencodeConfigHomeDir(), "PERSONA_BK.md");
+}

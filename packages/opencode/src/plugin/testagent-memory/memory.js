@@ -1,6 +1,6 @@
-import { readFileSync, writeFileSync, readdirSync, unlinkSync } from "fs";
+import { readFileSync, writeFileSync, readdirSync, unlinkSync, copyFileSync, existsSync } from "fs";
 import { join, basename } from "path";
-import { getMemoryDir, getMemoryEntrypoint, ENTRYPOINT_NAME, validateMemoryFileName, MAX_MEMORY_FILES, MAX_MEMORY_FILE_BYTES, MAX_ENTRYPOINT_LINES, MAX_ENTRYPOINT_BYTES, FRONTMATTER_MAX_LINES, getPersonalMemoryFile, } from "./paths.js";
+import { getMemoryDir, getMemoryEntrypoint, ENTRYPOINT_NAME, validateMemoryFileName, MAX_MEMORY_FILES, MAX_MEMORY_FILE_BYTES, MAX_ENTRYPOINT_LINES, MAX_ENTRYPOINT_BYTES, FRONTMATTER_MAX_LINES, getPersonalMemoryFile, getPersonalMemoryFileBackup, } from "./paths.js";
 export const MEMORY_TYPES = ["user", "feedback", "project", "reference"];
 function parseFrontmatter(raw) {
     const trimmed = raw.trim();
@@ -149,6 +149,11 @@ export function readPersonalMemory() {
  */
 export function savePersonalMemory(content) {
     const memoryFilePath = getPersonalMemoryFile();
+    const backupFile = getPersonalMemoryFileBackup();
+    // 写入前保留 先前记忆
+    if (existsSync(memoryFilePath)) {
+        copyFileSync(memoryFilePath, backupFile);
+    }
     writeFileSync(memoryFilePath, content, "utf-8");
     return memoryFilePath;
 }

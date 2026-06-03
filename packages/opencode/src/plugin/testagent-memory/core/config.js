@@ -1,11 +1,11 @@
 import { z } from "zod";
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import * as log from "./log.js";
 // 记忆插件相关配置
 export const MemoryConfig = z.object({
-    // 是否启用插件，默认关闭
-    enable: z.boolean().default(false),
+    // 是否启用插件， 默认启用
+    enable: z.boolean().default(true),
     /** 是否开启调试，打印详细日志 */
     debug: z.boolean().default(false),
     // 是否初始化命令
@@ -46,46 +46,23 @@ export const MemoryConfig = z.object({
         .default({ recallEnable: true, llmRecall: false, providerID: "", modelID: "" }),
 });
 let current = MemoryConfig.parse({});
-let currentPath = "";
-let currentMtime = 0;
 // 获取配置
 export function config() {
-    reloadIfChanged();
     return current;
-}
-function reloadIfChanged() {
-    if (!currentPath || !existsSync(currentPath))
-        return;
-    try {
-        const mtime = statSync(currentPath).mtimeMs;
-        if (mtime === currentMtime)
-            return;
-        const fileTxt = readFileSync(currentPath, "utf8");
-        const raw = JSON.parse(isBlank(fileTxt) ? "{}" : fileTxt);
-        current = MemoryConfig.parse(raw);
-        currentMtime = mtime;
-        log.info("reload memory config from file");
-    }
-    catch (e) {
-        log.error("reload memory config error: ", e);
-    }
 }
 // 加载配置
 export async function load(directory) {
     try {
         const path = join(directory, "testagent-memory.json");
-        currentPath = path;
         if (existsSync(path)) {
             const fileTxt = readFileSync(path, "utf8");
             const raw = JSON.parse(isBlank(fileTxt) ? "{}" : fileTxt);
             current = MemoryConfig.parse(raw);
-            currentMtime = statSync(path).mtimeMs;
             log.info("load memory config from file");
             //log.info(`config1= ${JSON.stringify(current)}`);
             return current;
         }
         current = MemoryConfig.parse({});
-        currentMtime = 0;
         log.info("load memory config default");
         //log.info(`config2= ${JSON.stringify(current)}`);
         return current;

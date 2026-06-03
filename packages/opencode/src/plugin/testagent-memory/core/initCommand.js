@@ -25,8 +25,8 @@ function initAutoMemoryCmd(cmdDir) {
     try {
         const memoryCmdFileName = "memory.md";
         const filePath = join(cmdDir, memoryCmdFileName);
-        // 是否初始化memory命令
-        const memoryEnable = config().cmd.memory;
+        // 是否初始化memory命令：true 新增 false 删除
+        const memoryEnable = config().enable && config().cmd.memory;
         if (memoryEnable) {
             return addAutoMemoryCmd(filePath);
         }
@@ -61,8 +61,8 @@ function initAutoDreamCmd(cmdDir) {
     try {
         const memoryCmdFileName = "dream.md";
         const filePath = join(cmdDir, memoryCmdFileName);
-        // 是否初始化memory命令
-        const dreamEnable = config().cmd.dream;
+        // 是否初始化memory命令：true 新增 false 删除
+        const dreamEnable = config().enable && config().cmd.dream;
         if (dreamEnable) {
             return addAutoDreamCmd(filePath);
         }

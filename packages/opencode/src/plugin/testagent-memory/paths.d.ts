@@ -21,3 +21,8 @@ export declare function getOpencodeConfigCommands(): string;
  * @returns
  */
 export declare function getPersonalMemoryFile(): string;
+/**
+ * 个人全局记忆文件-备份
+ * @returns
+ */
+export declare function getPersonalMemoryFileBackup(): string;
