@@ -8,11 +8,12 @@ import { GrepTool } from "./grep"
 import { ReadTool } from "./read"
 import { TaskTool } from "./task"
 import { TodoWriteTool } from "./todo"
-import { WebFetchTool } from "./webfetch"
 import { WriteTool } from "./write"
 import { InvalidTool } from "./invalid"
 import { SkillTool } from "./skill"
 import { SandboxTool } from "../testagent/tool/sandbox" // testagent_change
+import { TaskQueryTool } from "../testagent/tool/task-query" // testagent_change
+import { TaskStartTool } from "../testagent/tool/task-start" // testagent_change
 import * as Tool from "./tool"
 import { Config } from "@/config/config"
 import { type ToolContext as PluginToolContext, type ToolDefinition } from "@opencode-ai/plugin"
@@ -22,7 +23,6 @@ import { ZodOverride } from "@/util/effect-zod"
 import { Plugin } from "../plugin"
 import { Provider } from "@/provider/provider"
 import { ProviderID, type ModelID } from "../provider/schema"
-import { WebSearchTool } from "./websearch"
 import { CodeSearchTool } from "./codesearch"
 import { RepoCloneTool } from "./repo_clone"
 import { RepoOverviewTool } from "./repo_overview"
@@ -117,8 +117,6 @@ export const layer: Layer.Layer<
     const todo = yield* TodoWriteTool
     const lsptool = yield* LspTool
     const plan = yield* PlanExitTool
-    const webfetch = yield* WebFetchTool
-    const websearch = yield* WebSearchTool
     const codesearch = yield* CodeSearchTool
     const repoClone = yield* RepoCloneTool
     const repoOverview = yield* RepoOverviewTool
@@ -130,6 +128,8 @@ export const layer: Layer.Layer<
     const patchtool = yield* ApplyPatchTool
     const skilltool = yield* SkillTool
     const sandbox = yield* SandboxTool // testagent_change
+    const taskquery = yield* TaskQueryTool // testagent_change
+    const taskstart = yield* TaskStartTool // testagent_change
     const agent = yield* Agent.Service
 
     const state = yield* InstanceState.make<State>(
@@ -223,9 +223,7 @@ export const layer: Layer.Layer<
           edit: Tool.init(edit),
           write: Tool.init(writetool),
           task: Tool.init(task),
-          fetch: Tool.init(webfetch),
           todo: Tool.init(todo),
-          search: Tool.init(websearch),
           code: Tool.init(codesearch),
           repo_clone: Tool.init(repoClone),
           repo_overview: Tool.init(repoOverview),
@@ -235,6 +233,8 @@ export const layer: Layer.Layer<
           lsp: Tool.init(lsptool),
           plan: Tool.init(plan),
           sandbox: Tool.init(sandbox), // testagent_change
+          task_query: Tool.init(taskquery), // testagent_change
+          task_start: Tool.init(taskstart), // testagent_change
         })
 
         return {
@@ -249,13 +249,13 @@ export const layer: Layer.Layer<
             tool.edit,
             tool.write,
             tool.task,
-            tool.fetch,
             tool.todo,
-            tool.search,
             ...(Flag.OPENCODE_EXPERIMENTAL_SCOUT ? [tool.code, tool.repo_clone, tool.repo_overview] : []),
             tool.skill,
             tool.patch,
             tool.sandbox, // testagent_change
+            tool.task_query, // testagent_change
+            tool.task_start, // testagent_change
             ...(Flag.OPENCODE_EXPERIMENTAL_LSP_TOOL ? [tool.lsp] : []),
             ...(Flag.OPENCODE_EXPERIMENTAL_PLAN_MODE && Flag.OPENCODE_CLIENT === "cli" ? [tool.plan] : []),
           ],
@@ -310,10 +310,6 @@ export const layer: Layer.Layer<
 
     const tools: Interface["tools"] = Effect.fn("ToolRegistry.tools")(function* (input) {
       const filtered = (yield* all()).filter((tool) => {
-        if (tool.id === WebSearchTool.id) {
-          return webSearchEnabled(input.providerID)
-        }
-
         const usePatch =
           input.modelID.includes("gpt-") && !input.modelID.includes("oss") && !input.modelID.includes("gpt-4")
         if (tool.id === ApplyPatchTool.id) return usePatch
