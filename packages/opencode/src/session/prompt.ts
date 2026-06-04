@@ -1690,18 +1690,40 @@ NOTE: At any point in time through this workflow you should feel free to ask the
             // 删掉要重试的 assistant 消息，让 loop 重新生成
             // yield* sessions.removeMessage({ sessionID: input.sessionID, messageID: input.messageID })
 
-            // 重新触发 chat.message 事件，让 langfuse 用 user 消息 ID 建立新的 trace
+            // 把 user 消息的 model 更新为 session 当前选中的模型，
+            // 避免 loop 继续用旧模型（切换模型后恢复任务的场景）
             if (userMsgID) {
               const userMsg = allMsgs.find((m) => m.info.id === userMsgID)
-              if (userMsg) {
+              if (userMsg && userMsg.info.role === "user") {
+                // 优先用前端传入的 model，其次 session.model，最后 defaultModel
+                const sess = yield* sessions.get(input.sessionID).pipe(Effect.orDie)
+                const sessModel = sess.model
+                const inputModel = input.model
+                const currentModel = inputModel
+                  ? { providerID: inputModel.providerID, modelID: inputModel.modelID }
+                  : sessModel
+                    ? { providerID: sessModel.providerID, modelID: sessModel.id }
+                    : (yield* provider.defaultModel())
+
+                if (
+                  currentModel.providerID !== userMsg.info.model.providerID ||
+                  currentModel.modelID !== userMsg.info.model.modelID
+                ) {
+                  yield* sessions.updateMessage({
+                    ...userMsg.info,
+                    model: { ...userMsg.info.model, providerID: currentModel.providerID, modelID: currentModel.modelID },
+                  })
+                }
+
+                // 重新触发 chat.message 事件，让 langfuse 用 user 消息 ID 建立新的 trace
                 yield* plugin.trigger(
                   "chat.message",
                   {
                     sessionID: input.sessionID,
                     messageID: userMsgID,
-                    agent: userMsg.info.role === "user" ? userMsg.info.agent : undefined,
-                    model: userMsg.info.role === "user" ? userMsg.info.model : undefined,
-                    variant: userMsg.info.role === "user" ? userMsg.info.model?.variant : undefined,
+                    agent: userMsg.info.agent,
+                    model: userMsg.info.model,
+                    variant: userMsg.info.model?.variant,
                   },
                   { message: userMsg.info, parts: userMsg.parts },
                 )
@@ -1925,6 +1947,7 @@ export class LoopInput extends Schema.Class<LoopInput>("SessionPrompt.LoopInput"
 export const ResumeInput = Schema.Struct({
   sessionID: SessionID,
   messageID: MessageID,
+  model: Schema.optional(ModelRef),
 }).pipe(withStatics((s) => ({ zod: zod(s) })))
 export type ResumeInput = Schema.Schema.Type<typeof ResumeInput>
 // testagent_change end
