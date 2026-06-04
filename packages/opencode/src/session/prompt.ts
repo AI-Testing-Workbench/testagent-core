@@ -1688,7 +1688,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
             const userMsgID = target?.info.role === "assistant" ? target.info.parentID : undefined
 
             // 删掉要重试的 assistant 消息，让 loop 重新生成
-            yield* sessions.removeMessage({ sessionID: input.sessionID, messageID: input.messageID })
+            // yield* sessions.removeMessage({ sessionID: input.sessionID, messageID: input.messageID })
 
             // 重新触发 chat.message 事件，让 langfuse 用 user 消息 ID 建立新的 trace
             if (userMsgID) {
