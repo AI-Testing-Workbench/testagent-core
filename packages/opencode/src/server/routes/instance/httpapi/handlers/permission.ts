@@ -1,8 +1,10 @@
 import { Permission } from "@/permission"
 import { PermissionID } from "@/permission/schema"
-import { Effect } from "effect"
+import { Effect, Schema } from "effect"
 import { HttpApiBuilder } from "effect/unstable/httpapi"
 import { InstanceHttpApi } from "../api"
+import { notFound } from "../errors" // kilocode_change
+import { SaveAlwaysRulesBody } from "../groups/permission" // kilocode_change
 
 export const permissionHandlers = HttpApiBuilder.group(InstanceHttpApi, "permission", (handlers) =>
   Effect.gen(function* () {
@@ -24,6 +26,21 @@ export const permissionHandlers = HttpApiBuilder.group(InstanceHttpApi, "permiss
       return true
     })
 
-    return handlers.handle("list", list).handle("reply", reply)
+    // kilocode_change start
+    const saveAlwaysRules = Effect.fn("PermissionHttpApi.saveAlwaysRules")(function* (ctx: {
+      params: { requestID: PermissionID }
+      payload: Schema.Schema.Type<typeof SaveAlwaysRulesBody>
+    }) {
+      const ok = yield* svc.saveAlwaysRules({
+        requestID: ctx.params.requestID,
+        approvedAlways: ctx.payload.approvedAlways ? [...ctx.payload.approvedAlways] : undefined,
+        deniedAlways: ctx.payload.deniedAlways ? [...ctx.payload.deniedAlways] : undefined,
+      })
+      if (!ok) return yield* notFound(`Permission request not found: ${ctx.params.requestID}`)
+      return true
+    })
+    // kilocode_change end
+
+    return handlers.handle("list", list).handle("reply", reply).handle("saveAlwaysRules", saveAlwaysRules) // kilocode_change
   }),
 )

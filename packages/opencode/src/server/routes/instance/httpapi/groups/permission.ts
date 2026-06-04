@@ -3,6 +3,7 @@ import { PermissionID } from "@/permission/schema"
 import { Schema } from "effect"
 import { HttpApi, HttpApiEndpoint, HttpApiError, HttpApiGroup, OpenApi } from "effect/unstable/httpapi"
 import { Authorization } from "../middleware/authorization"
+import { ApiNotFoundError } from "../errors" // kilocode_change
 import { InstanceContextMiddleware } from "../middleware/instance-context"
 import { WorkspaceRoutingMiddleware } from "../middleware/workspace-routing"
 import { described } from "./metadata"
@@ -12,6 +13,13 @@ const ReplyPayload = Schema.Struct({
   reply: Permission.Reply,
   message: Schema.optional(Schema.String),
 })
+
+// kilocode_change start
+export const SaveAlwaysRulesBody = Schema.Struct({
+  approvedAlways: Schema.optional(Schema.Array(Schema.String)),
+  deniedAlways: Schema.optional(Schema.Array(Schema.String)),
+})
+// kilocode_change end
 
 export const PermissionApi = HttpApi.make("permission")
   .add(
@@ -38,6 +46,20 @@ export const PermissionApi = HttpApi.make("permission")
             description: "Approve or deny a permission request from the AI assistant.",
           }),
         ),
+        // kilocode_change start
+        HttpApiEndpoint.post("saveAlwaysRules", `${root}/:requestID/always-rules`, {
+          params: { requestID: PermissionID },
+          payload: SaveAlwaysRulesBody,
+          success: described(Schema.Boolean, "Always-rules saved"),
+          error: [ApiNotFoundError],
+        }).annotateMerge(
+          OpenApi.annotations({
+            identifier: "permission.saveAlwaysRules",
+            summary: "Save always-allow/deny permission rules",
+            description: "Save approved/denied always-rules for a pending permission request.",
+          }),
+        ),
+        // kilocode_change end
       )
       .annotateMerge(
         OpenApi.annotations({

@@ -2,6 +2,7 @@ import { afterEach, test, expect } from "bun:test"
 import os from "os"
 import { Cause, Effect, Exit, Fiber, Layer } from "effect"
 import { Bus } from "../../src/bus"
+import { Config } from "../../src/config/config"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 import { Permission } from "../../src/permission"
 import { PermissionID } from "../../src/permission/schema"
@@ -19,7 +20,15 @@ import { testEffect } from "../lib/effect"
 import { MessageID, SessionID } from "../../src/session/schema"
 
 const bus = Bus.layer
-const env = Layer.mergeAll(Permission.layer.pipe(Layer.provide(bus)), bus, CrossSpawnSpawner.defaultLayer)
+const cfg = Layer.mock(Config.Service)({
+  updateGlobal: () => Effect.succeed({ info: {}, changed: true }),
+})
+const env = Layer.mergeAll(
+  Permission.layer.pipe(Layer.provide(bus), Layer.provide(cfg)),
+  cfg,
+  bus,
+  CrossSpawnSpawner.defaultLayer,
+)
 const it = testEffect(env)
 
 afterEach(async () => {
@@ -68,6 +77,12 @@ const reply = (input: Parameters<Permission.Interface["reply"]>[0]) =>
     return yield* permission.reply(input)
   })
 
+const saveAlwaysRules = (input: Parameters<Permission.Interface["saveAlwaysRules"]>[0]) =>
+  Effect.gen(function* () {
+    const permission = yield* Permission.Service
+    return yield* permission.saveAlwaysRules(input)
+  })
+
 const list = () =>
   Effect.gen(function* () {
     const permission = yield* Permission.Service
@@ -114,6 +129,21 @@ test("fromConfig - mixed string and object values", () => {
 test("fromConfig - empty object", () => {
   const result = Permission.fromConfig({})
   expect(result).toEqual([])
+})
+
+test("toConfig - converts rules to permission config", () => {
+  const result = Permission.toConfig([
+    { permission: "bash", pattern: "npm *", action: "allow" },
+    { permission: "bash", pattern: "rm -rf /", action: "deny" },
+    { permission: "webfetch", pattern: "*", action: "allow" },
+  ])
+  expect(result).toEqual({
+    bash: {
+      "npm *": "allow",
+      "rm -rf /": "deny",
+    },
+    webfetch: "allow",
+  })
 })
 
 test("fromConfig - expands tilde to home directory", () => {
@@ -796,6 +826,80 @@ it.live("reply - always persists approval and resolves", () =>
     }).pipe(run)
     expect(result).toBeUndefined()
   }),
+)
+
+it.live("saveAlwaysRules - approved rules auto-allow future requests", () =>
+  withDir({ git: true }, () =>
+    Effect.gen(function* () {
+      const fiber = yield* ask({
+        id: PermissionID.make("per_save_approved"),
+        sessionID: SessionID.make("session_test"),
+        permission: "bash",
+        patterns: ["npm install"],
+        metadata: { rules: ["npm *", "npm install"] },
+        always: ["npm install *"],
+        ruleset: [],
+      }).pipe(Effect.forkScoped)
+
+      yield* waitForPending(1)
+      expect(
+        yield* saveAlwaysRules({
+          requestID: PermissionID.make("per_save_approved"),
+          approvedAlways: ["npm install"],
+        }),
+      ).toBe(true)
+      yield* reply({ requestID: PermissionID.make("per_save_approved"), reply: "once" })
+      yield* Fiber.join(fiber)
+
+      const result = yield* ask({
+        sessionID: SessionID.make("session_test"),
+        permission: "bash",
+        patterns: ["npm install"],
+        metadata: {},
+        always: [],
+        ruleset: [],
+      })
+      expect(result).toBeUndefined()
+    }),
+  ),
+)
+
+it.live("saveAlwaysRules - denied rules auto-deny future requests", () =>
+  withDir({ git: true }, () =>
+    Effect.gen(function* () {
+      const fiber = yield* ask({
+        id: PermissionID.make("per_save_denied"),
+        sessionID: SessionID.make("session_test"),
+        permission: "bash",
+        patterns: ["rm -rf /"],
+        metadata: { rules: ["rm -rf /"] },
+        always: [],
+        ruleset: [],
+      }).pipe(Effect.forkScoped)
+
+      yield* waitForPending(1)
+      expect(
+        yield* saveAlwaysRules({
+          requestID: PermissionID.make("per_save_denied"),
+          deniedAlways: ["rm -rf /"],
+        }),
+      ).toBe(true)
+      yield* reply({ requestID: PermissionID.make("per_save_denied"), reply: "reject" })
+      yield* Fiber.await(fiber)
+
+      const err = yield* fail(
+        ask({
+          sessionID: SessionID.make("session_test"),
+          permission: "bash",
+          patterns: ["rm -rf /"],
+          metadata: {},
+          always: [],
+          ruleset: [],
+        }),
+      )
+      expect(err).toBeInstanceOf(Permission.DeniedError)
+    }),
+  ),
 )
 
 it.live("reply - reject cancels all pending for same session", () =>

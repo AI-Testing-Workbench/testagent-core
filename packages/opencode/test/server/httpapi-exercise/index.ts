@@ -223,6 +223,14 @@ const scenarios: Scenario[] = [
     .json(200, (body) => {
       check(body === true, "permission reply should return true even when request is no longer pending")
     }),
+  http.protected
+    .post("/permission/{requestID}/always-rules", "permission.saveAlwaysRules")
+    .at((ctx) => ({
+      path: route("/permission/{requestID}/always-rules", { requestID: "per_httpapi_missing" }),
+      headers: ctx.headers(),
+      body: {},
+    }))
+    .status(404),
   http.protected.get("/question", "question.list").json(200, array),
   http.protected
     .post("/question/{requestID}/reply", "question.reply.invalid")
