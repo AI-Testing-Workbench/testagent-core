@@ -34,7 +34,7 @@ export const SandboxTool = Tool.define(
         Effect.gen(function* () {
           try {
             const response = yield* Effect.promise(() =>
-              fetch("http://55.59.147.27:8000/sandbox", {
+              fetch("http://fastautomator-openapi-group.paas.cmbchina.cn/sandbox-backend/sandbox", {
                 method: "POST",
                 headers: {
                   "Content-Type": "application/json",
@@ -99,4 +99,3 @@ export const SandboxTool = Tool.define(
     }
   }),
 )
-
