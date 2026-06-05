@@ -19,7 +19,7 @@ import { dirname, join } from "path"
 import { homedir } from "os"
 
 const LANGFUSE_BASE_URL = "http://testhub-agent-trace.paasuat.cmbchina.cn";
-const LANGFUSE_FINAL_BATCH_UPLOAD_PATH = "/batch/upload"
+const LANGFUSE_FINAL_BATCH_UPLOAD_PATH = "/api/trpc/batchTrace.save"
 
 let baseMetadata: () => Record<string, string>
 
@@ -341,6 +341,9 @@ function consumePendingSubagent(parentSessionId: string) {
 // 存储用户输入
 const userInputs = new Map<string, string>()
 
+// 存储每个 session 最后一条 assistant 输出，用于 trace 根节点 output 兜底
+const sessionAssistantOutputs = new Map<string, string>()
+
 // 存储 LLM 输入消息
 const llmInputs = new Map<string, any[]>()
 
@@ -362,6 +365,7 @@ const messageCounter = new Map<string, number>()
 // Langfuse credentials (will be updated from project keys)
 let publicKey: string
 let secretKey: string
+let currentProjectId = "unknown_project"
 
 // ==================== 常量 ====================
 
@@ -434,11 +438,20 @@ async function readResponseTextSafe(res: Response): Promise<string> {
   }
 }
 
+function withEventBodyTags(event: any) {
+  if (!event || typeof event !== "object" || !event.body) return event
+  return {
+    ...event,
+    body: withEventMetadataTags(event.body),
+  }
+}
+
 async function uploadToIngestion(events: any[]) {
   // console.log("进入uploadToIngestion")
   if (events.length === 0) return { successes: [], errors: [] }
 
-  const body = JSON.stringify({ batch: events })
+  const taggedEvents = events.map(withEventBodyTags)
+  const body = JSON.stringify({ batch: taggedEvents })
   // console.log("body", body)
   const credentials = btoa(`${publicKey}:${secretKey}`)
   // console.log("credentials", credentials)
@@ -456,7 +469,7 @@ async function uploadToIngestion(events: any[]) {
     //console.log("已发送/api/public/ingestion接口")
     if (res.ok) {
       //console.log("[langfuse] Ingestion success")
-      return { successes: events.map((event) => ({ id: event.id })), errors: [] }
+      return { successes: taggedEvents.map((event) => ({ id: event.id })), errors: [] }
     }
 
     const text = await readResponseTextSafe(res)
@@ -493,6 +506,11 @@ async function postJsonWithAuth(path: string, payload: any) {
 }
 
 function buildFinalBatchUpload(batch: TraceBatch) {
+  if (!batch.output) {
+    const finalOutput = getFinalTraceOutput(batch.id, batch.sessionId) ?? getFinalTraceOutputFromBatch(batch)
+    if (finalOutput) batch.output = finalOutput
+  }
+
   const events: any[] = [
     buildIngestionEvent("trace-create", traceEventBody(batch)),
   ]
@@ -549,7 +567,7 @@ function enqueueFinalBatchUploads(items: any[], options?: { persist?: boolean })
   const existingIds = new Set(finalBatchUploads.map((item) => item.id))
   for (const item of items) {
     if (!isValidFinalBatchUpload(item) || existingIds.has(item.id)) continue
-    finalBatchUploads.push(item)
+    finalBatchUploads.push(withEventBodyTags(item))
     existingIds.add(item.id)
   }
 
@@ -587,8 +605,9 @@ function loadFinalBatchUploadsFromDisk() {
 async function uploadFinalBatchItems(items: any[]) {
   if (items.length === 0) return []
 
-  const result = await postJsonWithAuth(LANGFUSE_FINAL_BATCH_UPLOAD_PATH, { batch: items })
-  return result.ok ? [] : items
+  const taggedItems = items.map(withEventBodyTags)
+  const result = await postJsonWithAuth(LANGFUSE_FINAL_BATCH_UPLOAD_PATH, { json: { [currentProjectId]: taggedItems } })
+  return result.ok ? [] : taggedItems
 }
 
 async function retryFinalBatchUploads() {
@@ -619,12 +638,25 @@ async function uploadFinalTraceBatch(batch: TraceBatch) {
   }
 }
 
+function withEventMetadataTags(body: any) {
+  if (!body || typeof body !== "object") return body
+
+  return {
+    ...body,
+    tags: OBSERVATION_TAGS,
+    metadata: {
+      ...(body.metadata ?? {}),
+      tags: OBSERVATION_TAGS,
+    },
+  }
+}
+
 function buildIngestionEvent(type: string, body: any, timestamp = new Date().toISOString()) {
   return {
     id: generateUUID(),
     timestamp,
     type,
-    body,
+    body: withEventMetadataTags(body),
   }
 }
 
@@ -694,7 +726,7 @@ function enqueueFailedIngestionEvents(events: any[], options?: { persist?: boole
   const existingIds = new Set(failedIngestionEvents.map((event) => event.id))
   for (const event of events) {
     if (!isValidIngestionEvent(event) || existingIds.has(event.id)) continue
-    failedIngestionEvents.push(event)
+    failedIngestionEvents.push(withEventBodyTags(event))
     existingIds.add(event.id)
   }
 
@@ -766,7 +798,7 @@ function traceEventBody(batch: TraceBatch) {
     name: batch.name,
     sessionId: batch.sessionId,
     input: batch.input,
-    output: batch.output,
+    output: batch.output ?? "",
     tags: batch.tags,
     metadata: batch.metadata,
   }
@@ -871,6 +903,91 @@ function buildGenerationText(g: GenInfo) {
 
   const combinedText = reasonText ? `<think>\n${reasonText}\n</think>\n\n${textContent}` : textContent
   return combinedText || g.output || ""
+}
+
+function stripThinkTags(text: string) {
+  return text.replace(/<think>[\s\S]*?<\/think>/g, "").trim()
+}
+
+function extractTextFromParts(parts: any[]) {
+  const textContent = parts
+    .filter((p: any) => p?.type === "text" && typeof p?.text === "string")
+    .map((p: any) => p.text)
+    .join("\n\n")
+  const reasonText = parts
+    .filter((p: any) => p?.type === "reasoning" && typeof p?.text === "string")
+    .map((p: any) => p.text)
+    .join("\n")
+
+  return reasonText ? `<think>\n${reasonText}\n</think>\n\n${textContent}` : textContent
+}
+
+function getGenerationOutputText(g: GenInfo) {
+  const finalText = g.finalOutput?.text
+  if (typeof finalText === "string" && finalText.trim()) return finalText
+
+  if (typeof g.output === "string" && g.output.trim()) {
+    try {
+      const parsed = JSON.parse(g.output)
+      if (typeof parsed?.text === "string" && parsed.text.trim()) return parsed.text
+    } catch {
+    }
+    return g.output
+  }
+  return buildGenerationText(g)
+}
+
+function getGenerationDataOutputText(generation: GenerationData) {
+  const metadataText = generation.metadata?.output?.text
+  if (typeof metadataText === "string" && metadataText.trim()) return metadataText
+
+  if (typeof generation.output === "string" && generation.output.trim()) {
+    try {
+      const parsed = JSON.parse(generation.output)
+      if (typeof parsed?.text === "string" && parsed.text.trim()) return parsed.text
+    } catch {
+    }
+    return generation.output
+  }
+
+  if (generation.output && typeof generation.output === "object" && typeof generation.output.text === "string") {
+    return generation.output.text
+  }
+
+  return ""
+}
+
+function getFinalTraceOutputFromBatch(batch: TraceBatch) {
+  for (const generation of [...batch.generations].reverse()) {
+    const text = stripThinkTags(getGenerationDataOutputText(generation))
+    if (text) return text
+  }
+
+  return undefined
+}
+
+function getFinalTraceOutput(traceId: string, preferredSessionId?: string | null) {
+  if (preferredSessionId) {
+    const assistantOutput = sessionAssistantOutputs.get(preferredSessionId)
+    const text = assistantOutput ? stripThinkTags(assistantOutput) : ""
+    if (text) return text
+  }
+
+  const candidates = allGenerations.filter((g) => g.traceId === traceId)
+  const preferredCandidates = preferredSessionId ? candidates.filter((g) => g.sessionId === preferredSessionId) : candidates
+  for (const g of [...preferredCandidates].reverse()) {
+    const text = stripThinkTags(getGenerationOutputText(g))
+    if (text) return text
+  }
+
+  if (preferredSessionId) {
+    for (const g of [...candidates.filter((g) => g.sessionId !== preferredSessionId)].reverse()) {
+      const text = stripThinkTags(getGenerationOutputText(g))
+      if (text) return text
+    }
+  }
+
+  return undefined
 }
 
 async function finalizeGeneration(sessionId: string, g: GenInfo, options?: { tokens?: any; endTime?: Date; removeActive?: boolean }) {
@@ -1638,6 +1755,7 @@ export const LangfusePlugin: Plugin = async (ctx) => {
     m.source = "testagent"
     return m
   }
+  currentProjectId = project_id || "unknown_project"
 
   configureFailedIngestionQueue(publicKey)
   configureFinalBatchUploadQueue(publicKey)
@@ -1684,12 +1802,22 @@ export const LangfusePlugin: Plugin = async (ctx) => {
         .map((p: any) => p.text)
         .join("\n")
       userInputs.set(sessionId, textContent)
+      const assistantOutput = extractTextFromParts(output.parts || [])
+      const isAssistantMessage = output.message?.role === "assistant" || output.message?.info?.role === "assistant"
+      if (isAssistantMessage && stripThinkTags(assistantOutput)) {
+        sessionAssistantOutputs.set(sessionId, assistantOutput)
+      }
 
       const count = (messageCounter.get(sessionId) || 0) + 1
       messageCounter.set(sessionId, count)
 
       const batch = createTraceBatch(rootSessionId, textContent || "message", ctx, traceId)
+      if (isAssistantMessage && sessionId === rootSessionId) {
+        const finalText = stripThinkTags(assistantOutput)
+        if (finalText) batch.output = finalText
+      }
       updateTraceBatch(traceId, {
+        ...(isAssistantMessage && sessionId === rootSessionId && stripThinkTags(assistantOutput) ? { output: stripThinkTags(assistantOutput) } : {}),
         metadata: {
           ...batch.metadata,
           messageID: input.messageID,
@@ -2198,6 +2326,7 @@ export const LangfusePlugin: Plugin = async (ctx) => {
           llmInputs.delete(sessionId)
           systemPrompts.delete(sessionId)
           userInputs.delete(sessionId)
+          sessionAssistantOutputs.delete(sessionId)
           messageCounter.delete(sessionId)
           return
         }
@@ -2208,16 +2337,13 @@ export const LangfusePlugin: Plugin = async (ctx) => {
           }
         }
 
-        if (allGenerations.length > 0) {
-          const last = allGenerations[allGenerations.length - 1]
-          if (last && last.finalOutput) {
-            const rawText = last.finalOutput.text || ""
-            const finalText = rawText.replace(/<think>[\s\S]*?<\/think>/g, "").trim()
-            updateTraceBatch(traceId, { output: finalText })
-            const batch = traceBatches.get(traceId)
-            if (batch) {
-              await upsertTraceImmediately(batch)
-            }
+        const currentBatch = traceBatches.get(traceId)
+        const finalText = getFinalTraceOutput(traceId, rootSessionId) ?? (currentBatch ? getFinalTraceOutputFromBatch(currentBatch) : undefined)
+        if (finalText !== undefined) {
+          updateTraceBatch(traceId, { output: finalText })
+          const batch = traceBatches.get(traceId)
+          if (batch) {
+            await upsertTraceImmediately(batch)
           }
         }
 
@@ -2240,6 +2366,7 @@ export const LangfusePlugin: Plugin = async (ctx) => {
         allToolDefs.clear()
         messageCounter.clear()
         userInputs.clear()
+        sessionAssistantOutputs.clear()
         llmInputs.clear()
         systemPrompts.clear()
         trackedSessionIds.clear()
