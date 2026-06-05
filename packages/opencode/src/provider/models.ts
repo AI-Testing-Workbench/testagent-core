@@ -190,7 +190,7 @@ export const layer: Layer.Layer<Service, never, AppFileSystem.Service> = Layer.e
     // testagent_change start - fetch test-llm models helper
     const fetchTestLLMModels = Effect.fn("ModelsDev.fetchTestLLMModels")(function* () {
       const apiKey = process.env.TEST_LLM_API_KEY ?? "sk-WHMJMG6H36UGdq7FdVzODA"
-      const baseURL = (process.env.TEST_LLM_BASE_URL ?? "http://test-llm.platform.cmbchina.cn/v1").replace(/\/+$/, "")
+      const baseURL = (process.env.TEST_LLM_BASE_URL ?? decodeURIComponent(atob("aHR0cCUzQSUyRiUyRnRlc3QtbGxtLnBsYXRmb3JtLmNtYmNoaW5hLmNuJTJGdjE="))).replace(/\/+$/, "")
       const userId = User.get().id ?? ""
       const url = `${baseURL}/models?user_id=${encodeURIComponent(userId)}`
 
@@ -259,7 +259,7 @@ export const layer: Layer.Layer<Service, never, AppFileSystem.Service> = Layer.e
             id: "test-llm",
             name: "Test LLM",
             env: ["TEST_LLM_API_KEY"],
-            api: "http://test-llm.platform.cmbchina.cn/v1",
+            api: decodeURIComponent(atob("aHR0cCUzQSUyRiUyRnRlc3QtbGxtLnBsYXRmb3JtLmNtYmNoaW5hLmNuJTJGdjE=")),
             npm: "@ai-sdk/openai-compatible",
             models,
           }

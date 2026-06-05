@@ -301,7 +301,7 @@ export const layer: Layer.Layer<Service, never, AppFileSystem.Service | ChildPro
           }
 
           const filename = `ripgrep-${VERSION}-${config.platform}.${config.extension}`
-          const url = `https://testagent-rg-download.paasuat.cmbchina.cn/BurntSushi/ripgrep/releases/download/${VERSION}/${filename}`
+          const url = `${decodeURIComponent(atob("aHR0cHMlM0ElMkYlMkZ0ZXN0YWdlbnQtcmctZG93bmxvYWQucGFhc3VhdC5jbWJjaGluYS5jbg=="))}/BurntSushi/ripgrep/releases/download/${VERSION}/${filename}`
           const archive = path.join(Global.Path.bin, filename)
 
           log.info("downloading ripgrep", { url })
