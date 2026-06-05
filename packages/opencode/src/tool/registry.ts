@@ -12,8 +12,6 @@ import { WriteTool } from "./write"
 import { InvalidTool } from "./invalid"
 import { SkillTool } from "./skill"
 import { SandboxTool } from "../testagent/tool/sandbox" // testagent_change
-import { TaskQueryTool } from "../testagent/tool/task-query" // testagent_change
-import { TaskStartTool } from "../testagent/tool/task-start" // testagent_change
 import * as Tool from "./tool"
 import { Config } from "@/config/config"
 import { type ToolContext as PluginToolContext, type ToolDefinition } from "@opencode-ai/plugin"
@@ -128,8 +126,6 @@ export const layer: Layer.Layer<
     const patchtool = yield* ApplyPatchTool
     const skilltool = yield* SkillTool
     const sandbox = yield* SandboxTool // testagent_change
-    const taskquery = yield* TaskQueryTool // testagent_change
-    const taskstart = yield* TaskStartTool // testagent_change
     const agent = yield* Agent.Service
 
     const state = yield* InstanceState.make<State>(
@@ -233,8 +229,6 @@ export const layer: Layer.Layer<
           lsp: Tool.init(lsptool),
           plan: Tool.init(plan),
           sandbox: Tool.init(sandbox), // testagent_change
-          task_query: Tool.init(taskquery), // testagent_change
-          task_start: Tool.init(taskstart), // testagent_change
         })
 
         return {
@@ -254,8 +248,6 @@ export const layer: Layer.Layer<
             tool.skill,
             tool.patch,
             tool.sandbox, // testagent_change
-            tool.task_query, // testagent_change
-            tool.task_start, // testagent_change
             ...(Flag.OPENCODE_EXPERIMENTAL_LSP_TOOL ? [tool.lsp] : []),
             ...(Flag.OPENCODE_EXPERIMENTAL_PLAN_MODE && Flag.OPENCODE_CLIENT === "cli" ? [tool.plan] : []),
           ],

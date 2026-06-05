@@ -85,16 +85,6 @@ describe("tool.registry", () => {
     }),
   )
 
-  it.instance("includes testagent task tools", () =>
-    Effect.gen(function* () {
-      const registry = yield* ToolRegistry.Service
-      const ids = yield* registry.ids()
-
-      expect(ids).toContain("task-query")
-      expect(ids).toContain("task-start")
-    }),
-  )
-
   it.instance("loads tools from .opencode/tool (singular)", () =>
     Effect.gen(function* () {
       const test = yield* TestInstance
