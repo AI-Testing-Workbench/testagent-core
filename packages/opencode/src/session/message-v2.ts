@@ -2,6 +2,7 @@ import { BusEvent } from "@/bus/bus-event"
 import { SessionID, MessageID, PartID } from "./schema"
 import z from "zod"
 import { NamedError } from "@opencode-ai/core/util/error"
+import * as Log from "@opencode-ai/core/util/log" // testagent_change
 import { APICallError, convertToModelMessages, LoadAPIKeyError, type ModelMessage, type UIMessage } from "ai"
 import { LSP } from "@/lsp/lsp"
 import { Snapshot } from "@/snapshot"
@@ -30,6 +31,8 @@ import * as EffectLogger from "@opencode-ai/core/effect/logger"
 // testagent_change start
 import { EditorContext } from "../testagent/editor-context"
 // testagent_change end
+
+const log = Log.create({ service: "session.message" }) // testagent_change
 
 /** Error shape thrown by Bun's fetch() when gzip/br decompression fails mid-stream */
 interface FetchDecompressionError extends Error {
@@ -690,6 +693,12 @@ const older = (row: Cursor) =>
 
 function hydrate(rows: (typeof MessageTable.$inferSelect)[]) {
   const ids = rows.map((row) => row.id)
+  // testagent_change start - diagnose history session message loading
+  log.info("hydrate messages", {
+    count: rows.length,
+    ids: ids.slice(0, 20),
+  })
+  // testagent_change end
   const partByMessage = new Map<string, Part[]>()
   if (ids.length > 0) {
     const partRows = Database.use((db) =>
@@ -700,6 +709,23 @@ function hydrate(rows: (typeof MessageTable.$inferSelect)[]) {
         .orderBy(PartTable.message_id, PartTable.id)
         .all(),
     )
+    // testagent_change start - diagnose history session message loading
+    const sample = partRows.slice(0, 30).map((row) => {
+      const data = row.data as Record<string, unknown>
+      const state = data.state as Record<string, unknown> | undefined
+      return {
+        id: row.id,
+        messageID: row.message_id,
+        type: data.type,
+        status: state?.status,
+      }
+    })
+    log.info("hydrate parts", {
+      messageCount: ids.length,
+      partCount: partRows.length,
+      sample,
+    })
+    // testagent_change end
     for (const row of partRows) {
       const next = part(row)
       const list = partByMessage.get(row.message_id)
@@ -1013,39 +1039,78 @@ export function toModelMessages(
 }
 
 export function page(input: { sessionID: SessionID; limit: number; before?: string }) {
-  const before = input.before ? cursor.decode(input.before) : undefined
-  const where = before
-    ? and(eq(MessageTable.session_id, input.sessionID), older(before))
-    : eq(MessageTable.session_id, input.sessionID)
-  const rows = Database.use((db) =>
-    db
-      .select()
-      .from(MessageTable)
-      .where(where)
-      .orderBy(desc(MessageTable.time_created), desc(MessageTable.id))
-      .limit(input.limit + 1)
-      .all(),
-  )
-  if (rows.length === 0) {
-    const row = Database.use((db) =>
-      db.select({ id: SessionTable.id }).from(SessionTable).where(eq(SessionTable.id, input.sessionID)).get(),
+  try {
+    // testagent_change start - diagnose history session message loading
+    log.info("page requested", {
+      sessionID: input.sessionID,
+      limit: input.limit,
+      before: input.before,
+    })
+    // testagent_change end
+    const before = input.before ? cursor.decode(input.before) : undefined
+    const where = before
+      ? and(eq(MessageTable.session_id, input.sessionID), older(before))
+      : eq(MessageTable.session_id, input.sessionID)
+    const rows = Database.use((db) =>
+      db
+        .select()
+        .from(MessageTable)
+        .where(where)
+        .orderBy(desc(MessageTable.time_created), desc(MessageTable.id))
+        .limit(input.limit + 1)
+        .all(),
     )
-    if (!row) throw new NotFoundError({ message: `Session not found: ${input.sessionID}` })
-    return {
-      items: [] as WithParts[],
-      more: false,
+    // testagent_change start - diagnose history session message loading
+    log.info("page message rows", {
+      sessionID: input.sessionID,
+      count: rows.length,
+      ids: rows.slice(0, 20).map((row) => row.id),
+    })
+    // testagent_change end
+    if (rows.length === 0) {
+      const row = Database.use((db) =>
+        db.select({ id: SessionTable.id }).from(SessionTable).where(eq(SessionTable.id, input.sessionID)).get(),
+      )
+      if (!row) {
+        // testagent_change start - diagnose history session message loading
+        log.warn("page session missing", { sessionID: input.sessionID })
+        // testagent_change end
+        throw new NotFoundError({ message: `Session not found: ${input.sessionID}` })
+      }
+      return {
+        items: [] as WithParts[],
+        more: false,
+      }
     }
-  }
 
-  const more = rows.length > input.limit
-  const slice = more ? rows.slice(0, input.limit) : rows
-  const items = hydrate(slice)
-  items.reverse()
-  const tail = slice.at(-1)
-  return {
-    items,
-    more,
-    cursor: more && tail ? cursor.encode({ id: tail.id, time: tail.time_created }) : undefined,
+    const more = rows.length > input.limit
+    const slice = more ? rows.slice(0, input.limit) : rows
+    const items = hydrate(slice)
+    items.reverse()
+    const tail = slice.at(-1)
+    // testagent_change start - diagnose history session message loading
+    log.info("page hydrated", {
+      sessionID: input.sessionID,
+      count: items.length,
+      more,
+      tail: tail?.id,
+    })
+    // testagent_change end
+    return {
+      items,
+      more,
+      cursor: more && tail ? cursor.encode({ id: tail.id, time: tail.time_created }) : undefined,
+    }
+  } catch (err) {
+    // testagent_change start - diagnose history session message loading
+    log.error("page failed", {
+      sessionID: input.sessionID,
+      limit: input.limit,
+      before: input.before,
+      err,
+    })
+    // testagent_change end
+    throw err
   }
 }
 

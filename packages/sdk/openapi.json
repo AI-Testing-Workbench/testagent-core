@@ -12650,6 +12650,72 @@
               ]
             }
           },
+          "plugin_origins": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "spec": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "array",
+                      "prefixItems": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "object"
+                        }
+                      ],
+                      "maxItems": 2,
+                      "minItems": 2
+                    }
+                  ]
+                },
+                "source": {
+                  "type": "string"
+                },
+                "scope": {
+                  "type": "string",
+                  "enum": ["global", "local"]
+                }
+              },
+              "required": ["spec", "source", "scope"],
+              "additionalProperties": false
+            }
+          },
+          "plugin_status": {
+            "type": "object",
+            "properties": {
+              "success": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "failed": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "spec": {
+                      "type": "string"
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": ["spec", "error"],
+                  "additionalProperties": false
+                }
+              }
+            },
+            "required": ["success", "failed"],
+            "additionalProperties": false
+          },
           "share": {
             "type": "string",
             "enum": ["manual", "auto", "disabled"]

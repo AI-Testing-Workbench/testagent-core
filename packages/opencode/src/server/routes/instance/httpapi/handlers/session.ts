@@ -18,6 +18,7 @@ import { Todo } from "@/session/todo"
 import { MessageID, PartID, SessionID } from "@/session/schema"
 import { NotFoundError } from "@/storage/storage"
 import { NamedError } from "@opencode-ai/core/util/error"
+import * as Log from "@opencode-ai/core/util/log" // testagent_change
 import { Cause, Effect, Option, Schema, Scope } from "effect"
 import * as Stream from "effect/Stream"
 import { HttpServerRequest, HttpServerResponse } from "effect/unstable/http"
@@ -39,6 +40,8 @@ import {
   UpdatePayload,
 } from "../groups/session"
 import * as SessionError from "./session-errors"
+
+const log = Log.create({ service: "server.session" }) // testagent_change
 
 export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", (handlers) =>
   Effect.gen(function* () {
@@ -95,6 +98,17 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       params: { sessionID: SessionID }
       query: typeof MessagesQuery.Type
     }) {
+      // testagent_change start - diagnose history session message loading
+      const inst = yield* InstanceState.context
+      const workspace = yield* InstanceState.workspaceID
+      log.info("messages requested", {
+        sessionID: ctx.params.sessionID,
+        directory: inst.directory,
+        workspaceID: workspace,
+        limit: ctx.query.limit,
+        before: ctx.query.before,
+      })
+      // testagent_change end
       if (ctx.query.before && ctx.query.limit === undefined) return yield* new HttpApiError.BadRequest({})
       if (ctx.query.before) {
         const before = ctx.query.before
@@ -103,9 +117,26 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
           catch: () => new HttpApiError.BadRequest({}),
         })
       }
-      yield* SessionError.mapStorageNotFound(session.get(ctx.params.sessionID))
+      const current = yield* SessionError.mapStorageNotFound(session.get(ctx.params.sessionID))
+      // testagent_change start - diagnose history session message loading
+      log.info("messages session found", {
+        sessionID: ctx.params.sessionID,
+        requestDirectory: inst.directory,
+        sessionDirectory: current.directory,
+        sessionPath: current.path,
+        sessionWorkspaceID: current.workspaceID,
+      })
+      // testagent_change end
       if (ctx.query.limit === undefined || ctx.query.limit === 0) {
-        return yield* session.messages({ sessionID: ctx.params.sessionID })
+        const items = yield* session.messages({ sessionID: ctx.params.sessionID })
+        // testagent_change start - diagnose history session message loading
+        log.info("messages loaded full", {
+          sessionID: ctx.params.sessionID,
+          count: items.length,
+        })
+        // testagent_change end
+        // testagent_change - return stored history as-is; old sessions can contain legacy part shapes
+        return HttpServerResponse.jsonUnsafe(items)
       }
 
       const page = MessageV2.page({
@@ -113,7 +144,17 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
         limit: ctx.query.limit,
         before: ctx.query.before,
       })
-      if (!page.cursor) return page.items
+      // testagent_change start - diagnose history session message loading
+      log.info("messages loaded page", {
+        sessionID: ctx.params.sessionID,
+        count: page.items.length,
+        cursor: page.cursor,
+      })
+      // testagent_change end
+      if (!page.cursor) {
+        // testagent_change - return stored history as-is; old sessions can contain legacy part shapes
+        return HttpServerResponse.jsonUnsafe(page.items)
+      }
 
       const request = yield* HttpServerRequest.HttpServerRequest
       // toURL() honors the Host + x-forwarded-proto headers, so the Link

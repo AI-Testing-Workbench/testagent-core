@@ -170,6 +170,32 @@ export const Info = Schema.Struct({
   }),
   // User-facing plugin config is stored as Specs; provenance gets attached later while configs are merged.
   plugin: Schema.optional(Schema.mutable(Schema.Array(ConfigPlugin.Spec))),
+  // testagent_change start - expose runtime plugin load state to clients without persisting it
+  plugin_origins: Schema.optional(
+    Schema.mutable(
+      Schema.Array(
+        Schema.Struct({
+          spec: ConfigPlugin.Spec,
+          source: Schema.String,
+          scope: Schema.Literals(["global", "local"]),
+        }),
+      ),
+    ),
+  ),
+  plugin_status: Schema.optional(
+    Schema.Struct({
+      success: Schema.mutable(Schema.Array(Schema.String)),
+      failed: Schema.mutable(
+        Schema.Array(
+          Schema.Struct({
+            spec: Schema.String,
+            error: Schema.String,
+          }),
+        ),
+      ),
+    }),
+  ),
+  // testagent_change end
   share: Schema.optional(Schema.Literals(["manual", "auto", "disabled"])).annotate({
     description:
       "Control sharing behavior:'manual' allows manual sharing via commands, 'auto' enables automatic sharing, 'disabled' disables all sharing",
