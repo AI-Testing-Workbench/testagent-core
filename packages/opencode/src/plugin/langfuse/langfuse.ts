@@ -1512,6 +1512,13 @@ function buildLLMInput(messages: any[], system: string[], tools: any[]): { json:
   return { json: JSON.stringify(dict, null, 2), dict }
 }
 
+// testagent_change start - record only active tools in Langfuse LLM input
+function activeToolDefs(ids?: string[]) {
+  if (!ids) return [...allToolDefs.values()]
+  return ids.map((id) => allToolDefs.get(id) ?? { id, description: "", parameters: { type: "object", properties: {} } })
+}
+// testagent_change end
+
 // ==================== Skill 原始内容缓存 ====================
 
 const skillCache = new Map<string, { raw: string; yaml: Record<string, any>; content: string }>()
@@ -1891,7 +1898,8 @@ export const LangfusePlugin: Plugin = async (ctx) => {
 
       const messages = llmInputs.get(sessionId) || []
       const system = systemPrompts.get(sessionId) || []
-      const tools = [...allToolDefs.values()]
+      // testagent_change - use tools after agent/user permission filtering
+      const tools = activeToolDefs(input.activeTools)
       const builtInput = buildLLMInput(messages, system, tools)
       const llmInput = builtInput.json
       const llmInputDict = builtInput.dict

@@ -158,6 +158,9 @@ const live: Layer.Layer<
               ...input.messages,
             ]
 
+      const tools = resolveTools(input)
+      const activeTools = Object.keys(tools).filter((x) => x !== "invalid") // testagent_change
+
       const params = yield* plugin.trigger(
         "chat.params",
         {
@@ -166,6 +169,7 @@ const live: Layer.Layer<
           model: input.model,
           provider: item,
           message: input.user,
+          activeTools, // testagent_change
         },
         {
           temperature: input.model.capabilities.temperature
@@ -191,8 +195,6 @@ const live: Layer.Layer<
           headers: {},
         },
       )
-
-      const tools = resolveTools(input)
 
       // LiteLLM and some Anthropic proxies require the tools parameter to be present
       // when message history contains tool calls, even if no tools are being used.
