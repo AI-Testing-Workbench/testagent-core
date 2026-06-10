@@ -4,8 +4,8 @@ import { join } from "node:path";
 import * as log from "./log.js";
 // 记忆插件相关配置
 export const MemoryConfig = z.object({
-    // 是否启用插件， 默认启用
-    enable: z.boolean().default(true),
+    // 是否启用插件，默认关闭，和 VS Code 设置页保持一致
+    enable: z.boolean().default(false),
     /** 是否开启调试，打印详细日志 */
     debug: z.boolean().default(false),
     // 是否初始化命令

@@ -26,6 +26,7 @@
     "bun:mac": "cross-env OPENCODE_CHANNEL=latest bun packages/opencode/script/build.ts --target=darwin-x64 --skip-models",
     "bun:mac-arm64": "cross-env OPENCODE_CHANNEL=latest bun packages/opencode/script/build.ts --target=darwin-arm64 --skip-models",
     "bun:windows": "cross-env OPENCODE_CHANNEL=latest bun packages/opencode/script/build.ts --target=win32-x64-baseline --skip-models && mkdir -p ../kilo-vscode/bin/ &&  cp packages/opencode/dist/testagent-windows-x64-baseline/bin/testagent.exe ../kilo-vscode/bin/testagent.exe",
+    "bun:windows-skip": "cross-env OPENCODE_CHANNEL=latest bun packages/opencode/script/build.ts --target=win32-x64-baseline --skip-models --skip-install&& mkdir -p ../kilo-vscode/bin/ &&  cp packages/opencode/dist/testagent-windows-x64-baseline/bin/testagent.exe ../kilo-vscode/bin/testagent.exe",
     "bun:windows-arm64": "cross-env OPENCODE_CHANNEL=latest bun packages/opencode/script/build.ts --target=win32-arm64 --skip-models"
   },
   "workspaces": {

@@ -76,6 +76,43 @@ function isAutoMemoryPart(part) {
     return typeof part.text === "string" &&
         part.text.includes("# Auto Memory");
 }
+function stripMemoryText(text) {
+    const markers = ["\n\n# Memory", "\n# Memory", "# Memory", "\n\n# Auto Memory", "\n# Auto Memory", "# Auto Memory", "\n\n## Recalled Memories", "\n## Recalled Memories", "## Recalled Memories"];
+    for (const marker of markers) {
+        const index = text.indexOf(marker);
+        if (index === -1)
+            continue;
+        if (index === 0)
+            return "";
+        return text.slice(0, index).trimEnd();
+    }
+    return text;
+}
+function stripMemoryMessages(output) {
+    output.messages = output.messages
+        .map((message) => {
+        const role = String(message.info.role);
+        if (role !== "system")
+            return message;
+        const parts = message.parts
+            .map((part) => {
+            if (!part || typeof part !== "object")
+                return part;
+            if (typeof part.text !== "string")
+                return part;
+            return { ...part, text: stripMemoryText(part.text) };
+        })
+            .filter((part) => {
+            if (!part || typeof part !== "object")
+                return true;
+            if (typeof part.text !== "string")
+                return true;
+            return part.text.trim().length > 0 && !isAutoMemoryPart(part);
+        });
+        return { ...message, parts };
+    })
+        .filter((message) => message.parts.length > 0);
+}
 // Parses "### <name> (<type>)" headers from the ## Recalled Memories section
 // of system prompts. After compaction old system messages disappear, so
 // the returned set naturally shrinks — no manual reset needed.
@@ -182,7 +219,16 @@ export const MemoryPlugin = async (params) => {
     // 如果插件未启用，直接返回空插件
     if (!config().enable) {
         log.debug("[MemoryPlugin] plugin is disabled, skipping initialization");
-        return {};
+        return {
+            "experimental.chat.messages.transform": async (_input, output) => {
+                stripMemoryMessages(output);
+            },
+            "experimental.chat.system.transform": async (_input, output) => {
+                output.system = output.system
+                    .map((text) => stripMemoryText(text))
+                    .filter((text) => text.trim().length > 0);
+            },
+        };
     }
     const state = getState(projectPath);
     const activeSessions = state.activeSessions;
