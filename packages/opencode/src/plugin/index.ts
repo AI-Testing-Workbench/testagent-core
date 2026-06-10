@@ -302,6 +302,17 @@ export const layer = Layer.effect(
           }),
         )
 
+        // testagent_change start - expose runtime plugin status for settings UI
+        cfg.plugin_status = pluginResults
+        GlobalBus.emit("event", {
+          directory: ctx.directory,
+          payload: {
+            type: "global.config.updated",
+            properties: { directory: ctx.directory, reason: "plugin-status" },
+          },
+        } satisfies GlobalEvent)
+        // testagent_change end
+
         // testagent_change start - notify all plugins loaded with detailed results
         if (plugins.length) {
           // Only show notification on first load to avoid duplicate notifications

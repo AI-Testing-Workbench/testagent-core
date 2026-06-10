@@ -327,6 +327,12 @@ export type Info = DeepMutable<Schema.Schema.Type<typeof Info>> & {
   // plugin_origins is derived state, not a persisted config field. It keeps each winning plugin spec together
   // with the file and scope it came from so later runtime code can make location-sensitive decisions.
   plugin_origins?: ConfigPlugin.Origin[]
+  // testagent_change start - expose runtime plugin load results to clients without persisting them
+  plugin_status?: {
+    success: string[]
+    failed: { spec: string; error: string }[]
+  }
+  // testagent_change end
 }
 
 type State = {
@@ -376,7 +382,7 @@ function patchJsonc(input: string, patch: unknown, path: string[] = []): string 
 }
 
 function writable(info: Info) {
-  const { plugin_origins: _plugin_origins, ...next } = info
+  const { plugin_origins: _plugin_origins, plugin_status: _plugin_status, ...next } = info
   return next
 }
 
