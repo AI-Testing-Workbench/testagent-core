@@ -373,26 +373,29 @@ const OBSERVATION_TAGS = ["testagent"]
 
 // ==================== write/edit/bash 内容转换 ====================
 
-// 匹配 测试案例/<至少一级路径>/<名称>.yaml，兼容正斜杠和反斜杠
-const BASE_MD_RE = /测试案例[/\\].+[/\\].+\.yaml$/
+// write/edit: 匹配 filePath 参数，要求以支持的扩展名结尾
+const BASE_FILE_RE = /测试案例[/\\].+\.(yaml|yml)$/
 
-function isBaseMd(filePath: unknown): filePath is string {
-  return typeof filePath === "string" && BASE_MD_RE.test(filePath)
+// bash: 匹配 command 字符串中被单引号或双引号包裹的路径片段
+const BASH_FILE_RE = /测试案例[/\\].+\.(yaml|yml)['"]/
+
+function isBaseFile(filePath: unknown): filePath is string {
+  return typeof filePath === "string" && BASE_FILE_RE.test(filePath)
 }
 
-// 每个 TESTCASE_ID 替换为独立 TC_uuid
+// 每个 TESTCASE_ID 替换为独立 TT_uuid
 function injectTestcaseIds(text: string): string {
-  return text.replace(/TESTCASE_ID/g, () => `TC${generateUUID().replace(/-/g, "")}`)
+  return text.replace(/TESTCASE_ID/g, () => `TT_${generateUUID().replace(/-/g, "")}`)
 }
 
 function transformWriteArgs(tool: string, args: any) {
-  if (tool === "write" && isBaseMd(args?.filePath) && typeof args.content === "string" && args.content.includes("TESTCASE_ID")) {
+  if (tool === "write" && isBaseFile(args?.filePath) && typeof args.content === "string" && args.content.includes("TESTCASE_ID")) {
     args.content = injectTestcaseIds(args.content)
   }
-  if (tool === "edit" && isBaseMd(args?.filePath) && typeof args.newString === "string" && args.newString.includes("TESTCASE_ID")) {
+  if (tool === "edit" && isBaseFile(args?.filePath) && typeof args.newString === "string" && args.newString.includes("TESTCASE_ID")) {
     args.newString = injectTestcaseIds(args.newString)
   }
-  if (tool === "bash" && typeof args?.command === "string" && args.command.includes("TESTCASE_ID") && BASE_MD_RE.test(args.command)) {
+  if (tool === "bash" && typeof args?.command === "string" && args.command.includes("TESTCASE_ID") && BASH_FILE_RE.test(args.command)) {
     args.command = injectTestcaseIds(args.command)
   }
 }
@@ -2006,6 +2009,14 @@ export const LangfusePlugin: Plugin = async (ctx) => {
       if (sessionId && output.system && output.system.length > 0) {
         systemPrompts.set(sessionId, output.system)
       }
+      // Inject instruction so the model never re-validates TESTCASE_ID after writing
+      output.system.push(
+        "When writing test case files (paths matching *_base.md inside a test case directory), " +
+        "always use the placeholder value TESTCASE_ID for the testcase_id field. " +
+        "Do NOT verify or re-check the actual value of testcase_id after writing — " +
+        "it is automatically replaced by the system after the file is written. " +
+        "If you read back the file and see a value other than TESTCASE_ID in that field, treat it as correct and do not modify it."
+      )
     },
 
     /**
