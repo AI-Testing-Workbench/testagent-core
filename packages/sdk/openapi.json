@@ -6757,6 +6757,9 @@
                   "command": {
                     "type": "string"
                   },
+                  "goal": {
+                    "type": "string"
+                  },
                   "variant": {
                     "type": "string"
                   },

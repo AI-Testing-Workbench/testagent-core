@@ -22,6 +22,7 @@ import { CloudflareAIGatewayAuthPlugin, CloudflareWorkersAuthPlugin } from "./cl
 import { AzureAuthPlugin } from "./azure"
 import { LangfusePlugin } from "./langfuse" // testagent_change
 import { MemoryPlugin } from "./testagent-memory/index.js" // testagent_change
+import { GoalPlugin } from "./testagent-goal/index" // testagent_change
 import { Effect, Layer, Context, Queue, Stream } from "effect"
 import { EffectBridge } from "@/effect/bridge"
 import { InstanceState } from "@/effect/instance-state"
@@ -114,6 +115,7 @@ const INTERNAL_PLUGINS: PluginInstance[] = [
   AzureAuthPlugin,
   LangfusePlugin, // testagent_change
   MemoryPlugin, // testagent_change
+  GoalPlugin, // testagent_change
 ]
 
 function isServerPlugin(value: unknown): value is PluginInstance {
