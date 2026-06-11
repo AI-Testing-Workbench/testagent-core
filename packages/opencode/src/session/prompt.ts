@@ -1477,6 +1477,13 @@ NOTE: At any point in time through this workflow you should feel free to ask the
 
           if (task?.type === "subtask") {
             yield* handleSubtask({ task, model, lastUser, sessionID, session, msgs })
+            // testagent_change start
+            const idleStatus = yield* status.get(sessionID)
+            if (idleStatus.type === "idle") {
+              yield* slog.info("session became idle after subtask, exiting loop")
+              break
+            }
+            // testagent_change end
             continue
           }
 
@@ -1489,6 +1496,13 @@ NOTE: At any point in time through this workflow you should feel free to ask the
               overflow: task.overflow,
             })
             if (result === "stop") break
+            // testagent_change start
+            const idleStatus = yield* status.get(sessionID)
+            if (idleStatus.type === "idle") {
+              yield* slog.info("session became idle after compaction, exiting loop")
+              break
+            }
+            // testagent_change end
             continue
           }
 
@@ -1498,6 +1512,13 @@ NOTE: At any point in time through this workflow you should feel free to ask the
             (yield* compaction.isOverflow({ tokens: lastFinished.tokens, model }))
           ) {
             yield* compaction.create({ sessionID, agent: lastUser.agent, model: lastUser.model, auto: true })
+            // testagent_change start
+            const idleStatus = yield* status.get(sessionID)
+            if (idleStatus.type === "idle") {
+              yield* slog.info("session became idle after compaction create, exiting loop")
+              break
+            }
+            // testagent_change end
             continue
           }
 
@@ -1657,6 +1678,13 @@ NOTE: At any point in time through this workflow you should feel free to ask the
             return "continue" as const
           }).pipe(Effect.ensuring(instruction.clear(handle.message.id)))
           if (outcome === "break") break
+          // testagent_change start
+          const idleStatus = yield* status.get(sessionID)
+          if (idleStatus.type === "idle") {
+            yield* slog.info("session became idle, exiting loop")
+            break
+          }
+          // testagent_change end
           continue
         }
 
