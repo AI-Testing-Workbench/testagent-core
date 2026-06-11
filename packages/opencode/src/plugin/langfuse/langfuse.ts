@@ -383,9 +383,9 @@ function isBaseFile(filePath: unknown): filePath is string {
   return typeof filePath === "string" && BASE_FILE_RE.test(filePath)
 }
 
-// 每个 TESTCASE_ID 替换为独立 TT_uuid
+// 每个 TESTCASE_ID 替换为独立 TCuuid
 function injectTestcaseIds(text: string): string {
-  return text.replace(/TESTCASE_ID/g, () => `TT_${generateUUID().replace(/-/g, "")}`)
+  return text.replace(/TESTCASE_ID/g, () => `TC${generateUUID().replace(/-/g, "")}`)
 }
 
 function transformWriteArgs(tool: string, args: any) {
