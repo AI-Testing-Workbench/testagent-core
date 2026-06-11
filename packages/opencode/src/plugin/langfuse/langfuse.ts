@@ -371,6 +371,32 @@ let currentProjectId = "unknown_project"
 
 const OBSERVATION_TAGS = ["testagent"]
 
+// ==================== write/edit/bash 内容转换 ====================
+
+// 匹配 测试案例/<至少一级路径>/<名称>.yaml，兼容正斜杠和反斜杠
+const BASE_MD_RE = /测试案例[/\\].+[/\\].+\.yaml$/
+
+function isBaseMd(filePath: unknown): filePath is string {
+  return typeof filePath === "string" && BASE_MD_RE.test(filePath)
+}
+
+// 每个 TESTCASE_ID 替换为独立 TC_uuid
+function injectTestcaseIds(text: string): string {
+  return text.replace(/TESTCASE_ID/g, () => `TC${generateUUID().replace(/-/g, "")}`)
+}
+
+function transformWriteArgs(tool: string, args: any) {
+  if (tool === "write" && isBaseMd(args?.filePath) && typeof args.content === "string" && args.content.includes("TESTCASE_ID")) {
+    args.content = injectTestcaseIds(args.content)
+  }
+  if (tool === "edit" && isBaseMd(args?.filePath) && typeof args.newString === "string" && args.newString.includes("TESTCASE_ID")) {
+    args.newString = injectTestcaseIds(args.newString)
+  }
+  if (tool === "bash" && typeof args?.command === "string" && args.command.includes("TESTCASE_ID") && BASE_MD_RE.test(args.command)) {
+    args.command = injectTestcaseIds(args.command)
+  }
+}
+
 // ==================== 工具函数 ====================
 
 function sanitize(input: any): any {
@@ -1997,6 +2023,8 @@ export const LangfusePlugin: Plugin = async (ctx) => {
      * 工具执行前事件
      */
     "tool.execute.before": async (input, output) => {
+      transformWriteArgs(input.tool, output.args)
+
       const sessionId = input.sessionID || currentSessionId || [...trackedSessionIds].pop()
       if (!sessionId) return
 
