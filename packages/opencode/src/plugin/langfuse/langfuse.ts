@@ -12,7 +12,7 @@
  * - Tool span recording with proper parent-child relationships
  */
 
-import { Plugin } from "@opencode-ai/plugin"
+import type { Plugin } from "@opencode-ai/plugin"
 import { User } from "@/testagent/user"
 import { readFileSync, existsSync, writeFileSync, mkdirSync, renameSync } from "fs"
 import { dirname, join } from "path"
@@ -169,6 +169,7 @@ let retryingFailedIngestionEvents = false
 let failedIngestionQueueFile = join(homedir(), ".testagent", "langfuse-ingestion-queue.json")
 let failedIngestionQueueLoaded = false
 const MAX_FAILED_INGESTION_EVENTS = 5000
+let handlersInstalled = false // testagent_change
 
 // 最终完整 trace 汇总上报到后端批处理接口，用于兼容 Kafka 消费完整数据的逻辑。
 const finalBatchUploads: any[] = []
@@ -1133,6 +1134,30 @@ async function flushAllTraces() {
   await retryFinalBatchUploads()
 }
 
+// testagent_change start - install process-level handlers only once across plugin instances
+function installProcessHandlers() {
+  if (handlersInstalled) return
+  handlersInstalled = true
+
+  const flush = async () => {
+    await flushAllTraces()
+  }
+
+  process.on("beforeExit", flush)
+  process.on("SIGINT", flush)
+  process.on("SIGTERM", flush)
+  process.on("uncaughtException", async (err) => {
+    console.error("[langfuse] Uncaught exception:", err)
+    await flushAllTraces()
+    process.exit(1)
+  })
+  process.on("unhandledRejection", async (reason) => {
+    console.error("[langfuse] Unhandled rejection:", reason)
+    await flushAllTraces()
+  })
+}
+// testagent_change end
+
 /**
  * 添加 generation 到批次
  */
@@ -1798,27 +1823,7 @@ export const LangfusePlugin: Plugin = async (ctx) => {
   await retryFailedIngestionEvents()
   await retryFinalBatchUploads()
 
-  // 注册兜底机制：进程退出时刷新所有数据
-  const exitHandler = async () => {
-    // console.log("[langfuse] Process exiting, flushing all traces...")
-    await flushAllTraces()
-  }
-
-  process.on("beforeExit", exitHandler)
-  process.on("SIGINT", exitHandler)
-  process.on("SIGTERM", exitHandler)
-
-  // 异常处理：捕获未处理的异常并刷新数据
-  process.on("uncaughtException", async (err) => {
-    console.error("[langfuse] Uncaught exception:", err)
-    await flushAllTraces()
-    process.exit(1)
-  })
-
-  process.on("unhandledRejection", async (reason, promise) => {
-    console.error("[langfuse] Unhandled rejection:", reason)
-    await flushAllTraces()
-  })
+  installProcessHandlers() // testagent_change
 
   return {
     /**
@@ -1839,7 +1844,8 @@ export const LangfusePlugin: Plugin = async (ctx) => {
         .join("\n")
       userInputs.set(sessionId, textContent)
       const assistantOutput = extractTextFromParts(output.parts || [])
-      const isAssistantMessage = output.message?.role === "assistant" || output.message?.info?.role === "assistant"
+      const msg = output.message as { role?: string; info?: { role?: string } } | undefined // testagent_change
+      const isAssistantMessage = msg?.role === "assistant" || msg?.info?.role === "assistant" // testagent_change
       if (isAssistantMessage && stripThinkTags(assistantOutput)) {
         sessionAssistantOutputs.set(sessionId, assistantOutput)
       }
