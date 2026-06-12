@@ -2015,14 +2015,6 @@ export const LangfusePlugin: Plugin = async (ctx) => {
       if (sessionId && output.system && output.system.length > 0) {
         systemPrompts.set(sessionId, output.system)
       }
-      // Inject instruction so the model never re-validates TESTCASE_ID after writing
-      output.system.push(
-        "When writing test case files (paths matching *_base.md inside a test case directory), " +
-        "always use the placeholder value TESTCASE_ID for the testcase_id field. " +
-        "Do NOT verify or re-check the actual value of testcase_id after writing — " +
-        "it is automatically replaced by the system after the file is written. " +
-        "If you read back the file and see a value other than TESTCASE_ID in that field, treat it as correct and do not modify it."
-      )
     },
 
     /**
