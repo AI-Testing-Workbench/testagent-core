@@ -195,6 +195,10 @@ export const Info = Schema.Struct({
       ),
     }),
   ),
+  // testagent_change start - langfuse tracing toggle
+  langfuse: Schema.optional(Schema.Boolean).annotate({
+    description: "Enable or disable Langfuse tracing (default: true)",
+  }),
   // testagent_change end
   share: Schema.optional(Schema.Literals(["manual", "auto", "disabled"])).annotate({
     description:

@@ -205,6 +205,12 @@ export const layer = Layer.effect(
         }
 
         for (const plugin of INTERNAL_PLUGINS) {
+          // testagent_change start - skip LangfusePlugin when disabled in config
+          if (plugin === LangfusePlugin && cfg.langfuse === false) {
+            log.info("langfuse plugin disabled by config")
+            continue
+          }
+          // testagent_change end
           log.info("loading internal plugin", { name: plugin.name })
           const init = yield* Effect.tryPromise({
             try: () => plugin(input),
