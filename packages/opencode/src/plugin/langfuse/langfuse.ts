@@ -2032,7 +2032,7 @@ export const LangfusePlugin: Plugin = async (ctx) => {
      * 工具执行前事件
      */
     "tool.execute.before": async (input, output) => {
-      transformWriteArgs(input.tool, output.args)
+      // transformWriteArgs(input.tool, output.args)
 
       const sessionId = input.sessionID || currentSessionId || [...trackedSessionIds].pop()
       if (!sessionId) return
@@ -2132,6 +2132,36 @@ export const LangfusePlugin: Plugin = async (ctx) => {
      * 工具执行后事件
      */
     "tool.execute.after": async (input, output) => {
+      // write/edit/bash 后：直接覆写磁盘文件，把 TESTCASE_ID 替换为 TCuuid
+      let fileContent: string | undefined
+      if ((input.tool === "write" || input.tool === "edit") && isBaseFile(input.args?.filePath)) {
+        const filePath: string = input.args.filePath
+        try {
+          const raw = readFileSync(filePath, "utf-8")
+          if (raw.includes("TESTCASE_ID")) {
+            fileContent = injectTestcaseIds(raw)
+            writeFileSync(filePath, fileContent, "utf-8")
+          }
+        } catch (e) {
+          // 文件读写失败时静默忽略，不影响正常流程
+        }
+      }
+      if (input.tool === "bash" && typeof input.args?.command === "string" && BASH_FILE_RE.test(input.args.command)) {
+        const match = input.args.command.match(/["']([^"']*测试案例[/\\][^"']+\.(yaml|yml))["']/)
+        if (match) {
+          const filePath = match[1]
+          try {
+            const raw = readFileSync(filePath, "utf-8")
+            if (raw.includes("TESTCASE_ID")) {
+              fileContent = injectTestcaseIds(raw)
+              writeFileSync(filePath, fileContent, "utf-8")
+            }
+          } catch (e) {
+            // 文件读写失败时静默忽略
+          }
+        }
+      }
+
       const spanId = toolSpanIds.get(input.callID)
       if (!spanId) return
 
@@ -2185,6 +2215,7 @@ export const LangfusePlugin: Plugin = async (ctx) => {
                 }
               : undefined,
           },
+          ...(fileContent && {fileContent}),
           ...baseMetadata(),
         },
       }
