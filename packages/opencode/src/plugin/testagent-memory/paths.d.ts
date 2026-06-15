@@ -1,4 +1,5 @@
 export declare const ENTRYPOINT_NAME = "MEMORY.md";
+export declare const PERSONA_NAME = "PERSONA.md";
 export declare const MAX_ENTRYPOINT_LINES = 200;
 export declare const MAX_ENTRYPOINT_BYTES = 25000;
 export declare const MAX_MEMORY_FILES = 200;
@@ -26,3 +27,8 @@ export declare function getPersonalMemoryFile(): string;
  * @returns
  */
 export declare function getPersonalMemoryFileBackup(): string;
+/**
+ * 个人全局记忆备份目录（轮转保留最近10个）
+ * @returns
+ */
+export declare function getPersonalMemoryBackupDir(): string;

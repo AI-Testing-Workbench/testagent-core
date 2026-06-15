@@ -4,7 +4,7 @@ import { join } from "node:path";
 import * as log from "./log.js";
 // 记忆插件相关配置
 export const MemoryConfig = z.object({
-    // 是否启用插件，默认关闭，和 VS Code 设置页保持一致
+    // 是否启用插件， 默认启用
     enable: z.boolean().default(false),
     /** 是否开启调试，打印详细日志 */
     debug: z.boolean().default(false),
@@ -30,20 +30,21 @@ export const MemoryConfig = z.object({
         autoDreamEnable: z.boolean().default(true),
         /** 控制是否开启自动提取 */
         autoExtractEnable: z.boolean().default(true),
+        personalMemoryBackupSize: z.number().default(10),
     })
         .default({ autoExtractMaxLength: 10000, autoExtractBufferSize: 10, personalMemoryEnable: true,
-        personalMemoryPrompt: "", autoDreamEnable: true, autoExtractEnable: true }),
+        personalMemoryPrompt: "", autoDreamEnable: true, autoExtractEnable: true, personalMemoryBackupSize: 10 }),
     recall: z
         .object({
         recallEnable: z.boolean().default(true),
         /** 是否使用模型进行语义分析召回，false：仅使用向量分析召回 */
         llmRecall: z.boolean().default(false),
         /** 使用llm召回记忆超时时间 */
-        //recallTimeout: z.number().default(10000),
+        llmRecallTimeout: z.number().default(10000),
         providerID: z.string(),
         modelID: z.string(),
     })
-        .default({ recallEnable: true, llmRecall: false, providerID: "", modelID: "" }),
+        .default({ recallEnable: true, llmRecall: false, llmRecallTimeout: 10000, providerID: "", modelID: "" }),
 });
 let current = MemoryConfig.parse({});
 // 获取配置

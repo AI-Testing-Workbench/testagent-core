@@ -1,7 +1,8 @@
 import { scanMemoryFiles } from "./memoryScan.js";
-import { getMemoryDir, getPersonalMemoryFile } from "./paths.js";
+import { getMemoryDir } from "./paths.js";
 import { readMemoryContent, truncateMemoryContent } from "./recall.js";
-import { readFileSync, statSync } from "fs";
+import { chineseTokenizer, buildFtsTokens } from "./tokenizer.js";
+import { readFileSync } from "fs";
 // 向量维度：提升到 512 减少碰撞
 const VECTOR_DIM = 512;
 // 每个 token 映射到的哈希位置数，增加信息密度
@@ -33,35 +34,7 @@ export const DEFAULT_MIN_SCORE = 0.18;
 // 文本截断上限
 const TEXT_TRUNCATE_LEN = 800;
 // =====================================================================
-// 1. 多粒度中文分词：单字 + 双字 + 完整词，提升语义捕捉能力
-// =====================================================================
-function chineseTokenizer(text) {
-    const clean = text
-        .replace(/[^\u4e00-\u9fa5a-zA-Z0-9_\-]/g, " ")
-        .replace(/\s+/g, " ")
-        .trim()
-        .toLowerCase();
-    if (!clean)
-        return [];
-    // 提取完整词（字母数字组合）
-    const words = clean.split(" ").filter((t) => t.length >= 2 && t.length <= 30);
-    // 提取中文单字
-    const chineseChars = [];
-    for (const char of clean) {
-        if (char >= "\u4e00" && char <= "\u9fa5") {
-            chineseChars.push(char);
-        }
-    }
-    // 生成中文双字 n-gram
-    const bigrams = [];
-    for (let i = 0; i < chineseChars.length - 1; i++) {
-        bigrams.push(chineseChars[i] + chineseChars[i + 1]);
-    }
-    // 过滤常见无意义单字
-    const commonChars = new Set("的了我是有在不上人和这中大为来月地以就到年月会国年说前出子等得也使小后多行手时之学头被因为家还自以民过们展工字面各同日量mass向事公司");
-    const singleChars = chineseChars.filter((c) => !commonChars.has(c));
-    return [...words, ...bigrams, ...singleChars];
-}
+// Tokenizers moved to ./tokenizer.ts
 // =====================================================================
 // 2. 多位置 FNV-1a 哈希：每个 token 映射到多个维度，减少信息丢失
 // =====================================================================
@@ -161,13 +134,12 @@ function buildWeightedMemoryText(memory, content) {
 // =====================================================================
 // 6. 多策略关键词匹配：精确词 + 子串 + 前缀 + n-gram
 // =====================================================================
-// 6.1 精确词匹配
-function calcKeywordBonus(query, text) {
-    const queryTokens = chineseTokenizer(query);
-    const textTokens = new Set(chineseTokenizer(text));
+// 6.1 精确词匹配（使用 jieba 分词）
+function calcKeywordBonus(query, text, queryTokens, textTokens) {
+    const textSet = new Set(textTokens);
     let matchCount = 0;
     for (const t of queryTokens) {
-        if (textTokens.has(t))
+        if (textSet.has(t))
             matchCount++;
     }
     if (queryTokens.length === 0)
@@ -175,9 +147,8 @@ function calcKeywordBonus(query, text) {
     const matchRate = matchCount / queryTokens.length;
     return matchRate * KEYWORD_BONUS;
 }
-// 6.2 子串匹配：查询词作为子串出现在文本中
-function calcSubstringBonus(query, text) {
-    const queryTokens = chineseTokenizer(query);
+// 6.2 子串匹配
+function calcSubstringBonus(query, text, queryTokens, textTokens) {
     const textLower = text.toLowerCase();
     let matchCount = 0;
     for (const t of queryTokens) {
@@ -190,10 +161,8 @@ function calcSubstringBonus(query, text) {
     const matchRate = matchCount / queryTokens.length;
     return matchRate * SUBSTRING_BONUS;
 }
-// 6.3 前缀匹配：查询词是文本中某个词的前缀
-function calcPrefixBonus(query, text) {
-    const queryTokens = chineseTokenizer(query);
-    const textTokens = chineseTokenizer(text);
+// 6.3 前缀匹配
+function calcPrefixBonus(query, text, queryTokens, textTokens) {
     const textSet = new Set(textTokens);
     let matchCount = 0;
     for (const q of queryTokens) {
@@ -211,10 +180,8 @@ function calcPrefixBonus(query, text) {
     const matchRate = matchCount / queryTokens.length;
     return matchRate * PREFIX_BONUS;
 }
-// 6.4 n-gram 重叠匹配：计算查询和文本的双字 n-gram 重叠率
-function calcNgramBonus(query, text) {
-    const queryTokens = chineseTokenizer(query);
-    const textTokens = chineseTokenizer(text);
+// 6.4 n-gram 重叠匹配
+function calcNgramBonus(query, text, queryTokens, textTokens) {
     const queryBigrams = new Set();
     const textBigrams = new Set();
     for (const t of queryTokens) {
@@ -273,7 +240,6 @@ export async function vectorfilter(worktree, sessionID, query, alreadySurfaced =
             //...scanMemoryFiles(getPersonalMemoryFile()),
             ...scanMemoryFiles(memoryDir),
         ];
-        //appendLog(worktree, sessionID, `allMemories: \n ${JSON.stringify(allMemories)}\n`);
         const now = Date.now();
         // 前置过滤已出现过的记忆
         const filteredMemories = allMemories.filter((mem) => {
@@ -295,14 +261,15 @@ export async function vectorfilter(worktree, sessionID, query, alreadySurfaced =
                 const memVec = textToEmbeddingSync(fullText);
                 const baseSim = cosineSimilarity(queryVec, memVec);
                 // 多策略关键词匹配
-                const keywordBonus = calcKeywordBonus(query, fullText);
-                const substringBonus = calcSubstringBonus(query, fullText);
-                const prefixBonus = calcPrefixBonus(query, fullText);
-                const ngramBonus = calcNgramBonus(query, fullText);
+                const queryTokens = buildFtsTokens(query, true);
+                const textTokens = buildFtsTokens(fullText, false);
+                const keywordBonus = calcKeywordBonus(query, fullText, queryTokens, textTokens);
+                const substringBonus = calcSubstringBonus(query, fullText, queryTokens, textTokens);
+                const prefixBonus = calcPrefixBonus(query, fullText, queryTokens, textTokens);
+                const ngramBonus = calcNgramBonus(query, fullText, queryTokens, textTokens);
                 const timeBonus = calcTimeBonus(now, memory.mtimeMs);
                 // 综合最终得分：向量语义 + 多策略关键词 + 时间新鲜度
                 const finalScore = baseSim + keywordBonus + substringBonus + prefixBonus + ngramBonus + timeBonus;
-                //appendLog(worktree, sessionID, `finalScore: ${finalScore.toFixed(4)} (baseSim: ${baseSim.toFixed(4)}, kw: ${keywordBonus.toFixed(4)}, sub: ${substringBonus.toFixed(4)}, pre: ${prefixBonus.toFixed(4)}, ngram: ${ngramBonus.toFixed(4)}, time: ${timeBonus.toFixed(4)}) | memory: ${memory.name} | ${memory.filePath}\n`);
                 if (finalScore >= minScore) {
                     scoredList.push({
                         memory,
@@ -325,27 +292,28 @@ export async function vectorfilter(worktree, sessionID, query, alreadySurfaced =
         scoredList.sort((a, b) => b.score - a.score);
         const topMemories = scoredList.slice(0, topNum);
         let result = [];
-        const filePath = getPersonalMemoryFile();
-        const claudeContent = extractClaudeContent(query, filePath, minScore, 20);
-        if (claudeContent.length > 0) {
-            result.push({
-                filename: "PERSONA.md",
-                filePath: filePath,
-                name: claudeContent.map(item => item.sectionName).join("\n"),
-                type: "user",
-                description: claudeContent.map(item => item.content).join("\n"),
-                mtimeMs: statSync(filePath).mtimeMs,
-            });
-            //appendLog(worktree, sessionID, `claudeContent: \n ${JSON.stringify(claudeContent)}\n`);
-        }
+        // const filePath = getPersonalMemoryFile();
+        // const claudeContent: ClaudeProfileMatch[] = extractClaudeContent(query, filePath,minScore,20);
+        // if (claudeContent.length > 0) {
+        //   result.push({
+        //     fileName: "PERSONA.md",
+        //     filePath: filePath,
+        //     name: 'Personal Global Memory',
+        //     type: "user",
+        //     description: 'Matched Personal Global Memory',
+        //     content: claudeContent.map(item => item.content).join("\n"),
+        //     ageInDays: Math.max(0, Math.floor((now - statSync(filePath).mtimeMs) / (1000 * 60 * 60 * 24))),
+        //   });
+        // }
         // 将向量检索结果添加到结果数组
         result.push(...topMemories.map((item) => ({
-            filename: item.memory.filename,
+            fileName: item.memory.filename,
             filePath: item.memory.filePath,
             name: item.memory.name ?? "",
             type: item.memory.type ?? "user",
             description: item.memory.description ?? "",
-            mtimeMs: item.memory.mtimeMs,
+            content: item.content,
+            ageInDays: Math.max(0, Math.floor((now - item.memory.mtimeMs) / (1000 * 60 * 60 * 24))),
         })));
         // 返回结果数组
         return result;
@@ -403,10 +371,10 @@ function parseClaudeMd(content) {
     }
     return sections;
 }
-// 计算查询与内容的匹配分数
+// 计算查询与内容的匹配分数（使用 jieba 分词）
 function calcClaudeMatchScore(query, content) {
-    const queryTokens = chineseTokenizer(query);
-    const contentTokens = chineseTokenizer(content);
+    const queryTokens = buildFtsTokens(query, true);
+    const contentTokens = buildFtsTokens(content, false);
     const contentSet = new Set(contentTokens);
     const matchedKeywords = [];
     let matchCount = 0;
@@ -419,7 +387,6 @@ function calcClaudeMatchScore(query, content) {
     if (queryTokens.length === 0)
         return { score: 0, matchedKeywords: [] };
     const matchRate = matchCount / queryTokens.length;
-    // 使用关键词匹配率作为分数，乘以系数放大差异
     const score = matchRate * KEYWORD_BONUS;
     return { score, matchedKeywords };
 }
