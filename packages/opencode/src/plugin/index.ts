@@ -16,7 +16,6 @@ import { Session } from "@/session/session"
 import { NamedError } from "@opencode-ai/core/util/error"
 import { LangfusePlugin } from "./langfuse" // testagent_change
 import { MemoryPlugin } from "./testagent-memory/index.js" // testagent_change
-import { GoalPlugin } from "./testagent-goal/index" // testagent_change
 import { Effect, Layer, Context, Queue, Stream } from "effect"
 import { EffectBridge } from "@/effect/bridge"
 import { InstanceState } from "@/effect/instance-state"
@@ -103,7 +102,6 @@ const INTERNAL_PLUGINS: PluginInstance[] = [
   // testagent_change start - removed unused auth plugins: CodexAuthPlugin, CopilotAuthPlugin, GitlabAuthPlugin, PoeAuthPlugin, CloudflareWorkersAuthPlugin, CloudflareAIGatewayAuthPlugin, AzureAuthPlugin
   LangfusePlugin, // testagent_change
   MemoryPlugin, // testagent_change
-  GoalPlugin, // testagent_change
 ]
 // testagent_change end
 
