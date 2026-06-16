@@ -1,4 +1,6 @@
 import * as log from "./core/log.js";
+import { createRequire } from "node:module";
+const require = createRequire(import.meta.url);
 // ── 正则表达式常量（避免重复编译） ──
 const HAS_LETTER_OR_NUMBER = /[\p{L}\p{N}]/u;
 const TRIM_QUOTES = /^["']|["']$/g;
@@ -115,14 +117,14 @@ const ALL_STOP_WORDS = new Set([...ZH_STOP_WORDS, ...EN_STOP_WORDS]);
 // ── Chinese word segmentation (jieba) ──
 // Lazy-loaded singleton: initialised on first call to `buildFtsTokens`.
 // If @node-rs/jieba is unavailable, falls back to Unicode-regex splitting.
-import { Jieba } from "@node-rs/jieba";
-import { dict } from "@node-rs/jieba/dict";
 let _jieba; // undefined = not yet tried
 function getJieba() {
     if (_jieba !== undefined)
         return _jieba;
     try {
-        _jieba = Jieba.withDict(dict);
+        const jieba = require("@node-rs/jieba");
+        const data = require("@node-rs/jieba/dict.js");
+        _jieba = jieba.Jieba.withDict(data.dict);
     }
     catch (e) {
         log.info(`[getJieba error]：${e}`);
