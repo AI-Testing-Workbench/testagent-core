@@ -1,6 +1,5 @@
 /**
  * jieba-based tokenizer for accurate Chinese word segmentation.
- * Falls back to Unicode regex splitting if jieba is not installed.
  *
  * Tokens are lowercased and filtered for stop words.
  */

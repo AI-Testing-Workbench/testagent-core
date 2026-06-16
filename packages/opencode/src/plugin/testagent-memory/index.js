@@ -598,12 +598,14 @@ export const MemoryPlugin = async (params) => {
             // 提示词不为空才追加
             if (typeof memoryPrompt === "string" && memoryPrompt.trim().length > 0) {
                 // 不用判断query是否为空，解决压缩
-                if (output.system.length > 0 && isqwen3p) {
+                // if (output.system.length > 0 && isqwen3p) {
+                //   output.system[0] += '\n\n'+ memoryPrompt;
+                //   //log.info("qwen3p prompt",output.system[0])
+                // } else {
+                //   output.system.push(memoryPrompt);
+                // }
+                if (output.system.length > 0) {
                     output.system[0] += '\n\n' + memoryPrompt;
-                    //log.info("qwen3p prompt",output.system[0])
-                }
-                else {
-                    output.system.push(memoryPrompt);
                 }
             }
         },

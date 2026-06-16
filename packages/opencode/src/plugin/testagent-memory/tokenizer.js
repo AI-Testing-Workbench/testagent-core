@@ -1,3 +1,4 @@
+import * as log from "./core/log.js";
 // ── 正则表达式常量（避免重复编译） ──
 const HAS_LETTER_OR_NUMBER = /[\p{L}\p{N}]/u;
 const TRIM_QUOTES = /^["']|["']$/g;
@@ -111,25 +112,26 @@ const EN_STOP_WORDS = new Set([
 ]);
 // ── 合并中英文停用词，减少过滤时的查找次数 ──
 const ALL_STOP_WORDS = new Set([...ZH_STOP_WORDS, ...EN_STOP_WORDS]);
-import { createRequire } from "node:module";
-const require = createRequire(import.meta.url);
+// ── Chinese word segmentation (jieba) ──
+// Lazy-loaded singleton: initialised on first call to `buildFtsTokens`.
+// If @node-rs/jieba is unavailable, falls back to Unicode-regex splitting.
+import { Jieba } from "@node-rs/jieba";
+import { dict } from "@node-rs/jieba/dict";
 let _jieba; // undefined = not yet tried
 function getJieba() {
     if (_jieba !== undefined)
         return _jieba;
     try {
-        const jiebaModule = require("@node-rs/jieba");
-        const { dict } = require("@node-rs/jieba/dict");
-        _jieba = jiebaModule.Jieba.withDict(dict);
+        _jieba = Jieba.withDict(dict);
     }
-    catch {
+    catch (e) {
+        log.info(`[getJieba error]：${e}`);
         _jieba = null;
     }
     return _jieba;
 }
 /**
  * jieba-based tokenizer for accurate Chinese word segmentation.
- * Falls back to Unicode regex splitting if jieba is not installed.
  *
  * Tokens are lowercased and filtered for stop words.
  */
