@@ -27,11 +27,7 @@ Do not rely on intent, partial progress, elapsed effort, memory of earlier work,
 }
 
 export function systemReminder(goal: GoalSnapshot | null) {
-  if (!goal) {
-    return `OpenCode goal mode is available through get_goal, create_goal, set_goal, and update_goal tools.
-
-Create a goal only when explicitly requested by the user or system/developer instructions. Use set_goal when the user asks you to formulate and set your own goal. Do not infer goals from ordinary tasks. When closing a goal, update_goal requires evidence for status "complete" or a blocker for status "unmet".`
-  }
+  if (!goal || goal.status === "complete" || goal.status === "unmet") return ""
   if (goal.status === "active") return continuationPrompt(goal)
   return `OpenCode goal mode current state:
 

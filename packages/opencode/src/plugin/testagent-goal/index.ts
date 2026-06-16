@@ -43,6 +43,7 @@ const DEFAULT_MAX_AUTO_TURNS = 25
 const DEFAULT_CONTINUE_INTERVAL_SECONDS = 3
 const DEFAULT_MAX_PROMPT_FAILURES = 3
 const DEFAULT_COMMAND_NAME = "goal"
+const GOAL_SYSTEM_MARKER = "OpenCode goal mode"
 const activeContinuations = new Set<string>()
 
 function goalCommandTemplate(commandName: string) {
@@ -107,7 +108,10 @@ function tokensFromRecord(value: unknown): number | undefined {
   const cache = tokens.cache && typeof tokens.cache === "object" ? (tokens.cache as Record<string, unknown>) : {}
   const fields = [tokens.input, tokens.output, tokens.reasoning, cache.read, cache.write]
   if (!fields.some((field) => typeof field === "number")) return undefined
-  return fields.reduce<number>((sum, field) => sum + (typeof field === "number" && Number.isFinite(field) ? field : 0), 0)
+  return fields.reduce<number>(
+    (sum, field) => sum + (typeof field === "number" && Number.isFinite(field) ? field : 0),
+    0,
+  )
 }
 
 function exactTokensFromPart(part: unknown): number | undefined {
@@ -161,6 +165,16 @@ function sessionIDFromEvent(event: { properties?: Record<string, unknown> }) {
   return undefined
 }
 
+function mergeSystemReminder(output: { system: string[] }, reminder: string) {
+  if (!reminder.trim()) return
+  if (output.system.some((block) => block.includes(GOAL_SYSTEM_MARKER))) return
+  if (output.system.length === 0) {
+    output.system.push(reminder)
+    return
+  }
+  output.system[0] = `${output.system[0]}\n\n${reminder}`
+}
+
 export const GoalPlugin: Plugin = async ({ client }, options?: Options) => {
   const autoContinue = options?.auto_continue ?? true
   const maxAutoTurns = options?.max_auto_turns ?? DEFAULT_MAX_AUTO_TURNS
@@ -211,7 +225,9 @@ export const GoalPlugin: Plugin = async ({ client }, options?: Options) => {
         description:
           "Close the existing goal only after an audit against real evidence. Use status complete only when the objective is achieved and no required work remains, and include evidence. Use status unmet only when the objective cannot be achieved or is blocked, and include the blocker. Do not close a goal merely because work is stopping.",
         args: {
-          status: z.enum(["complete", "unmet"]).describe("Required. complete means achieved; unmet means blocked or impossible."),
+          status: z
+            .enum(["complete", "unmet"])
+            .describe("Required. complete means achieved; unmet means blocked or impossible."),
           evidence: z
             .string()
             .min(1)
@@ -266,7 +282,7 @@ export const GoalPlugin: Plugin = async ({ client }, options?: Options) => {
     },
     async "experimental.chat.system.transform"(input, output) {
       if (typeof input.sessionID !== "string") return
-      output.system.push(systemReminder(await getGoal(input.sessionID)))
+      mergeSystemReminder(output, systemReminder(await getGoal(input.sessionID)))
     },
     async "experimental.session.compacting"(input, output) {
       const goal = await getGoal(input.sessionID)
