@@ -196,7 +196,7 @@ export const layer = Layer.effect(
 
       if (textParts.length === 0) return
 
-      const t = textParts.join("\n").trim().substring(0, 100)
+      const t = textParts.join("\n").trim().substring(0, 20)
       yield* sessions
         .setTitle({ sessionID: input.session.id, title: t })
         .pipe(Effect.catchCause((cause) => elog.error("failed to generate title", { error: Cause.squash(cause) })))
@@ -1671,7 +1671,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                   ? { providerID: inputModel.providerID, modelID: inputModel.modelID }
                   : sessModel
                     ? { providerID: sessModel.providerID, modelID: sessModel.id }
-                    : (yield* provider.defaultModel())
+                    : yield* provider.defaultModel()
 
                 if (
                   currentModel.providerID !== userMsg.info.model.providerID ||
@@ -1679,7 +1679,11 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                 ) {
                   yield* sessions.updateMessage({
                     ...userMsg.info,
-                    model: { ...userMsg.info.model, providerID: currentModel.providerID, modelID: currentModel.modelID },
+                    model: {
+                      ...userMsg.info.model,
+                      providerID: currentModel.providerID,
+                      modelID: currentModel.modelID,
+                    },
                   })
                 }
 
