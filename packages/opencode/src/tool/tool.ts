@@ -4,6 +4,7 @@ import type { Permission } from "../permission"
 import type { SessionID, MessageID } from "../session/schema"
 import * as Truncate from "./truncate"
 import { Agent } from "@/agent/agent"
+import { ModelIOAudit } from "@/testagent/model-io-audit"
 
 interface Metadata {
   [key: string]: any
@@ -97,6 +98,21 @@ function wrap<Parameters extends Schema.Decoder<unknown>, Result extends Metadat
         }
         return Effect.gen(function* () {
           const decoded = yield* decode(args).pipe(
+            Effect.tapError((error) =>
+              Effect.sync(() =>
+                ModelIOAudit.record({
+                  event: "tool.call.summary",
+                  status: "invalid_arguments",
+                  issue: "工具参数构建异常：入参不符合 schema",
+                  toolName: id,
+                  sessionID: ctx.sessionID,
+                  messageID: ctx.messageID,
+                  toolCallID: ctx.callID,
+                  input: args,
+                  error: ModelIOAudit.error(error),
+                }),
+              ),
+            ),
             Effect.mapError((error) =>
               toolInfo.formatValidationError
                 ? new Error(toolInfo.formatValidationError(error), { cause: error })
@@ -106,7 +122,39 @@ function wrap<Parameters extends Schema.Decoder<unknown>, Result extends Metadat
                   ),
             ),
           )
-          const result = yield* execute(decoded as Schema.Schema.Type<Parameters>, ctx)
+          const result = yield* execute(decoded as Schema.Schema.Type<Parameters>, ctx).pipe(
+            Effect.tap((result) =>
+              Effect.sync(() =>
+                ModelIOAudit.record({
+                  event: "tool.call.summary",
+                  status: "completed",
+                  toolName: id,
+                  sessionID: ctx.sessionID,
+                  messageID: ctx.messageID,
+                  toolCallID: ctx.callID,
+                  input: decoded,
+                  output: result.output,
+                  title: result.title,
+                  metadata: result.metadata,
+                }),
+              ),
+            ),
+            Effect.tapError((error) =>
+              Effect.sync(() =>
+                ModelIOAudit.record({
+                  event: "tool.call.summary",
+                  status: "failed",
+                  issue: "工具执行异常",
+                  toolName: id,
+                  sessionID: ctx.sessionID,
+                  messageID: ctx.messageID,
+                  toolCallID: ctx.callID,
+                  input: decoded,
+                  error: ModelIOAudit.error(error),
+                }),
+              ),
+            ),
+          )
           if (result.metadata.truncated !== undefined) {
             return result
           }

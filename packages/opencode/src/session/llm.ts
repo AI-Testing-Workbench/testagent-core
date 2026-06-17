@@ -24,6 +24,7 @@ import { InstallationVersion } from "@opencode-ai/core/installation/version"
 import { EffectBridge } from "@/effect/bridge"
 import * as Option from "effect/Option"
 import * as OtelTracer from "@effect/opentelemetry/Tracer"
+import { ModelIOAudit } from "@/testagent/model-io-audit"
 
 const log = Log.create({ service: "llm" })
 export const OUTPUT_TOKEN_MAX = ProviderTransform.OUTPUT_TOKEN_MAX
@@ -242,22 +243,78 @@ const live: Layer.Layer<
         workflowModel.systemPrompt = system.join("\n")
         workflowModel.toolExecutor = async (toolName, argsJson, _requestID) => {
           const t = sortedTools[toolName]
+          ModelIOAudit.record({
+            event: "tool.call.summary",
+            status: "started",
+            sessionID: input.sessionID,
+            messageID: input.user.id,
+            toolCallID: _requestID,
+            toolName,
+            input: argsJson,
+            source: "workflow",
+          })
           if (!t || !t.execute) {
+            ModelIOAudit.record({
+              event: "tool.call.summary",
+              status: "failed",
+              issue: "未知工具",
+              sessionID: input.sessionID,
+              messageID: input.user.id,
+              toolCallID: _requestID,
+              toolName,
+              error: { message: `Unknown tool: ${toolName}` },
+              source: "workflow",
+            })
             return { result: "", error: `Unknown tool: ${toolName}` }
           }
           try {
-            const result = await t.execute!(JSON.parse(argsJson), {
+            const args = JSON.parse(argsJson)
+            ModelIOAudit.record({
+              event: "tool.call.summary",
+              status: "input",
+              sessionID: input.sessionID,
+              messageID: input.user.id,
+              toolCallID: _requestID,
+              toolName,
+              input: args,
+              source: "workflow",
+            })
+            const result = await t.execute!(args, {
               toolCallId: _requestID,
               messages: input.messages,
               abortSignal: input.abort,
             })
             const output = typeof result === "string" ? result : (result?.output ?? JSON.stringify(result))
+            ModelIOAudit.record({
+              event: "tool.call.summary",
+              status: "completed",
+              sessionID: input.sessionID,
+              messageID: input.user.id,
+              toolCallID: _requestID,
+              toolName,
+              output,
+              metadata: typeof result === "object" ? result?.metadata : undefined,
+              title: typeof result === "object" ? result?.title : undefined,
+              source: "workflow",
+            })
             return {
               result: output,
               metadata: typeof result === "object" ? result?.metadata : undefined,
               title: typeof result === "object" ? result?.title : undefined,
             }
           } catch (e: any) {
+            ModelIOAudit.record({
+              event: "tool.call.summary",
+              status: e instanceof SyntaxError ? "invalid_arguments" : "failed",
+              issue: e instanceof SyntaxError ? "工具参数 JSON 构建异常" : "工具执行异常",
+              sessionID: input.sessionID,
+              messageID: input.user.id,
+              toolCallID: _requestID,
+              toolName,
+              input: argsJson,
+              error: ModelIOAudit.error(e),
+              source: "workflow",
+            })
             return { result: "", error: e.message ?? String(e) }
           }
         }
@@ -335,6 +392,41 @@ const live: Layer.Layer<
       const opencodeProjectID = input.model.providerID.startsWith("opencode")
         ? (yield* InstanceState.context).project.id
         : undefined
+
+      ModelIOAudit.record({
+        event: "model.request.sent",
+        sessionID: input.sessionID,
+        messageID: input.user.id,
+        providerID: input.model.providerID,
+        modelID: input.model.id,
+        agent: input.agent.name,
+        messageCount: messages.length,
+        toolCount: Object.keys(sortedTools).filter((x) => x !== "invalid").length,
+        toolChoice: input.toolChoice,
+        params: {
+          temperature: params.temperature,
+          topP: params.topP,
+          topK: params.topK,
+          maxOutputTokens: params.maxOutputTokens,
+        },
+        headers: {
+          ...(input.model.providerID.startsWith("opencode")
+            ? {
+                "x-opencode-project": opencodeProjectID,
+                "x-opencode-session": input.sessionID,
+                "x-opencode-request": input.user.id,
+                "x-opencode-client": Flag.OPENCODE_CLIENT,
+                "User-Agent": `opencode/${InstallationVersion}`,
+              }
+            : {
+                "x-session-affinity": input.sessionID,
+                ...(input.parentSessionID ? { "x-parent-session-id": input.parentSessionID } : {}),
+                "User-Agent": `opencode/${InstallationVersion}`,
+              }),
+          ...input.model.headers,
+          ...headers,
+        },
+      })
 
       return streamText({
         onError(error) {
@@ -428,8 +520,13 @@ const live: Layer.Layer<
             )
 
             const result = yield* run({ ...input, abort: ctrl.signal })
+            const audit = createStreamAudit(input)
 
-            return Stream.fromAsyncIterable(result.fullStream, (e) => (e instanceof Error ? e : new Error(String(e))))
+            return Stream.fromAsyncIterable(result.fullStream, (e) => (e instanceof Error ? e : new Error(String(e)))).pipe(
+              Stream.tap((event) => Effect.sync(() => audit.capture(event))),
+              Stream.tapError((error) => Effect.sync(() => audit.fail(error))),
+              Stream.ensuring(Effect.sync(() => audit.flush())),
+            )
           }),
         ),
       )
@@ -448,6 +545,148 @@ export const defaultLayer = Layer.suspend(() =>
     Layer.provide(Plugin.defaultLayer),
   ),
 )
+
+function createStreamAudit(input: StreamInput) {
+  const started = Date.now()
+  const toolInputs: Record<string, { toolName?: string; raw: string; parsed?: unknown; error?: unknown }> = {}
+  const toolCalls: Array<{ toolCallID: string; toolName: string; input: unknown }> = []
+  const toolResults: Array<{ toolCallID: string; output: unknown }> = []
+  const toolErrors: Array<{ toolCallID: string; error: unknown }> = []
+  const text: string[] = []
+  const reasoning: string[] = []
+  const finishReasons: string[] = []
+  const issues: string[] = []
+  let events = 0
+  let completed = false
+  let failed: unknown
+
+  return {
+    capture(event: Event) {
+      events++
+      switch (event.type) {
+        case "text-delta":
+          text.push(event.text)
+          return
+
+        case "reasoning-delta":
+          reasoning.push(event.text)
+          return
+
+        case "tool-input-start":
+          toolInputs[event.id] = { toolName: event.toolName, raw: "" }
+          return
+
+        case "tool-input-delta":
+          if (!toolInputs[event.id]) toolInputs[event.id] = { raw: "" }
+          toolInputs[event.id].raw += event.delta
+          return
+
+        case "tool-input-end": {
+          const item = toolInputs[event.id]
+          if (!item?.raw) return
+          try {
+            item.parsed = JSON.parse(item.raw)
+          } catch (error) {
+            item.error = error
+            issues.push(`工具参数 JSON 构建异常：${item.toolName ?? "unknown"}(${event.id})`)
+          }
+          return
+        }
+
+        case "tool-call":
+          toolCalls.push({ toolCallID: event.toolCallId, toolName: event.toolName, input: event.input })
+          return
+
+        case "tool-result":
+          toolResults.push({ toolCallID: event.toolCallId, output: event.output })
+          return
+
+        case "tool-error":
+          toolErrors.push({ toolCallID: event.toolCallId, error: ModelIOAudit.error(event.error) })
+          issues.push(`工具执行异常：${event.toolCallId}`)
+          return
+
+        case "finish-step":
+          finishReasons.push(event.finishReason)
+          if (event.finishReason === "length") issues.push("模型输出被长度限制截断")
+          if (event.finishReason === "error") issues.push("模型 step 以 error 结束")
+          return
+
+        case "finish":
+          completed = true
+          return
+
+        case "error":
+          failed = event.error
+          issues.push("模型流返回 error 事件")
+          return
+      }
+    },
+    fail(error: unknown) {
+      failed = error
+      issues.push("模型流异常中断")
+    },
+    flush() {
+      if (!completed && !failed) issues.push("模型流未收到 finish，可能提前中断")
+      if (looksLooping(text.join(""))) issues.push("疑似模型循环输出：文本存在连续重复片段")
+      for (const call of repeatedToolCalls(toolCalls)) issues.push(`疑似工具循环调用：${call}`)
+
+      ModelIOAudit.record({
+        event: "model.response.summary",
+        sessionID: input.sessionID,
+        messageID: input.user.id,
+        providerID: input.model.providerID,
+        modelID: input.model.id,
+        agent: input.agent.name,
+        durationMs: Date.now() - started,
+        completed,
+        finishReasons,
+        issueCount: issues.length,
+        issues,
+        output: {
+          text: text.join(""),
+          reasoning: reasoning.join(""),
+        },
+        tools: {
+          arguments: Object.entries(toolInputs).map(([toolCallID, item]) => ({
+            toolCallID,
+            toolName: item.toolName,
+            raw: item.raw,
+            parsed: item.parsed,
+            parseError: item.error ? ModelIOAudit.error(item.error) : undefined,
+          })),
+          calls: toolCalls,
+          results: toolResults,
+          errors: toolErrors,
+        },
+        stream: {
+          eventCount: events,
+          failed: failed ? ModelIOAudit.error(failed) : undefined,
+        },
+      })
+    },
+  }
+}
+
+function looksLooping(value: string) {
+  const normalized = value.replace(/\s+/g, " ").trim()
+  if (normalized.length < 200) return false
+  const tail = normalized.slice(-1200)
+  const chunks: string[] = tail.match(/.{40,120}/g) ?? []
+  return chunks.some((chunk, index) => chunks.indexOf(chunk) !== index)
+}
+
+function repeatedToolCalls(calls: Array<{ toolName: string; input: unknown }>) {
+  return Object.entries(
+    calls.reduce<Record<string, number>>((acc, call) => {
+      const key = `${call.toolName}:${JSON.stringify(call.input)}`
+      acc[key] = (acc[key] ?? 0) + 1
+      return acc
+    }, {}),
+  )
+    .filter(([, count]) => count >= 3)
+    .map(([key, count]) => `${key} x${count}`)
+}
 
 function resolveTools(input: Pick<StreamInput, "tools" | "agent" | "permission" | "user">) {
   const disabled = Permission.disabled(
