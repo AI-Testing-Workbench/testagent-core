@@ -22,6 +22,7 @@ import { pathToFileURL } from "url"
 import { Effect, Layer, Context, Schema, Types } from "effect"
 import { EffectBridge } from "@/effect/bridge"
 import { InstanceState } from "@/effect/instance-state"
+import { User } from "@/testagent/user" // testagent_change
 import { AppFileSystem } from "@opencode-ai/core/filesystem"
 import { isRecord } from "@/util/record"
 import { optionalOmitUndefined, withStatics } from "@/util/schema"
@@ -1674,6 +1675,19 @@ const layer: Layer.Layer<
 
           // testagent_change start - Add detailed HTTP request logging
           const url = typeof input === "string" ? input : (input instanceof URL ? input.href : input?.url)
+
+          // Inject user/tags into body for providers that don't forward providerOptions
+          if (opts.body && opts.method === "POST") {
+            try {
+              const body = JSON.parse(opts.body as string)
+              const u = User.get()
+              if (u.id) body.user = u.id
+              body.tags = ["test-design"]
+              opts.body = JSON.stringify(body)
+              log.info("userID", {user: u.id})
+            } catch {}
+          }
+
           log.info("🚀 HTTP Request to LLM", {
             providerID: model.providerID,
             modelID: model.id,
