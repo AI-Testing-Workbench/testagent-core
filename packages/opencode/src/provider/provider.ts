@@ -412,9 +412,9 @@ function custom(dep: CustomDep): Record<string, CustomLoader> {
         autoload: false,
         options: {
           headers: {
-            "HTTP-Referer": "https://opencode.ai/",
-            "X-Title": "opencode",
-            "X-Source": "opencode",
+            "HTTP-Referer": "TestAgent",
+            "X-Title": "TestAgent",
+            "X-Source": "TestAgent",
           },
         },
       }),
@@ -423,8 +423,8 @@ function custom(dep: CustomDep): Record<string, CustomLoader> {
         autoload: false,
         options: {
           headers: {
-            "HTTP-Referer": "https://opencode.ai/",
-            "X-Title": "opencode",
+            "HTTP-Referer": "TestAgent",
+            "X-Title": "TestAgent",
           },
         },
       }),
@@ -433,8 +433,8 @@ function custom(dep: CustomDep): Record<string, CustomLoader> {
         autoload: false,
         options: {
           headers: {
-            "HTTP-Referer": "https://opencode.ai/",
-            "X-Title": "opencode",
+            "HTTP-Referer": "TestAgent",
+            "X-Title": "TestAgent",
           },
         },
       }),
@@ -443,8 +443,8 @@ function custom(dep: CustomDep): Record<string, CustomLoader> {
         autoload: false,
         options: {
           headers: {
-            "http-referer": "https://opencode.ai/",
-            "x-title": "opencode",
+            "http-referer": "TestAgent",
+            "x-title": "TestAgent",
           },
         },
       }),
@@ -541,7 +541,7 @@ function custom(dep: CustomDep): Record<string, CustomLoader> {
         autoload: false,
         options: {
           headers: {
-            "HTTP-Referer": "https://opencode.ai/",
+            "HTTP-Referer": "TestAgent",
             "X-Title": "opencode",
           },
         },
@@ -567,7 +567,7 @@ function custom(dep: CustomDep): Record<string, CustomLoader> {
       const directory = yield* InstanceState.directory
 
       const aiGatewayHeaders = {
-        "User-Agent": `opencode/${InstallationVersion} gitlab-ai-provider/${GITLAB_PROVIDER_VERSION} (${os.platform()} ${os.release()}; ${os.arch()})`,
+        "User-Agent": `TestAgent/${InstallationVersion} gitlab-ai-provider/${GITLAB_PROVIDER_VERSION} (${os.platform()} ${os.release()}; ${os.arch()})`,
         "anthropic-beta": "context-1m-2025-08-07",
         ...providerConfig?.options?.aiGatewayHeaders,
       }
@@ -720,7 +720,7 @@ function custom(dep: CustomDep): Record<string, CustomLoader> {
         options: {
           apiKey,
           headers: {
-            "User-Agent": `opencode/${InstallationVersion} cloudflare-workers-ai (${os.platform()} ${os.release()}; ${os.arch()})`,
+            "User-Agent": `TestAgent/${InstallationVersion} cloudflare-workers-ai (${os.platform()} ${os.release()}; ${os.arch()})`,
           },
         },
         async getModel(sdk: any, modelID: string) {
@@ -791,7 +791,7 @@ function custom(dep: CustomDep): Record<string, CustomLoader> {
         skipCache: input.options?.skipCache,
         collectLog: input.options?.collectLog,
         headers: {
-          "User-Agent": `opencode/${InstallationVersion} cloudflare-ai-gateway (${os.platform()} ${os.release()}; ${os.arch()})`,
+          "User-Agent": `TestAgent/${InstallationVersion} cloudflare-ai-gateway (${os.platform()} ${os.release()}; ${os.arch()})`,
         },
       }
 
@@ -817,7 +817,7 @@ function custom(dep: CustomDep): Record<string, CustomLoader> {
         autoload: false,
         options: {
           headers: {
-            "X-Cerebras-3rd-Party-Integration": "opencode",
+            "X-Cerebras-3rd-Party-Integration": "TestAgent",
           },
         },
       }),
@@ -826,8 +826,8 @@ function custom(dep: CustomDep): Record<string, CustomLoader> {
         autoload: false,
         options: {
           headers: {
-            "HTTP-Referer": "https://opencode.ai/",
-            "X-Title": "opencode",
+            "HTTP-Referer": "TestAgent",
+            "X-Title": "TestAgent",
           },
         },
       }),
@@ -835,8 +835,11 @@ function custom(dep: CustomDep): Record<string, CustomLoader> {
     "test-llm": Effect.fnUntraced(function* () {
       const auth = yield* dep.auth("test-llm")
       const env = yield* dep.env()
-      const apiKey = env["TEST_LLM_API_KEY"] ?? (auth?.type === "api" ? auth.key : undefined) ?? "sk-WHMJMG6H36UGdq7FdVzODA"
-      const baseURL = env["TEST_LLM_BASE_URL"] ?? decodeURIComponent(atob("aHR0cCUzQSUyRiUyRnRlc3QtbGxtLnBsYXRmb3JtLmNtYmNoaW5hLmNuJTJGdjE="))
+      const apiKey =
+        env["TEST_LLM_API_KEY"] ?? (auth?.type === "api" ? auth.key : undefined) ?? "sk-WHMJMG6H36UGdq7FdVzODA"
+      const baseURL =
+        env["TEST_LLM_BASE_URL"] ??
+        decodeURIComponent(atob("aHR0cCUzQSUyRiUyRnRlc3QtbGxtLnBsYXRmb3JtLmNtYmNoaW5hLmNuJTJGdjE="))
       return {
         autoload: true,
         options: {
@@ -1533,112 +1536,115 @@ const layer: Layer.Layer<
         // Node.js built-in undici has a hardcoded 300s bodyTimeout that cannot be disabled.
         // Solution: Use external undici package which allows configuring bodyTimeout: 0
         const isNodeJS = typeof process !== "undefined" && process.versions?.node
-        const wrappedFetch = isNodeJS ? await (async () => {
-          try {
-            // Try to import external undici package
-            const undici = await import("undici")
-            
-            log.info("Using external undici package", {
-              providerID: model.providerID,
-            })
-            
-            // Create custom Agent with timeouts disabled
-            // Note: keepAliveTimeout and keepAliveMaxTimeout must be >= 2000ms (undici requirement)
-            const agent = new undici.Agent({
-              bodyTimeout: 0,              // Disable body timeout (this is the key!)
-              headersTimeout: 0,           // Disable headers timeout
-              keepAliveTimeout: 2000,      // Minimum allowed value (2s)
-              keepAliveMaxTimeout: 6000,   // Minimum allowed value (6s)
-            })
-            
-            // Set as global dispatcher for undici.fetch
-            undici.setGlobalDispatcher(agent)
-            
-            log.info("Custom undici configured", {
-              providerID: model.providerID,
-              bodyTimeout: 0,
-              headersTimeout: 0,
-              keepAliveTimeout: 2000,
-              keepAliveMaxTimeout: 6000,
-            })
-            
-            // Return undici.fetch (not globalThis.fetch)
-            return undici.fetch
-            
-          } catch (error: any) {
-            log.error("Failed to load external undici, falling back to Node.js http/https", {
-              providerID: model.providerID,
-              error: error.message,
-            })
-            
-            // Fallback: Use Node.js http/https modules
-            const http = await import("http")
-            const https = await import("https")
-            
-            return async (input: any, init?: any): Promise<Response> => {
-              const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url
-              const parsedUrl = new URL(url)
-              const isHttps = parsedUrl.protocol === "https:"
-              const client = isHttps ? https : http
-              
-              return new Promise((resolve, reject) => {
-                const reqOptions = {
-                  method: init?.method || "GET",
-                  headers: init?.headers || {},
-                  timeout: 0,
-                }
-                
-                const req = client.request(parsedUrl, reqOptions, (res) => {
-                  const headers = new Headers()
-                  for (const [key, value] of Object.entries(res.headers)) {
-                    if (value) headers.set(key, Array.isArray(value) ? value.join(", ") : value)
-                  }
-                  
-                  const nodeStream = res as any
-                  const webStream = new ReadableStream({
-                    start(controller) {
-                      nodeStream.on("data", (chunk: Buffer) => {
-                        controller.enqueue(new Uint8Array(chunk))
-                      })
-                      nodeStream.on("end", () => controller.close())
-                      nodeStream.on("error", (err: Error) => controller.error(err))
-                    },
-                    cancel() {
-                      nodeStream.destroy()
-                    }
-                  })
-                  
-                  resolve(new Response(webStream, {
-                    status: res.statusCode || 200,
-                    statusText: res.statusMessage || "",
-                    headers,
-                  }))
+        const wrappedFetch = isNodeJS
+          ? await (async () => {
+              try {
+                // Try to import external undici package
+                const undici = await import("undici")
+
+                log.info("Using external undici package", {
+                  providerID: model.providerID,
                 })
-                
-                req.on("error", reject)
-                
-                if (init?.signal) {
-                  init.signal.addEventListener("abort", () => {
-                    req.destroy()
-                    reject(new DOMException("Aborted", "AbortError"))
+
+                // Create custom Agent with timeouts disabled
+                // Note: keepAliveTimeout and keepAliveMaxTimeout must be >= 2000ms (undici requirement)
+                const agent = new undici.Agent({
+                  bodyTimeout: 0, // Disable body timeout (this is the key!)
+                  headersTimeout: 0, // Disable headers timeout
+                  keepAliveTimeout: 2000, // Minimum allowed value (2s)
+                  keepAliveMaxTimeout: 6000, // Minimum allowed value (6s)
+                })
+
+                // Set as global dispatcher for undici.fetch
+                undici.setGlobalDispatcher(agent)
+
+                log.info("Custom undici configured", {
+                  providerID: model.providerID,
+                  bodyTimeout: 0,
+                  headersTimeout: 0,
+                  keepAliveTimeout: 2000,
+                  keepAliveMaxTimeout: 6000,
+                })
+
+                // Return undici.fetch (not globalThis.fetch)
+                return undici.fetch
+              } catch (error: any) {
+                log.error("Failed to load external undici, falling back to Node.js http/https", {
+                  providerID: model.providerID,
+                  error: error.message,
+                })
+
+                // Fallback: Use Node.js http/https modules
+                const http = await import("http")
+                const https = await import("https")
+
+                return async (input: any, init?: any): Promise<Response> => {
+                  const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url
+                  const parsedUrl = new URL(url)
+                  const isHttps = parsedUrl.protocol === "https:"
+                  const client = isHttps ? https : http
+
+                  return new Promise((resolve, reject) => {
+                    const reqOptions = {
+                      method: init?.method || "GET",
+                      headers: init?.headers || {},
+                      timeout: 0,
+                    }
+
+                    const req = client.request(parsedUrl, reqOptions, (res) => {
+                      const headers = new Headers()
+                      for (const [key, value] of Object.entries(res.headers)) {
+                        if (value) headers.set(key, Array.isArray(value) ? value.join(", ") : value)
+                      }
+
+                      const nodeStream = res as any
+                      const webStream = new ReadableStream({
+                        start(controller) {
+                          nodeStream.on("data", (chunk: Buffer) => {
+                            controller.enqueue(new Uint8Array(chunk))
+                          })
+                          nodeStream.on("end", () => controller.close())
+                          nodeStream.on("error", (err: Error) => controller.error(err))
+                        },
+                        cancel() {
+                          nodeStream.destroy()
+                        },
+                      })
+
+                      resolve(
+                        new Response(webStream, {
+                          status: res.statusCode || 200,
+                          statusText: res.statusMessage || "",
+                          headers,
+                        }),
+                      )
+                    })
+
+                    req.on("error", reject)
+
+                    if (init?.signal) {
+                      init.signal.addEventListener("abort", () => {
+                        req.destroy()
+                        reject(new DOMException("Aborted", "AbortError"))
+                      })
+                    }
+
+                    if (init?.body) {
+                      if (typeof init.body === "string") {
+                        req.write(init.body)
+                      } else if (Buffer.isBuffer(init.body)) {
+                        req.write(init.body)
+                      } else if (init.body instanceof Uint8Array) {
+                        req.write(Buffer.from(init.body))
+                      }
+                    }
+
+                    req.end()
                   })
                 }
-                
-                if (init?.body) {
-                  if (typeof init.body === "string") {
-                    req.write(init.body)
-                  } else if (Buffer.isBuffer(init.body)) {
-                    req.write(init.body)
-                  } else if (init.body instanceof Uint8Array) {
-                    req.write(Buffer.from(init.body))
-                  }
-                }
-                
-                req.end()
-              })
-            }
-          }
-        })() : (customFetch ?? fetch)
+              }
+            })()
+          : (customFetch ?? fetch)
         // testagent_change end
 
         options["fetch"] = async (input: any, init?: BunFetchRequestInit) => {
@@ -1674,7 +1680,7 @@ const layer: Layer.Layer<
           }
 
           // testagent_change start - Add detailed HTTP request logging
-          const url = typeof input === "string" ? input : (input instanceof URL ? input.href : input?.url)
+          const url = typeof input === "string" ? input : input instanceof URL ? input.href : input?.url
 
           // Inject user/tags into body for providers that don't forward providerOptions
           if (opts.body && opts.method === "POST") {
@@ -1684,7 +1690,7 @@ const layer: Layer.Layer<
               if (u.id) body.user = u.id
               body.tags = ["test-design"]
               opts.body = JSON.stringify(body)
-              log.info("userID", {user: u.id})
+              log.info("userID", { user: u.id })
             } catch {}
           }
 
