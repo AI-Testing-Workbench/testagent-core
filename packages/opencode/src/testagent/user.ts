@@ -7,6 +7,7 @@ const log = Log.create({ service: "testagent.user" })
 interface UserInfo {
   id?: string
   name?: string
+  token?: string
 }
 
 let override: UserInfo | undefined
@@ -25,6 +26,7 @@ export const User = {
     const fromEnv = {
       id: process.env["TESTAGENT_USER_ID"],
       name: process.env["TESTAGENT_USER_NAME"],
+      token: process.env["TESTAGENT_USER_TOKEN"],
     }
     if (fromEnv.id) {
       log.debug("from env", { user: fromEnv })
@@ -48,7 +50,7 @@ export const User = {
         if (fs.existsSync(file)) {
           const data = JSON.parse(fs.readFileSync(file, "utf8"))
           if (data.userId && data.userName) {
-            cachedFromFile = { id: data.userId, name: data.userName }
+            cachedFromFile = { id: data.userId, name: data.userName, token: data.token }
             log.debug("from file", { user: cachedFromFile })
           }
         } else {
@@ -60,7 +62,7 @@ export const User = {
       }
     }
     
-    const result = cachedFromFile ?? { id: undefined, name: undefined }
+    const result = cachedFromFile ?? { id: undefined, name: undefined, token: undefined }
     log.debug("final result", { user: result })
     return result
   },

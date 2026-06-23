@@ -14,6 +14,7 @@ import { ConfigMCP } from "../config/mcp"
 import * as Log from "@opencode-ai/core/util/log"
 import { NamedError } from "@opencode-ai/core/util/error"
 import z from "zod/v4"
+import {User} from "@/testagent/user"
 import { Installation } from "../installation"
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
 import { withTimeout } from "@/util/timeout"
@@ -112,7 +113,8 @@ function isMcpConfigured(entry: McpEntry): entry is ConfigMCP.Info {
   return typeof entry === "object" && entry !== null && "type" in entry
 }
 
-const sanitize = (s: string) => s.replace(/[^a-zA-Z0-9_-]/g, "_")
+const sanitize = (s: string) => s
+// const sanitize = (s: string) => s.replace(/[^a-zA-Z0-9_-]/g, "_")
 
 function remoteURL(key: string, value: string) {
   if (URL.canParse(value)) return new URL(value)
@@ -301,19 +303,25 @@ export const layer = Layer.effect(
         )
       }
 
+      // testagent_change - inject userId from external-user.json into MCP request headers
+      const userData = User.get()
+      let uid = userData.id;
+      let token = userData.token;
+      const headers = uid && token ? { ...mcp.headers, "sap_id": uid, "yst_id_token": token } : mcp.headers
+
       const transports: Array<{ name: string; transport: TransportWithAuth }> = [
         {
           name: "StreamableHTTP",
           transport: new StreamableHTTPClientTransport(url, {
             authProvider,
-            requestInit: mcp.headers ? { headers: mcp.headers } : undefined,
+            requestInit: headers ? { headers } : undefined,
           }),
         },
         {
           name: "SSE",
           transport: new SSEClientTransport(url, {
             authProvider,
-            requestInit: mcp.headers ? { headers: mcp.headers } : undefined,
+            requestInit: headers ? { headers } : undefined,
           }),
         },
       ]
