@@ -1058,7 +1058,7 @@ function getFinalTraceOutput(traceId: string, preferredSessionId?: string | null
 async function finalizeGeneration(
   sessionId: string,
   g: GenInfo,
-  options?: { tokens?: any; endTime?: Date; removeActive?: boolean },
+  options?: { tokens?: any; endTime?: Date; removeActive?: boolean; finishReason?: string },
 ) {
   const endTime = options?.endTime ?? new Date()
 
@@ -1084,6 +1084,7 @@ async function finalizeGeneration(
     text: fullText,
     tool_calls: toolCallsOutput.length > 0 ? toolCallsOutput : undefined,
     usage: toOutputUsage(usage),
+    finish_reason: options?.finishReason,
   }
 
   const cachedMessages = llmInputs.get(sessionId)
@@ -1118,6 +1119,14 @@ async function finalizeGeneration(
     completionStartTime: g.completionStartTime?.toISOString(),
     usage,
     output: JSON.stringify(structuredOutput, null, 2),
+    modelParameters: {
+      ...g.modelParameters,
+      ...(options?.finishReason ? { finish_reason: options.finishReason } : {}),
+    },
+    tags: [
+      ...OBSERVATION_TAGS,
+      ...(options?.finishReason ? [`finish_reason:${options.finishReason}`] : []),
+    ],
     metadata: {
       spanKind: "LLM",
       model: {
@@ -2006,6 +2015,11 @@ export const LangfusePlugin: Plugin = async (ctx) => {
       if (output.topP !== undefined) modelParameters.top_p = output.topP
       if (output.topK !== undefined) modelParameters.top_k = output.topK
       if (output.maxOutputTokens !== undefined) modelParameters.max_tokens = output.maxOutputTokens
+      const toolChoice = output.options?.toolChoice
+      if (toolChoice !== undefined) {
+        modelParameters.tool_choice = typeof toolChoice === "object" ? toolChoice : { type: toolChoice }
+      }
+      if (output.options?.maxRetries !== undefined) modelParameters.max_retries = output.options.maxRetries
 
       const genMetadata = {
         spanKind: "LLM",
@@ -2013,6 +2027,7 @@ export const LangfusePlugin: Plugin = async (ctx) => {
           name: modelName,
           provider: providerId,
           id: modelId,
+          apiId: input.model?.api?.id,
           parameters: modelParameters,
         },
         input: llmInputDict,
@@ -2429,7 +2444,7 @@ export const LangfusePlugin: Plugin = async (ctx) => {
             }
           }
 
-          await finalizeGeneration(sessionId, g, { tokens: part.tokens, endTime: new Date() })
+          await finalizeGeneration(sessionId, g, { tokens: part.tokens, endTime: new Date(), finishReason: part.reason })
         }
       }
 
