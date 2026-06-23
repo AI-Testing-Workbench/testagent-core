@@ -1701,6 +1701,7 @@ const layer: Layer.Layer<
             method: opts.method || "GET",
             hasBody: !!opts.body,
             bodySize: opts.body ? (typeof opts.body === "string" ? opts.body.length : "binary") : 0,
+            body: opts.body ? (typeof opts.body === "string" ? opts.body : JSON.stringify(opts.body)) : undefined,
           })
           const startTime = Date.now()
           // testagent_change end

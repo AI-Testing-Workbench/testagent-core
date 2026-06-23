@@ -13,12 +13,15 @@
  */
 
 import type { Plugin } from "@opencode-ai/plugin"
+import { Effect, Schema } from "effect"
 import { User } from "@/testagent/user"
 import { readFileSync, existsSync, writeFileSync, mkdirSync, renameSync } from "fs"
 import { dirname, join } from "path"
 import { homedir } from "os"
 
-const LANGFUSE_BASE_URL = decodeURIComponent(atob("aHR0cCUzQSUyRiUyRnRlc3RodWItYWdlbnQtdHJhY2UucGFhc3VhdC5jbWJjaGluYS5jbg=="));
+const LANGFUSE_BASE_URL = decodeURIComponent(
+  atob("aHR0cCUzQSUyRiUyRnRlc3RodWItYWdlbnQtdHJhY2UucGFhc3VhdC5jbWJjaGluYS5jbg=="),
+)
 const LANGFUSE_FINAL_BATCH_UPLOAD_PATH = "/api/trpc/batchTrace.save"
 
 let baseMetadata: () => Record<string, string>
@@ -205,9 +208,10 @@ function getActiveGenerationForPart(sessionId: string, part: any): GenInfo | und
     const matching = active.find((g) => g.assistantMessageId === messageId)
     if (matching) return matching
 
-    const unbound = part.type === "step-finish"
-      ? active.find((g) => !g.assistantMessageId && !g.finalOutput)
-      : [...active].reverse().find((g) => !g.assistantMessageId && !g.finalOutput)
+    const unbound =
+      part.type === "step-finish"
+        ? active.find((g) => !g.assistantMessageId && !g.finalOutput)
+        : [...active].reverse().find((g) => !g.assistantMessageId && !g.finalOutput)
     if (unbound) {
       unbound.assistantMessageId = messageId
       return unbound
@@ -285,7 +289,12 @@ function migrateTraceId(oldTraceId: string, newTraceId: string) {
 function getTraceIdForSession(sessionId: string, preferredTraceId?: string): string {
   const existing = sessionToTrace.get(sessionId)
   if (existing) {
-    if (preferredTraceId && sessionId === rootSessionId && existing !== preferredTraceId && generatedTraceIds.has(existing)) {
+    if (
+      preferredTraceId &&
+      sessionId === rootSessionId &&
+      existing !== preferredTraceId &&
+      generatedTraceIds.has(existing)
+    ) {
       migrateTraceId(existing, preferredTraceId)
       return preferredTraceId
     }
@@ -308,7 +317,10 @@ function getTraceIdForSession(sessionId: string, preferredTraceId?: string): str
   return traceId
 }
 
-function getSessionObservationParent(sessionId: string, options?: { preferActiveGeneration?: boolean }): string | undefined {
+function getSessionObservationParent(
+  sessionId: string,
+  options?: { preferActiveGeneration?: boolean },
+): string | undefined {
   if (options?.preferActiveGeneration) {
     const activeGeneration = getLatestActiveGeneration(sessionId)
     if (activeGeneration) return activeGeneration.genId
@@ -390,13 +402,28 @@ function injectTestcaseIds(text: string): string {
 }
 
 function transformWriteArgs(tool: string, args: any) {
-  if (tool === "write" && isBaseFile(args?.filePath) && typeof args.content === "string" && args.content.includes("TESTCASE_ID")) {
+  if (
+    tool === "write" &&
+    isBaseFile(args?.filePath) &&
+    typeof args.content === "string" &&
+    args.content.includes("TESTCASE_ID")
+  ) {
     args.content = injectTestcaseIds(args.content)
   }
-  if (tool === "edit" && isBaseFile(args?.filePath) && typeof args.newString === "string" && args.newString.includes("TESTCASE_ID")) {
+  if (
+    tool === "edit" &&
+    isBaseFile(args?.filePath) &&
+    typeof args.newString === "string" &&
+    args.newString.includes("TESTCASE_ID")
+  ) {
     args.newString = injectTestcaseIds(args.newString)
   }
-  if (tool === "bash" && typeof args?.command === "string" && args.command.includes("TESTCASE_ID") && BASH_FILE_RE.test(args.command)) {
+  if (
+    tool === "bash" &&
+    typeof args?.command === "string" &&
+    args.command.includes("TESTCASE_ID") &&
+    BASH_FILE_RE.test(args.command)
+  ) {
     args.command = injectTestcaseIds(args.command)
   }
 }
@@ -541,16 +568,12 @@ function buildFinalBatchUpload(batch: TraceBatch) {
     if (finalOutput) batch.output = finalOutput
   }
 
-  const events: any[] = [
-    buildIngestionEvent("trace-create", traceEventBody(batch)),
-  ]
+  const events: any[] = [buildIngestionEvent("trace-create", traceEventBody(batch))]
 
   const sortedGenerations = [...batch.generations].sort(
     (a, b) => new Date(a.startTime).getTime() - new Date(b.startTime).getTime(),
   )
-  const sortedSpans = [...batch.spans].sort(
-    (a, b) => new Date(a.startTime).getTime() - new Date(b.startTime).getTime(),
-  )
+  const sortedSpans = [...batch.spans].sort((a, b) => new Date(a.startTime).getTime() - new Date(b.startTime).getTime())
 
   for (const generation of sortedGenerations) {
     events.push(buildIngestionEvent("generation-create", generationEventBody(generation), generation.startTime))
@@ -649,7 +672,11 @@ async function retryFinalBatchUploads() {
   try {
     const failedItems = await uploadFinalBatchItems(items)
     const failedIds = new Set(failedItems.map((item) => item.id))
-    replaceFinalBatchUploads(finalBatchUploads.filter((item) => !items.some((attempted) => attempted.id === item.id) || failedIds.has(item.id)))
+    replaceFinalBatchUploads(
+      finalBatchUploads.filter(
+        (item) => !items.some((attempted) => attempted.id === item.id) || failedIds.has(item.id),
+      ),
+    )
   } finally {
     retryingFinalBatchUploads = false
   }
@@ -711,7 +738,13 @@ function getFailedEvents(events: any[], result: any): any[] {
 }
 
 function isValidIngestionEvent(event: any) {
-  return !!event && typeof event === "object" && typeof event.id === "string" && typeof event.type === "string" && !!event.body
+  return (
+    !!event &&
+    typeof event === "object" &&
+    typeof event.id === "string" &&
+    typeof event.type === "string" &&
+    !!event.body
+  )
 }
 
 function configureFailedIngestionQueue(projectKey: string) {
@@ -777,7 +810,9 @@ function replaceFailedIngestionEvents(events: any[]) {
 function markIngestionEventsAttempted(events: any[], failedEvents: any[]) {
   const attemptedIds = new Set(events.map((event) => event.id))
   const failedIds = new Set(failedEvents.map((event) => event.id))
-  const remainingEvents = failedIngestionEvents.filter((event) => !attemptedIds.has(event.id) || failedIds.has(event.id))
+  const remainingEvents = failedIngestionEvents.filter(
+    (event) => !attemptedIds.has(event.id) || failedIds.has(event.id),
+  )
   replaceFailedIngestionEvents(remainingEvents)
 }
 
@@ -960,8 +995,7 @@ function getGenerationOutputText(g: GenInfo) {
     try {
       const parsed = JSON.parse(g.output)
       if (typeof parsed?.text === "string" && parsed.text.trim()) return parsed.text
-    } catch {
-    }
+    } catch {}
     return g.output
   }
   return buildGenerationText(g)
@@ -975,8 +1009,7 @@ function getGenerationDataOutputText(generation: GenerationData) {
     try {
       const parsed = JSON.parse(generation.output)
       if (typeof parsed?.text === "string" && parsed.text.trim()) return parsed.text
-    } catch {
-    }
+    } catch {}
     return generation.output
   }
 
@@ -1004,7 +1037,9 @@ function getFinalTraceOutput(traceId: string, preferredSessionId?: string | null
   }
 
   const candidates = allGenerations.filter((g) => g.traceId === traceId)
-  const preferredCandidates = preferredSessionId ? candidates.filter((g) => g.sessionId === preferredSessionId) : candidates
+  const preferredCandidates = preferredSessionId
+    ? candidates.filter((g) => g.sessionId === preferredSessionId)
+    : candidates
   for (const g of [...preferredCandidates].reverse()) {
     const text = stripThinkTags(getGenerationOutputText(g))
     if (text) return text
@@ -1020,7 +1055,11 @@ function getFinalTraceOutput(traceId: string, preferredSessionId?: string | null
   return undefined
 }
 
-async function finalizeGeneration(sessionId: string, g: GenInfo, options?: { tokens?: any; endTime?: Date; removeActive?: boolean }) {
+async function finalizeGeneration(
+  sessionId: string,
+  g: GenInfo,
+  options?: { tokens?: any; endTime?: Date; removeActive?: boolean },
+) {
   const endTime = options?.endTime ?? new Date()
 
   if (!g.completionStartTime) {
@@ -1185,7 +1224,7 @@ function updateGenerationInBatch(traceId: string, genId: string, updates: Partia
   const batch = traceBatches.get(traceId)
   if (!batch) return
 
-  const idx = batch.generations.findIndex(g => g.id === genId)
+  const idx = batch.generations.findIndex((g) => g.id === genId)
   if (idx !== -1) {
     batch.generations[idx] = { ...batch.generations[idx], ...updates } as GenerationData
   }
@@ -1198,7 +1237,7 @@ function updateSpanInBatch(traceId: string, spanId: string, updates: Partial<Spa
   const batch = traceBatches.get(traceId)
   if (!batch) return
 
-  const idx = batch.spans.findIndex(s => s.id === spanId)
+  const idx = batch.spans.findIndex((s) => s.id === spanId)
   if (idx !== -1) {
     batch.spans[idx] = { ...batch.spans[idx], ...updates } as SpanData
   }
@@ -1419,6 +1458,16 @@ function toJsonSchema(obj: any): any {
   if (typeof obj !== "object") return obj
   if (Array.isArray(obj)) return obj.map(toJsonSchema)
 
+  // Handle Effect Schema objects (have .ast property with _tag)
+  if (obj.ast && typeof obj.ast === "object" && obj.ast._tag) {
+    try {
+      const doc = Schema.toJsonSchemaDocument(obj as Schema.Top)
+      return toJsonSchema(doc)
+    } catch {
+      // Fall through to Zod/extract logic
+    }
+  }
+
   const result: Record<string, any> = {}
   const jsonSchemaKeys = [
     "type",
@@ -1456,7 +1505,7 @@ function toJsonSchema(obj: any): any {
     "writeOnly",
   ]
 
-  // If it looks like a Zod schema (has ~standard or def), extract from def
+  // If it looks like a Zod schema (has .def), extract from def
   if ("def" in obj && obj.def && typeof obj.def === "object") {
     const def = obj.def
     // Check if def itself needs recursive cleaning
@@ -1653,10 +1702,13 @@ async function get_langfuse_login_token(langfuse_host: string, user_id: string):
   const csrf_token = csrfJson.csrfToken
 
   const cookies: Record<string, string> = {}
-  csrfRes.headers.get("set-cookie")?.split(",").forEach((cookie) => {
-    const parts = cookie.trim().split(";")[0].split("=")
-    if (parts.length === 2) cookies[parts[0]] = parts[1]
-  })
+  csrfRes.headers
+    .get("set-cookie")
+    ?.split(",")
+    .forEach((cookie) => {
+      const parts = cookie.trim().split(";")[0].split("=")
+      if (parts.length === 2) cookies[parts[0]] = parts[1]
+    })
   let csrf_headers = ""
   for (const [key, value] of Object.entries(cookies)) {
     csrf_headers += `${key}=${value};`
@@ -1684,10 +1736,13 @@ async function get_langfuse_login_token(langfuse_host: string, user_id: string):
   })
 
   const finalCookies: Record<string, string> = {}
-  credentialsRes.headers.get("set-cookie")?.split(",").forEach((cookie) => {
-    const parts = cookie.trim().split(";")[0].split("=")
-    if (parts.length === 2) finalCookies[parts[0]] = parts[1]
-  })
+  credentialsRes.headers
+    .get("set-cookie")
+    ?.split(",")
+    .forEach((cookie) => {
+      const parts = cookie.trim().split(";")[0].split("=")
+      if (parts.length === 2) finalCookies[parts[0]] = parts[1]
+    })
   let final_cookies = ""
   for (const [key, value] of Object.entries(finalCookies)) {
     final_cookies += `${key}=${value};`
@@ -1800,12 +1855,11 @@ export const LangfusePlugin: Plugin = async (ctx) => {
       const apiKeys = await get_project_apikeys(user.id, user.name, LANGFUSE_BASE_URL)
       if (apiKeys) {
         project_id = apiKeys.project_id
-        publicKey = apiKeys.public_key,
-        secretKey = apiKeys.secret_key,
-        console.log("[langfuse] Client initialized with dynamic keys", { userId: user.id })
+        ;((publicKey = apiKeys.public_key),
+          (secretKey = apiKeys.secret_key),
+          console.log("[langfuse] Client initialized with dynamic keys", { userId: user.id }))
       }
-    } catch (e) {
-    }
+    } catch (e) {}
   }
 
   baseMetadata = () => {
@@ -1859,7 +1913,9 @@ export const LangfusePlugin: Plugin = async (ctx) => {
         if (finalText) batch.output = finalText
       }
       updateTraceBatch(traceId, {
-        ...(isAssistantMessage && sessionId === rootSessionId && stripThinkTags(assistantOutput) ? { output: stripThinkTags(assistantOutput) } : {}),
+        ...(isAssistantMessage && sessionId === rootSessionId && stripThinkTags(assistantOutput)
+          ? { output: stripThinkTags(assistantOutput) }
+          : {}),
         metadata: {
           ...batch.metadata,
           messageID: input.messageID,
@@ -1927,7 +1983,7 @@ export const LangfusePlugin: Plugin = async (ctx) => {
       const traceId = getTraceIdForSession(sessionId)
       const parentObservationId = getSessionObservationParent(sessionId)
 
-      const providerId = input.provider?.info?.id || "unknown"
+      const providerId = input.provider?.info?.id || input.model?.providerID || "unknown"
       const modelId = input.model?.id || "unknown"
       const modelName = `${providerId}/${modelId}`
 
@@ -1935,6 +1991,9 @@ export const LangfusePlugin: Plugin = async (ctx) => {
       const system = systemPrompts.get(sessionId) || []
       // testagent_change - use tools after agent/user permission filtering
       const tools = activeToolDefs(input.activeTools)
+      console.error(
+        `[langfuse-debug] chat.params agent=${input.agent} activeTools=${JSON.stringify(input.activeTools)} filteredTools=${tools.map((t: any) => t.name || t.id || t).join(",")}`,
+      )
       const builtInput = buildLLMInput(messages, system, tools)
       const llmInput = builtInput.json
       const llmInputDict = builtInput.dict
@@ -2209,13 +2268,15 @@ export const LangfusePlugin: Plugin = async (ctx) => {
             name: isSkill ? skillName : input.tool,
             args: input.args,
             description: isSkill ? skillDesc : toolDef?.description,
-            input_schema: isSkill ? {} :toolDef
-              ? {
-                  parameters: toJsonSchema(toolDef.parameters || { type: "object", properties: {} })
-                }
-              : undefined,
+            input_schema: isSkill
+              ? {}
+              : toolDef
+                ? {
+                    parameters: toJsonSchema(toolDef.parameters || { type: "object", properties: {} }),
+                  }
+                : undefined,
           },
-          ...(fileContent && {fileContent}),
+          ...(fileContent && { fileContent }),
           ...baseMetadata(),
         },
       }
@@ -2377,17 +2438,24 @@ export const LangfusePlugin: Plugin = async (ctx) => {
         const sessionId = idleSessionId || currentSessionId || [...trackedSessionIds].pop()
         if (!sessionId) return
 
-        const traceId = sessionToTrace.get(sessionId) || currentTraceId || (rootSessionId ? sessionToTrace.get(rootSessionId) : undefined)
+        const traceId =
+          sessionToTrace.get(sessionId) ||
+          currentTraceId ||
+          (rootSessionId ? sessionToTrace.get(rootSessionId) : undefined)
         if (!traceId) return
 
         if (sessionId !== rootSessionId) {
-          for (const g of allGenerations.filter((gen) => gen.sessionId === sessionId && gen.traceId === traceId && !gen.finalOutput)) {
+          for (const g of allGenerations.filter(
+            (gen) => gen.sessionId === sessionId && gen.traceId === traceId && !gen.finalOutput,
+          )) {
             await finalizeGeneration(sessionId, g)
           }
 
           const agentSpanId = sessionToAgentSpan.get(sessionId)
           if (agentSpanId) {
-            const childGenerations = allGenerations.filter((g) => g.parentObservationId === agentSpanId && g.traceId === traceId)
+            const childGenerations = allGenerations.filter(
+              (g) => g.parentObservationId === agentSpanId && g.traceId === traceId,
+            )
             const lastChildGeneration = childGenerations[childGenerations.length - 1]
             const spanUpdates: Partial<SpanData> = {
               endTime: new Date().toISOString(),
@@ -2414,7 +2482,9 @@ export const LangfusePlugin: Plugin = async (ctx) => {
         }
 
         const currentBatch = traceBatches.get(traceId)
-        const finalText = getFinalTraceOutput(traceId, rootSessionId) ?? (currentBatch ? getFinalTraceOutputFromBatch(currentBatch) : undefined)
+        const finalText =
+          getFinalTraceOutput(traceId, rootSessionId) ??
+          (currentBatch ? getFinalTraceOutputFromBatch(currentBatch) : undefined)
         if (finalText !== undefined) {
           updateTraceBatch(traceId, { output: finalText })
           const batch = traceBatches.get(traceId)
