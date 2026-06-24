@@ -10,6 +10,7 @@ import type { Proc } from "#pty"
 import * as Log from "@opencode-ai/core/util/log"
 import { PtyID } from "./schema"
 import { Effect, Layer, Context, Schema, Types } from "effect"
+import path from "path"
 import { zod } from "@/util/effect-zod"
 import { NonNegativeInt, PositiveInt, withStatics } from "@/util/schema"
 
@@ -179,9 +180,23 @@ export const layer = Layer.effect(
       const cfg = yield* config.get()
       const id = PtyID.ascending()
       const command = input.command || Shell.preferred(cfg.shell)
-      const args = input.args || []
+      let args = input.args || []
       if (Shell.login(command)) {
         args.push("-l")
+      }
+
+      if (process.platform === "win32" && args.length === 0) {
+        const base = path.win32.basename(command).toLowerCase()
+        if (base === "cmd.exe" || base === "cmd") {
+          args = ["/k", "chcp 65001>nul"]
+        } else if (base === "powershell.exe" || base === "pwsh.exe") {
+          args = [
+            "-NoLogo",
+            "-NoExit",
+            "-Command",
+            "[Console]::OutputEncoding=[Text.UTF8Encoding]::UTF8; [Console]::InputEncoding=[Text.UTF8Encoding]::UTF8",
+          ]
+        }
       }
 
       const cwd = input.cwd || s.dir
