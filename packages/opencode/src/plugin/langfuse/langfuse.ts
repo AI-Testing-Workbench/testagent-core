@@ -153,6 +153,8 @@ const gens = new Map<string, GenInfo[]>()
 
 // 存储工具调用的 Span ID
 const toolSpanIds = new Map<string, string>()
+const toolCallInfos = new Map<string, { spanId: string; traceId: string; sessionId: string; toolName?: string }>()
+const sessionSpanIds = new Map<string, Set<string>>()
 
 // 工具结果有时先出现在 message.part.updated，随后 tool.execute.after 的 output 仍为 null。
 // 按 callID 缓存已完成结果，用来回填同一个 TOOL span。
@@ -317,6 +319,9 @@ function migrateTraceId(oldTraceId: string, newTraceId: string) {
   for (const [sid, traceId] of sessionToTrace) {
     if (traceId === oldTraceId) sessionToTrace.set(sid, newTraceId)
   }
+  for (const [callID, info] of toolCallInfos) {
+    if (info.traceId === oldTraceId) toolCallInfos.set(callID, { ...info, traceId: newTraceId })
+  }
   if (currentTraceId === oldTraceId) currentTraceId = newTraceId
   uploadedTraceIds.delete(oldTraceId)
   generatedTraceIds.delete(oldTraceId)
@@ -371,7 +376,16 @@ function getSessionObservationParent(
   return getActiveParentId()
 }
 
-function queuePendingSubagent(parentSessionId: string, entry: { traceId: string; agentSpanId: string }) {
+async function queuePendingSubagent(parentSessionId: string, entry: { traceId: string; agentSpanId: string }) {
+  const waitingSessions = pendingSubagentSessions.get(parentSessionId)
+  const waitingSessionId = waitingSessions?.shift()
+  if (waitingSessions && waitingSessions.length === 0) pendingSubagentSessions.delete(parentSessionId)
+
+  if (waitingSessionId) {
+    await attachSubagentSession(waitingSessionId, entry.traceId, entry.agentSpanId)
+    return
+  }
+
   const queue = pendingSubagents.get(parentSessionId) ?? []
   queue.push(entry)
   pendingSubagents.set(parentSessionId, queue)
@@ -385,6 +399,43 @@ function consumePendingSubagent(parentSessionId: string) {
   if (!queue.length) pendingSubagents.delete(parentSessionId)
   else pendingSubagents.set(parentSessionId, queue)
   return next
+}
+
+function rememberPendingSubagentSession(parentSessionId: string, sessionId: string) {
+  const queue = pendingSubagentSessions.get(parentSessionId) ?? []
+  if (!queue.includes(sessionId)) queue.push(sessionId)
+  pendingSubagentSessions.set(parentSessionId, queue)
+}
+
+async function attachSubagentSession(sessionId: string, traceId: string, agentSpanId: string) {
+  sessionToTrace.set(sessionId, traceId)
+  sessionToAgentSpan.set(sessionId, agentSpanId)
+  currentTraceId = traceId
+  await reparentSessionObservations(sessionId, traceId, agentSpanId)
+}
+
+function recordSessionSpan(sessionId: string, spanId: string) {
+  const spanIds = sessionSpanIds.get(sessionId) ?? new Set<string>()
+  spanIds.add(spanId)
+  sessionSpanIds.set(sessionId, spanIds)
+}
+
+async function reparentSessionObservations(sessionId: string, traceId: string, agentSpanId: string) {
+  for (const gen of allGenerations.filter((g) => g.sessionId === sessionId && g.traceId === traceId)) {
+    if (gen.parentObservationId === agentSpanId) continue
+    gen.parentObservationId = agentSpanId
+    const generationUpdates: Partial<GenerationData> = { parentObservationId: agentSpanId }
+    updateGenerationInBatch(traceId, gen.genId, generationUpdates)
+    await updateGenerationImmediately(traceId, gen.genId, generationUpdates)
+  }
+
+  for (const spanId of sessionSpanIds.get(sessionId) ?? []) {
+    const span = traceBatches.get(traceId)?.spans.find((s) => s.id === spanId)
+    if (!span || span.id === agentSpanId || span.parentObservationId === agentSpanId) continue
+    const spanUpdates: Partial<SpanData> = { parentObservationId: agentSpanId }
+    updateSpanInBatch(traceId, spanId, spanUpdates)
+    await updateSpanImmediately(traceId, spanId, spanUpdates)
+  }
 }
 
 // 存储用户输入
@@ -407,6 +458,7 @@ const currentGenIdx = new Map<string, number>()
 
 // 跟踪的会话 ID 集合
 const trackedSessionIds = new Set<string>()
+const pendingSubagentSessions = new Map<string, string[]>()
 
 // 消息计数器
 const messageCounter = new Map<string, number>()
@@ -994,15 +1046,66 @@ function toSpanOutput(output: any) {
   return stringifyToolOutput(output).slice(0, 10000)
 }
 
-async function updateToolSpanOutputFromSnapshot(
-  callID: string,
+function getToolCallId(value: any): string | undefined {
+  const id = value?.callID ?? value?.toolCallID ?? value?.tool_call_id ?? value?.id
+  return id === undefined || id === null || id === "" ? undefined : String(id)
+}
+
+function isMeaningfulToolOutput(output: any) {
+  if (output === undefined || output === null) return false
+  if (typeof output === "string") return output.length > 0
+  if (Array.isArray(output)) return output.length > 0
+  return true
+}
+
+function findUnresolvedToolCall(
+  sessionId: string | undefined,
+  traceId: string | undefined,
+  toolName: string | undefined,
+) {
+  for (const [callID, info] of toolCallInfos) {
+    if (sessionId && info.sessionId !== sessionId) continue
+    if (traceId && info.traceId !== traceId) continue
+    if (toolName && info.toolName && info.toolName !== toolName) continue
+
+    const span = traceBatches.get(info.traceId)?.spans.find((s) => s.id === info.spanId)
+    if (!span || span.output === undefined || span.output === null) return { callID, info }
+  }
+  return undefined
+}
+
+function findUnresolvedToolSpan(
+  sessionId: string | undefined,
+  traceId: string | undefined,
+  toolName: string | undefined,
+) {
+  const sessionSpanCandidates = sessionId ? [...(sessionSpanIds.get(sessionId) ?? [])] : []
+  const traceIds = traceId ? [traceId] : [...traceBatches.keys()]
+
+  for (const tid of traceIds) {
+    const batch = traceBatches.get(tid)
+    if (!batch) continue
+
+    const spanIds = sessionSpanCandidates.length > 0 ? sessionSpanCandidates : batch.spans.map((span) => span.id)
+    for (const spanId of spanIds) {
+      const span = batch.spans.find((s) => s.id === spanId)
+      if (!span) continue
+      if (span.metadata?.spanKind !== "TOOL") continue
+      if (toolName && span.metadata?.input?.tool && span.metadata.input.tool !== toolName) continue
+      if (span.endTime && span.output !== undefined && span.output !== null) continue
+      return { spanId: span.id, traceId: tid, span }
+    }
+  }
+
+  return undefined
+}
+
+async function updateToolSpanOutput(
   traceId: string,
+  spanId: string,
   endTime: Date,
   snapshot: { output: any; metadata?: any; title?: string },
 ) {
-  const spanId = toolSpanIds.get(callID)
-  if (!spanId) return false
-
   const existingSpan = traceBatches.get(traceId)?.spans.find((span) => span.id === spanId)
   const spanOutput = toSpanOutput(snapshot.output)
   const spanUpdates: Partial<SpanData> = {
@@ -1025,6 +1128,89 @@ async function updateToolSpanOutputFromSnapshot(
 
   updateSpanInBatch(traceId, spanId, spanUpdates)
   await updateSpanImmediately(traceId, spanId, spanUpdates)
+}
+
+async function captureToolResultsFromMessages(messages: any[]) {
+  for (const message of messages) {
+    const sessionId = message.info?.sessionID || currentSessionId
+    for (const part of message.parts || []) {
+      const callID = getToolCallId(part)
+      if (part?.type !== "tool" || !callID || part.state?.status !== "completed" || !hasOwn(part.state, "output")) {
+        continue
+      }
+
+      const snapshot = {
+        output: part.state.output,
+        metadata: part.metadata,
+        title: part.title,
+      }
+      toolResultSnapshots.set(callID, snapshot)
+      await updateToolSpanOutputFromSnapshot(
+        callID,
+        sessionId ? sessionToTrace.get(sessionId) : currentTraceId,
+        new Date(),
+        snapshot,
+      )
+    }
+  }
+}
+
+async function captureToolResultsFromLLMInputMessages(messages: any[], sessionId: string, traceId: string) {
+  const pendingToolCalls: Array<{ id?: string; name?: string }> = []
+
+  for (const message of messages) {
+    if (Array.isArray(message?.tool_calls)) {
+      for (const toolCall of message.tool_calls) {
+        pendingToolCalls.push({
+          id: getToolCallId(toolCall),
+          name: toolCall?.function?.name || toolCall?.name,
+        })
+      }
+    }
+
+    if (message?.role !== "tool" || !isMeaningfulToolOutput(message.content)) continue
+
+    const pendingToolCall = pendingToolCalls.shift()
+    const toolName = message.name || message.tool || pendingToolCall?.name
+    const callID =
+      getToolCallId(message) ?? pendingToolCall?.id ?? findUnresolvedToolCall(sessionId, traceId, toolName)?.callID
+
+    const snapshot = {
+      output: message.content,
+      metadata: { source: "llm-input-message" },
+      title: toolName,
+    }
+    if (callID) {
+      toolResultSnapshots.set(callID, snapshot)
+      const updated = await updateToolSpanOutputFromSnapshot(callID, traceId, new Date(), snapshot)
+      if (updated) continue
+    }
+
+    const unresolvedSpan = findUnresolvedToolSpan(sessionId, traceId, toolName)
+    if (unresolvedSpan) {
+      await updateToolSpanOutput(unresolvedSpan.traceId, unresolvedSpan.spanId, new Date(), snapshot)
+    }
+  }
+}
+
+function captureToolResultFromConvertedMessage(message: any, part: any) {
+  const callID = getToolCallId(part)
+  if (callID) message.tool_call_id = callID
+  return message
+}
+
+async function updateToolSpanOutputFromSnapshot(
+  callID: string,
+  traceId: string | undefined,
+  endTime: Date,
+  snapshot: { output: any; metadata?: any; title?: string },
+) {
+  const callInfo = toolCallInfos.get(callID)
+  const spanId = callInfo?.spanId ?? toolSpanIds.get(callID)
+  const resolvedTraceId = callInfo?.traceId ?? traceId
+  if (!spanId || !resolvedTraceId) return false
+
+  await updateToolSpanOutput(resolvedTraceId, spanId, endTime, snapshot)
   return true
 }
 
@@ -1231,6 +1417,12 @@ async function finalizeGeneration(
       model: buildLLMModelMetadata(g),
       input: updatedInput,
       output: structuredOutput,
+      usage: {
+        unit: "tokens",
+        scope: "generation",
+        note: "Langfuse generation usage is per LLM call; trace-level totals should be computed by summing generations.",
+        ...usage,
+      },
       tags: OBSERVATION_TAGS,
       ...baseMetadata(),
     },
@@ -1386,43 +1578,64 @@ function convertToLLMMessages(messages: any[]): any[] {
       } else if (p.type === "tool") {
         flushTextBuffer()
         if (p.state?.input !== undefined) {
-          toolCalls.push({
+          const toolCall: any = {
             type: "function",
             function: {
               name: p.tool,
               arguments: p.state.input,
             },
-          })
+          }
+          const callID = getToolCallId(p)
+          if (callID) toolCall.id = callID
+          toolCalls.push(toolCall)
         }
         if (p.state?.status === "completed" && p.state?.output !== undefined) {
-          toolResults.push({
-            role: "tool",
-            name: p.tool,
-            content: p.state.output,
-          })
+          toolResults.push(
+            captureToolResultFromConvertedMessage(
+              {
+                role: "tool",
+                name: p.tool,
+                content: p.state.output,
+              },
+              p,
+            ),
+          )
         } else if (p.state?.status === "error" && p.state?.error) {
-          toolResults.push({
-            role: "tool",
-            name: p.tool,
-            content: `Error: ${p.state.error}`,
-          })
+          toolResults.push(
+            captureToolResultFromConvertedMessage(
+              {
+                role: "tool",
+                name: p.tool,
+                content: `Error: ${p.state.error}`,
+              },
+              p,
+            ),
+          )
         }
       } else if (p.type === "tool-call") {
         flushTextBuffer()
-        toolCalls.push({
+        const toolCall: any = {
           type: "function",
           function: {
             name: p.name,
             arguments: p.args || {},
           },
-        })
+        }
+        const callID = getToolCallId(p)
+        if (callID) toolCall.id = callID
+        toolCalls.push(toolCall)
       } else if (p.type === "tool-result") {
         flushTextBuffer()
-        toolResults.push({
-          role: "tool",
-          name: p.name || "",
-          content: p.output,
-        })
+        toolResults.push(
+          captureToolResultFromConvertedMessage(
+            {
+              role: "tool",
+              name: p.name || "",
+              content: p.output,
+            },
+            p,
+          ),
+        )
       }
     }
     flushTextBuffer()
@@ -1705,12 +1918,17 @@ function buildLLMInput(messages: any[], system: string[], tools: any[]): { json:
   const formattedMessages = [...systemMessages, ...convertToLLMMessages(messages)]
   const formattedTools = tools.map((t) => {
     if (t.type === "function") return t
+    const name = t.name || t.id || t
     return {
       type: "function",
       function: {
-        name: t.name || t.id || t,
+        name,
         description: t.description || "",
-        parameters: toJsonSchema(t.parameters || { type: "object", properties: {} }),
+        // testagent_change: sandbox tool schema is hidden from the LLM
+        parameters:
+          name === "sandbox"
+            ? { type: "object", properties: {} }
+            : toJsonSchema(t.parameters || { type: "object", properties: {} }),
       },
     }
   })
@@ -2043,6 +2261,8 @@ export const LangfusePlugin: Plugin = async (ctx) => {
      * 缓存最终发给 LLM 的上下文消息
      */
     "experimental.chat.messages.transform": async (_, output) => {
+      await captureToolResultsFromMessages(output.messages)
+
       const bySession = new Map<string, typeof output.messages>()
 
       for (const message of output.messages) {
@@ -2077,6 +2297,7 @@ export const LangfusePlugin: Plugin = async (ctx) => {
           const popped = skillStack.pop()
           if (popped) {
             toolSpanIds.delete(popped.callID)
+            toolCallInfos.delete(popped.callID)
             toolResultSnapshots.delete(popped.callID)
           }
         }
@@ -2099,6 +2320,7 @@ export const LangfusePlugin: Plugin = async (ctx) => {
       const builtInput = buildLLMInput(messages, system, tools)
       const llmInput = builtInput.json
       const llmInputDict = builtInput.dict
+      await captureToolResultsFromLLMInputMessages((llmInputDict as any).messages || [], sessionId, traceId)
 
       const startTime = new Date()
       const genId = generateUUID()
@@ -2243,6 +2465,8 @@ export const LangfusePlugin: Plugin = async (ctx) => {
       addSpanToBatch(traceId, spanData)
       await createSpanImmediately(spanData)
       toolSpanIds.set(input.callID, spanId)
+      toolCallInfos.set(input.callID, { spanId, traceId, sessionId, toolName: input.tool })
+      recordSessionSpan(sessionId, spanId)
 
       let agentSpanId: string | undefined
       if (isTask && subagentType) {
@@ -2274,7 +2498,8 @@ export const LangfusePlugin: Plugin = async (ctx) => {
 
         addSpanToBatch(traceId, agentSpanData)
         await createSpanImmediately(agentSpanData)
-        queuePendingSubagent(sessionId, { traceId, agentSpanId })
+        recordSessionSpan(sessionId, agentSpanId)
+        await queuePendingSubagent(sessionId, { traceId, agentSpanId })
 
         // console.log("[langfuse] subagent call detected:", subagentType, "toolSpanId:", spanId, "agentSpanId:", agentSpanId)
       }
@@ -2326,10 +2551,11 @@ export const LangfusePlugin: Plugin = async (ctx) => {
         }
       }
 
-      const spanId = toolSpanIds.get(input.callID)
+      const callInfo = toolCallInfos.get(input.callID)
+      const spanId = callInfo?.spanId ?? toolSpanIds.get(input.callID)
       if (!spanId) return
 
-      const traceId = sessionToTrace.get(input.sessionID) || currentTraceId
+      const traceId = callInfo?.traceId || sessionToTrace.get(input.sessionID) || currentTraceId
       if (!traceId) return
 
       const isSkill = input.tool === "skill"
@@ -2398,6 +2624,7 @@ export const LangfusePlugin: Plugin = async (ctx) => {
 
       if (!isSkill && effectiveOutput !== null && effectiveOutput !== undefined) {
         toolSpanIds.delete(input.callID)
+        toolCallInfos.delete(input.callID)
         toolResultSnapshots.delete(input.callID)
       }
     },
@@ -2461,7 +2688,9 @@ export const LangfusePlugin: Plugin = async (ctx) => {
               currentTraceId = inheritedTraceId
             }
             if (pending?.agentSpanId) {
-              sessionToAgentSpan.set(sid, pending.agentSpanId)
+              await attachSubagentSession(sid, pending.traceId, pending.agentSpanId)
+            } else {
+              rememberPendingSubagentSession(parentId, sid)
             }
             // console.log("[langfuse] subagent session created:", sid, "parent:", parentId, "using trace:", inheritedTraceId)
           }
@@ -2481,10 +2710,12 @@ export const LangfusePlugin: Plugin = async (ctx) => {
           }
           toolResultSnapshots.set(part.callID, snapshot)
 
-          const traceId = sessionToTrace.get(sessionId) || currentTraceId
-          if (traceId) {
-            await updateToolSpanOutputFromSnapshot(part.callID, traceId, new Date(), snapshot)
-          }
+          await updateToolSpanOutputFromSnapshot(
+            part.callID,
+            sessionToTrace.get(sessionId) || currentTraceId,
+            new Date(),
+            snapshot,
+          )
         }
 
         const g = getActiveGenerationForPart(sessionId, part)
@@ -2556,6 +2787,7 @@ export const LangfusePlugin: Plugin = async (ctx) => {
             const popped = skillStack.pop()
             if (popped) {
               toolSpanIds.delete(popped.callID)
+              toolCallInfos.delete(popped.callID)
               toolResultSnapshots.delete(popped.callID)
             }
           }
@@ -2602,6 +2834,7 @@ export const LangfusePlugin: Plugin = async (ctx) => {
           }
 
           activeGenerations.delete(sessionId)
+          sessionSpanIds.delete(sessionId)
           llmInputs.delete(sessionId)
           systemPrompts.delete(sessionId)
           userInputs.delete(sessionId)
@@ -2643,7 +2876,9 @@ export const LangfusePlugin: Plugin = async (ctx) => {
         sessionIdMap.clear()
         activeGenerations.clear()
         toolSpanIds.clear()
+        toolCallInfos.clear()
         toolResultSnapshots.clear()
+        sessionSpanIds.clear()
         allGenerations.length = 0
         allToolDefs.clear()
         messageCounter.clear()
@@ -2654,6 +2889,7 @@ export const LangfusePlugin: Plugin = async (ctx) => {
         trackedSessionIds.clear()
         sessionToAgentSpan.clear()
         pendingSubagents.clear()
+        pendingSubagentSessions.clear()
         uploadedTraceIds.delete(traceId)
         currentTraceId = null
         rootSessionId = null
