@@ -141,7 +141,7 @@ export const TuiThreadCommand = cmd({
         process.env.TESTAGENT_USER_NAME = user.userName ?? ""
         // Also store in User module so other parts of the CLI can access it
         const { User } = await import("@/testagent/user")
-        User.set({ id: user.userId, name: user.userName })
+        User.set({ id: user.userId, name: user.userName, token: user.token })
       } catch (err) {
         UI.error(err instanceof Error ? err.message : String(err))
         process.exitCode = 1
