@@ -133,6 +133,9 @@ const LogLevelRef = Schema.Literals(["DEBUG", "INFO", "WARN", "ERROR"]).annotate
   description: "Log level",
 })
 
+// testagent_change
+const Percent = Schema.Number.check(Schema.isGreaterThan(0), Schema.isLessThanOrEqualTo(100))
+
 // The Effect Schema is the canonical source of truth. The `.zod` compatibility
 // surface is derived from it so plugin/SDK Zod consumers keep working without
 // a parallel hand-maintained Zod definition.
@@ -307,6 +310,12 @@ export const Info = Schema.Struct({
       auto: Schema.optional(Schema.Boolean).annotate({
         description: "Enable automatic compaction when context is full (default: true)",
       }),
+      // testagent_change start
+      threshold_percent: Schema.optional(Schema.NullOr(Percent)).annotate({
+        description:
+          "Percentage of the model input/context window that triggers automatic compaction. The reserved safety buffer still applies if it would compact sooner.",
+      }),
+      // testagent_change end
       prune: Schema.optional(Schema.Boolean).annotate({
         description: "Enable pruning of old tool outputs (default: true)",
       }),
