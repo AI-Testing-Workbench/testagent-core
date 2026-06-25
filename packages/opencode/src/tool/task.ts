@@ -28,6 +28,34 @@ export const Parameters = Schema.Struct({
   command: Schema.optional(Schema.String).annotate({ description: "The command that triggered this task" }),
 })
 
+// testagent_change start - subagent model resolution
+type SubagentModel = { modelID: string; providerID: string; variant?: string }
+
+function parseModelID(raw: string | null | undefined): { modelID: string; providerID: string } | undefined {
+  if (!raw) return undefined
+  const slash = raw.indexOf("/")
+  if (slash <= 0 || slash >= raw.length - 1) return undefined
+  return { providerID: raw.slice(0, slash), modelID: raw.slice(slash + 1) }
+}
+
+function resolveSubagentModel(
+  cfg: { subagent_model?: string | null; subagent_variant?: string | null; subagent_variant_overrides?: Record<string, string | null> | null },
+  agent: { model?: { modelID: string; providerID: string } | null },
+  parent: { modelID: string; providerID: string },
+): SubagentModel {
+  // Priority: subagent_model config > agent model > parent model
+  const cfgModel = parseModelID(cfg.subagent_model)
+  const base = cfgModel ?? agent.model ?? parent
+
+  // Variant: overrides > subagent_variant
+  const key = `${base.providerID}/${base.modelID}`
+  const override = cfg.subagent_variant_overrides?.[key]
+  const variant = override ?? cfg.subagent_variant ?? undefined
+
+  return variant ? { ...base, variant } : base
+}
+// testagent_change end
+
 export const TaskTool = Tool.define(
   id,
   Effect.gen(function* () {
@@ -104,10 +132,10 @@ export const TaskTool = Tool.define(
       const msg = yield* Effect.sync(() => MessageV2.get({ sessionID: ctx.sessionID, messageID: ctx.messageID }))
       if (msg.info.role !== "assistant") return yield* Effect.fail(new Error("Not an assistant message"))
 
-      const model = next.model ?? {
-        modelID: msg.info.modelID,
-        providerID: msg.info.providerID,
-      }
+      // testagent_change start - subagent model resolution with priority chain
+      const parentModel = { modelID: msg.info.modelID, providerID: msg.info.providerID }
+      const model = resolveSubagentModel(cfg, next, parentModel)
+      // testagent_change end
 
       yield* ctx.metadata({
         title: params.description,
@@ -141,6 +169,7 @@ export const TaskTool = Tool.define(
               model: {
                 modelID: model.modelID,
                 providerID: model.providerID,
+                ...(model.variant ? { variant: model.variant } : {}),
               },
               agent: next.name,
               tools: {
