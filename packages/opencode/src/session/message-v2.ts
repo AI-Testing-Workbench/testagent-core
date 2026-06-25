@@ -571,6 +571,11 @@ export const Assistant = Schema.Struct({
       read: NonNegativeInt,
       write: NonNegativeInt,
     }),
+    breakdown: Schema.optional(Schema.Struct({
+      system: NonNegativeInt,
+      messages: NonNegativeInt,
+      tools: NonNegativeInt,
+    })),
   }),
   structured: Schema.optional(Schema.Any),
   variant: Schema.optional(Schema.String),
