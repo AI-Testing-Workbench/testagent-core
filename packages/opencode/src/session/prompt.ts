@@ -196,7 +196,7 @@ export const layer = Layer.effect(
 
       if (textParts.length === 0) return
 
-      const t = textParts.join("\n").trim().substring(0, 20)
+      const t = textParts.join("\n").trim().substring(0, 50)
       yield* sessions
         .setTitle({ sessionID: input.session.id, title: t })
         .pipe(Effect.catchCause((cause) => elog.error("failed to generate title", { error: Cause.squash(cause) })))
