@@ -679,7 +679,8 @@ export const layer: Layer.Layer<
           sessionID: ctx.assistantMessage.sessionID,
           error: ctx.assistantMessage.error,
         })
-        yield* status.set(ctx.sessionID, { type: "idle" })
+        const idleReason = MessageV2.AbortedError.isInstance(error) ? "user_abort" as const : "error" as const
+        yield* status.set(ctx.sessionID, { type: "idle", reason: idleReason })
       })
 
       const process = Effect.fn("SessionProcessor.process")(function* (streamInput: LLM.StreamInput) {
