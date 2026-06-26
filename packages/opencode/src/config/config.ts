@@ -267,6 +267,10 @@ export const Info = Schema.Struct({
         ConfigMCP.Info,
         // Matches the legacy `{ enabled: false }` form used to disable a server.
         Schema.Struct({ enabled: Schema.Boolean }),
+        // testagent_change: Accept null as a deletion sentinel.
+        // The webview sends { mcp: { name: null } } to signal removal.
+        // The handler strips null entries via withoutNulls() before writing.
+        Schema.Null,
       ]),
     ),
   ).annotate({ description: "MCP (Model Context Protocol) server configurations" }),
@@ -896,16 +900,36 @@ export const layer = Layer.effect(
       log.info("更新配置updating global config", { file, patch, force })
       let next: Info
       let changed: boolean
+      // testagent_change: Strip null values from merged config before writing.
+      // The webview uses null as a deletion sentinel (e.g. { mcp: { name: null } }),
+      // but writing null to the JSON file would fail schema validation on next read.
+      const withoutNulls = (o: Record<string, unknown>): Record<string, unknown> => {
+        const r: Record<string, unknown> = {}
+        for (const [k, v] of Object.entries(o)) {
+          if (v === null || v === undefined) continue
+          if (isRecord(v)) r[k] = withoutNulls(v)
+          else r[k] = v
+        }
+        return r
+      }
+
       if (!file.endsWith(".jsonc")) {
         const existing = ConfigParse.effectSchema(Info, ConfigParse.jsonc(before, file), file)
         const merged = mergeDeep(writable(existing), patch)
-        const serialized = JSON.stringify(merged, null, 2)
+        const cleaned = withoutNulls(merged)
+        const serialized = JSON.stringify(cleaned, null, 2)
         changed = serialized !== before
         if (changed) yield* fs.writeFileString(file, serialized).pipe(Effect.orDie)
-        next = merged
+        next = cleaned
       } else {
-        const updated = patchJsonc(before, patch)
-        next = ConfigParse.effectSchema(Info, ConfigParse.jsonc(updated, file), file)
+        // Apply the patch with null sentinels intact so patchJsonc can
+        // delete keys (modify sets null → property removal in JSONC).
+        // Strip nulls from the parsed result instead.
+        const updated = patchJsonc(before, patch as Info)
+        const parsed = ConfigParse.effectSchema(Info, ConfigParse.jsonc(updated, file), file)
+        // testagent_change: Apply withoutNulls after parsing to clean up
+        // deletion sentinels that patchJsonc wrote as null values.
+        next = withoutNulls(parsed)
         changed = updated !== before
         if (changed) yield* fs.writeFileString(file, updated).pipe(Effect.orDie)
       }

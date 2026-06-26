@@ -91,7 +91,17 @@ export const globalHandlers = HttpApiBuilder.group(RootHttpApi, "global", (handl
       })
       const result = yield* config.updateGlobal(ctx.payload)
       log.info("global.config.update completed", { changed: result.changed })
-      if (result.changed) bridge.fork(disposeAllInstancesAndEmitGlobalDisposed({ swallowErrors: true }))
+      if (result.changed) {
+        // testagent_change: For MCP-only config changes, skip disposeAllInstances
+        // and let the extension call /mcp/reload instead. This avoids killing all
+        // sessions, providers, and other services just because an MCP setting changed.
+        const keys = Object.keys(ctx.payload ?? {})
+        if (keys.length === 1 && keys[0] === "mcp") {
+          log.info("MCP-only config change, skipping full disposeAll - extension will call /mcp/reload")
+        } else {
+          bridge.fork(disposeAllInstancesAndEmitGlobalDisposed({ swallowErrors: true }))
+        }
+      }
       return result.info
     })
 
