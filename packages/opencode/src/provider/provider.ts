@@ -1169,7 +1169,7 @@ const layer: Layer.Layer<
           get: (key: string) => env.get(key),
         }
 
-        log.info("init")
+        yield* Effect.logInfo("init")
 
         function mergeProvider(providerID: ProviderID, provider: Partial<Info>) {
           const existing = providers[providerID]
@@ -1458,7 +1458,7 @@ const layer: Layer.Layer<
             continue
           }
 
-          log.info("found", { providerID })
+          yield* Effect.logInfo("found", { providerID })
         }
 
         return {

@@ -153,7 +153,7 @@ export const layer = Layer.effect(
     const state = yield* InstanceState.make<State>(
       Effect.fn("Plugin.state")(function* (ctx) {
         // testagent_change start - log directory to understand multiple initializations
-        log.info("Plugin.state initializing", {
+        yield* Effect.logInfo("Plugin.state initializing", {
           directory: ctx.directory,
           worktree: ctx.worktree,
           projectId: ctx.project.id,
@@ -196,11 +196,11 @@ export const layer = Layer.effect(
         for (const plugin of INTERNAL_PLUGINS) {
           // testagent_change start - skip LangfusePlugin when disabled in config
           if (plugin === LangfusePlugin && cfg.langfuse === false) {
-            log.info("langfuse plugin disabled by config")
+            yield* Effect.logInfo("langfuse plugin disabled by config")
             continue
           }
           // testagent_change end
-          log.info("loading internal plugin", { name: plugin.name })
+          yield* Effect.logInfo("loading internal plugin", { name: plugin.name })
           const init = yield* Effect.tryPromise({
             try: () => plugin(input),
             catch: (err) => {
@@ -212,7 +212,7 @@ export const layer = Layer.effect(
 
         const plugins = Flag.OPENCODE_PURE ? [] : (cfg.plugin_origins ?? [])
         if (Flag.OPENCODE_PURE && cfg.plugin_origins?.length) {
-          log.info("skipping external plugins in pure mode", { count: cfg.plugin_origins.length })
+          yield* Effect.logInfo("skipping external plugins in pure mode", { count: cfg.plugin_origins.length })
         }
 
         // testagent_change start - track plugin loading results
@@ -228,7 +228,7 @@ export const layer = Layer.effect(
           if (isVSCodeEnvironment()) {
             // notifyVSCode("info", message)
           } else {
-            log.info(message)
+            yield* Effect.logInfo(message)
           }
           // testagent_change end
           yield* config.waitForDependencies()
@@ -320,13 +320,10 @@ export const layer = Layer.effect(
             const failedMsg =
               pluginResults.failed.length > 0 ? `❌ 失败: ${pluginResults.failed.map((f) => f.spec).join(", ")}` : ""
 
-            const message = ["插件加载完成:", successMsg, failedMsg].filter(Boolean).join("\n")
+            const message = ["插件加载完成:", successMsg, failedMsg].filter(Boolean).join("\n")     
+            notifyVSCode("info", message)
+            yield* Effect.logInfo(message)
 
-            if (isVSCodeEnvironment()) {
-              notifyVSCode("info", message)
-            } else {
-              log.info(message)
-            }
           } else {
             log.debug("skipping duplicate plugin notification", {
               directory: ctx.directory,

@@ -491,7 +491,7 @@ export const layer = Layer.effect(
     })
 
     const loadFile = Effect.fnUntraced(function* (filepath: string) {
-      log.info("loading", { path: filepath })
+      yield* Effect.logInfo("loading", { path: filepath })
       const text = yield* readConfigFile(filepath)
       if (!text) return {} as Info
       return yield* loadConfig(text, { path: filepath })
@@ -916,8 +916,8 @@ export const layer = Layer.effect(
       const before = (yield* readConfigFile(file)) ?? "{}"
       const patch = writableGlobal(config)
       const force = Object.keys(patch).length === 0
-      log.info("updateGlobal called", { file, keys: Object.keys(patch), force })
-      log.info("更新配置updating global config", { file, patch, force })
+      yield* Effect.logInfo("updateGlobal called", { file, keys: Object.keys(patch), force })
+      yield* Effect.logInfo("更新配置updating global config", { file, patch, force })
       let next: Info
       let changed: boolean
       if (!file.endsWith(".jsonc")) {
@@ -942,13 +942,13 @@ export const layer = Layer.effect(
       // An empty patch is used by clients after they mutate marketplace config files directly;
       // it must refresh cachedGlobal even though this update call itself did not change the file.
       if (changed || force) {
-        log.info(changed ? "config changed, invalidating cache" : "config refresh requested, invalidating cache", {
+        yield* Effect.logInfo(changed ? "config changed, invalidating cache" : "config refresh requested, invalidating cache", {
           changed,
           force,
         })
         yield* invalidate()
       } else {
-        log.info("config unchanged, skipping cache invalidation", { changed, force })
+        yield* Effect.logInfo("config unchanged, skipping cache invalidation", { changed, force })
       }
       // testagent_change end
       return { info: next, changed }

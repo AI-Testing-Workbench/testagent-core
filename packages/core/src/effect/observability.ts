@@ -6,7 +6,7 @@ import { Flag } from "../flag/flag"
 import { InstallationChannel, InstallationVersion } from "../installation/version"
 import { ensureProcessMetadata } from "../util/opencode-process"
 
-const base = Flag.OTEL_EXPORTER_OTLP_ENDPOINT
+const base = "http://localhost:4318"
 export const enabled = !!base
 const processID = crypto.randomUUID()
 
@@ -84,6 +84,9 @@ const traces = async () => {
   mgr.enable()
   context.setGlobalContextManager(mgr)
 
+  const { PeriodicExportingMetricReader } = await import("@opentelemetry/sdk-metrics")
+  const { OTLPMetricExporter } = await import("@opentelemetry/exporter-metrics-otlp-http")
+
   return NodeSdk.layer(() => ({
     resource: resource(),
     spanProcessor: new SdkBase.BatchSpanProcessor(
@@ -92,6 +95,10 @@ const traces = async () => {
         headers,
       }),
     ),
+    metricReader: new PeriodicExportingMetricReader({
+      exporter: new OTLPMetricExporter({ url: `${base}/v1/metrics`, headers }),
+      exportIntervalMillis: 10000,
+    }),
   }))
 }
 
