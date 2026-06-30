@@ -1,6 +1,6 @@
 import { Provider } from "@/provider/provider"
 import * as Log from "@opencode-ai/core/util/log"
-import { Context, Effect, Layer, Record } from "effect"
+import { Context, Effect, Layer, Metric, Record } from "effect"
 import * as Stream from "effect/Stream"
 import { streamText, wrapLanguageModel, type ModelMessage, type Tool, tool, jsonSchema } from "ai"
 import { mergeDeep } from "remeda"
@@ -13,6 +13,7 @@ import type { MessageV2 } from "./message-v2"
 import { Plugin } from "@/plugin"
 import { SystemPrompt } from "./system"
 import { Flag } from "@opencode-ai/core/flag/flag"
+import { llmRequest } from "@opencode-ai/core/effect/observability" // testagent_change
 import { Permission } from "@/permission"
 import { PermissionID } from "@/permission/schema"
 import { Bus } from "@/bus"
@@ -336,6 +337,10 @@ const live: Layer.Layer<
         ? (yield* InstanceState.context).project.id
         : undefined
 
+      yield* Metric.update(
+        Metric.withAttributes(llmRequest, { sessionID: input.sessionID, providerID: input.model.providerID, modelID: input.model.id }),
+        1,
+      ) // testagent_change
       return streamText({
         onError(error) {
           l.error("stream error", {

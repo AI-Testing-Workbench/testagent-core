@@ -170,6 +170,18 @@ export const failInvalidArgs = Metric.counter("tool.fail.invalid_args", {
 export const callTotal = Metric.counter("tool.call.total", {
   description: "Total tool calls made by LLM",
 })
+export const sessionCreated = Metric.counter("session.created", {
+  description: "Number of new sessions created",
+})
+export const llmRequest = Metric.counter("session.llm.request", {
+  description: "Number of LLM requests made",
+})
+export const sessionCompacted = Metric.counter("session.compacted", {
+  description: "Number of sessions compacted",
+})
+export const taskCall = Metric.counter("tool.task.call", {
+  description: "Total task tool calls",
+})
 // testagent_change end
 
 export const Observability = { enabled, layer }
