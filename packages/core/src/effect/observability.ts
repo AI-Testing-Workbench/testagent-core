@@ -201,6 +201,9 @@ export const tokenCacheRead = Metric.counter("session.token.cache_read", {
 export const tokenCacheWrite = Metric.counter("session.token.cache_write", {
   description: "Cache write tokens",
 })
+export const tokenTotal = Metric.counter("session.token.total", {
+  description: "Total tokens consumed (input + output + reasoning + cache)",
+})
 // testagent_change end
 
 export const Observability = { enabled, layer }

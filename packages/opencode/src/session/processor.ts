@@ -25,7 +25,7 @@ import { SessionEvent } from "@/v2/session-event"
 import { Modelv2 } from "@/v2/model"
 import * as DateTime from "effect/DateTime"
 
-import { failPermission, failQuestion, failExecution, callTotal, ttft, tokenInput, tokenOutput, tokenReasoning, tokenCacheRead, tokenCacheWrite } from "@opencode-ai/core/effect/observability" // testagent_change
+import { failPermission, failQuestion, failExecution, callTotal, ttft, tokenInput, tokenOutput, tokenReasoning, tokenCacheRead, tokenCacheWrite, tokenTotal } from "@opencode-ai/core/effect/observability" // testagent_change
 
 const DOOM_LOOP_THRESHOLD = 3
 const log = Log.create({ service: "session.processor" })
@@ -498,6 +498,8 @@ export const layer: Layer.Layer<
             yield* Metric.update(Metric.withAttributes(tokenReasoning, attrs), usage.tokens.reasoning)
             yield* Metric.update(Metric.withAttributes(tokenCacheRead, attrs), usage.tokens.cache.read)
             yield* Metric.update(Metric.withAttributes(tokenCacheWrite, attrs), usage.tokens.cache.write)
+            const total = usage.tokens.input + usage.tokens.output + usage.tokens.reasoning + usage.tokens.cache.read + usage.tokens.cache.write
+            yield* Metric.update(Metric.withAttributes(tokenTotal, attrs), total)
             yield* session.updatePart({
               id: PartID.ascending(),
               reason: value.finishReason,
