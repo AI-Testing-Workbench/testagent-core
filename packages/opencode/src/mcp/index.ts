@@ -113,7 +113,7 @@ function isMcpConfigured(entry: McpEntry): entry is ConfigMCP.Info {
   return typeof entry === "object" && entry !== null && "type" in entry
 }
 
-const sanitize = (s: string) => s
+const sanitize = (s: string) => s.replace(/\s+/g, "")
 // const sanitize = (s: string) => s.replace(/[^a-zA-Z0-9_-]/g, "_")
 
 function remoteURL(key: string, value: string) {
@@ -139,7 +139,7 @@ function convertMcpTool(mcpTool: MCPToolDef, client: MCPClient, timeout?: number
     execute: async (args: unknown) => {
       return client.callTool(
         {
-          name: mcpTool.name,
+          name: sanitize(mcpTool.name),
           arguments: (args || {}) as Record<string, unknown>,
         },
         CallToolResultSchema,
