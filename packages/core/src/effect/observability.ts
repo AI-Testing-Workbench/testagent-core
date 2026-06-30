@@ -1,4 +1,4 @@
-import { Effect, Layer, Logger } from "effect"
+import { Effect, Layer, Logger, Metric } from "effect"
 import { FetchHttpClient } from "effect/unstable/http"
 import { OtlpLogger, OtlpSerialization } from "effect/unstable/observability"
 import * as EffectLogger from "./logger"
@@ -67,6 +67,35 @@ function logs() {
   ).pipe(Layer.provide(OtlpSerialization.layerJson), Layer.provide(FetchHttpClient.layer))
 }
 
+// Global metrics singleton — created once, runs forever.
+// This avoids duplicate PeriodicExportingMetricReaders when the same
+// NodeSdk.layer is built in multiple ManagedRuntime scopes, since
+// @effect/opentelemetry's Metrics.layer() calls reader.setMetricProducer()
+// which can only be called once per MetricReader instance.
+let metricsInit: Promise<void> | undefined
+
+async function initMetrics() {
+  if (metricsInit) return metricsInit
+  metricsInit = (async () => {
+    const { PeriodicExportingMetricReader } = await import("@opentelemetry/sdk-metrics")
+    const { OTLPMetricExporter, AggregationTemporalityPreference } = await import("@opentelemetry/exporter-metrics-otlp-http")
+    const { makeProducer } = await import("@effect/opentelemetry/Metrics")
+    const { layerEmpty: resourceLayerEmpty } = await import("@effect/opentelemetry/Resource")
+
+    const producer = Effect.runSync(Effect.provide(makeProducer("delta"), resourceLayerEmpty))
+    const reader = new PeriodicExportingMetricReader({
+      exporter: new OTLPMetricExporter({
+        url: `${base}/v1/metrics`,
+        headers,
+        temporalityPreference: AggregationTemporalityPreference.DELTA,
+      }),
+      exportIntervalMillis: 10000,
+    })
+    reader.setMetricProducer(producer)
+  })()
+  return metricsInit
+}
+
 const traces = async () => {
   const NodeSdk = await import("@effect/opentelemetry/NodeSdk")
   const OTLP = await import("@opentelemetry/exporter-trace-otlp-http")
@@ -84,8 +113,7 @@ const traces = async () => {
   mgr.enable()
   context.setGlobalContextManager(mgr)
 
-  const { PeriodicExportingMetricReader } = await import("@opentelemetry/sdk-metrics")
-  const { OTLPMetricExporter } = await import("@opentelemetry/exporter-metrics-otlp-http")
+  await initMetrics()
 
   return NodeSdk.layer(() => ({
     resource: resource(),
@@ -95,20 +123,37 @@ const traces = async () => {
         headers,
       }),
     ),
-    metricReader: new PeriodicExportingMetricReader({
-      exporter: new OTLPMetricExporter({ url: `${base}/v1/metrics`, headers }),
-      exportIntervalMillis: 10000,
-    }),
   }))
 }
+
+let sdkPromise: Promise<any> | undefined
 
 export const layer = !base
   ? EffectLogger.layer
   : Layer.unwrap(
       Effect.gen(function* () {
-        const trace = yield* Effect.promise(traces)
-        return Layer.mergeAll(trace, logs())
+        if (!sdkPromise) sdkPromise = traces()
+        const sdk = yield* Effect.promise(() => sdkPromise!)
+        return Layer.mergeAll(sdk, logs())
       }),
     )
+
+// testagent_change start
+export const failPermission = Metric.counter("tool.fail.permission", {
+  description: "Tool call failures due to permission rejection",
+})
+export const failQuestion = Metric.counter("tool.fail.question", {
+  description: "Tool call failures due to question rejection",
+})
+export const failExecution = Metric.counter("tool.fail.execution", {
+  description: "Tool call failures due to execution error",
+})
+export const failInvalidArgs = Metric.counter("tool.fail.invalid_args", {
+  description: "Tool calls with invalid arguments",
+})
+export const callTotal = Metric.counter("tool.call.total", {
+  description: "Total tool calls made by LLM",
+})
+// testagent_change end
 
 export const Observability = { enabled, layer }

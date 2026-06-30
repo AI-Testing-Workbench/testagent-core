@@ -1,5 +1,6 @@
-import { Effect, Schema } from "effect"
+import { Effect, Metric, Schema } from "effect"
 import * as Tool from "./tool"
+import { failInvalidArgs } from "@opencode-ai/core/effect/observability" // testagent_change
 
 export const Parameters = Schema.Struct({
   tool: Schema.String,
@@ -12,10 +13,13 @@ export const InvalidTool = Tool.define(
     description: "Do not use",
     parameters: Parameters,
     execute: (params: { tool: string; error: string }) =>
-      Effect.succeed({
-        title: "Invalid Tool",
-        output: `The arguments provided to the tool are invalid: ${params.error}`,
-        metadata: {},
+      Effect.gen(function* () {
+        yield* Metric.update(failInvalidArgs, 1)
+        return {
+          title: "Invalid Tool",
+          output: `The arguments provided to the tool are invalid: ${params.error}`,
+          metadata: {},
+        }
       }),
   }),
 )

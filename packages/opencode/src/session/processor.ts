@@ -1,4 +1,4 @@
-import { Cause, Deferred, Effect, Layer, Context, Scope } from "effect"
+import { Cause, Deferred, Effect, Layer, Context, Metric, Scope } from "effect"
 import * as Stream from "effect/Stream"
 import { Agent } from "@/agent/agent"
 import { Bus } from "@/bus"
@@ -24,6 +24,8 @@ import { EventV2 } from "@/v2/event"
 import { SessionEvent } from "@/v2/session-event"
 import { Modelv2 } from "@/v2/model"
 import * as DateTime from "effect/DateTime"
+
+import { failPermission, failQuestion, failExecution, callTotal } from "@opencode-ai/core/effect/observability" // testagent_change
 
 const DOOM_LOOP_THRESHOLD = 3
 const log = Log.create({ service: "session.processor" })
@@ -211,8 +213,14 @@ export const layer: Layer.Layer<
             time: { start: match.part.state.time.start, end: Date.now() },
           },
         })
-        if (error instanceof Permission.RejectedError || error instanceof Question.RejectedError) {
+        if (error instanceof Permission.RejectedError) {
           ctx.blocked = ctx.shouldBreak
+          yield* Metric.update(Metric.withAttributes(failPermission, { sessionID: ctx.sessionID }), 1)
+        } else if (error instanceof Question.RejectedError) {
+          ctx.blocked = ctx.shouldBreak
+          yield* Metric.update(Metric.withAttributes(failQuestion, { sessionID: ctx.sessionID }), 1)
+        } else {
+          yield* Metric.update(Metric.withAttributes(failExecution, { sessionID: ctx.sessionID }), 1)
         }
         yield* settleToolCall(toolCallID)
         return true
@@ -295,6 +303,7 @@ export const layer: Layer.Layer<
               state: { status: "pending", input: {}, raw: "" },
               metadata: value.providerExecuted ? { providerExecuted: true } : undefined,
             } satisfies MessageV2.ToolPart)
+            yield* Metric.update(Metric.withAttributes(callTotal, { sessionID: ctx.sessionID }), 1) // testagent_change
             ctx.toolcalls[value.id] = {
               done: yield* Deferred.make<void>(),
               partID: part.id,
