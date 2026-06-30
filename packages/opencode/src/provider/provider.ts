@@ -1687,10 +1687,10 @@ const layer: Layer.Layer<
             try {
               const body = JSON.parse(opts.body as string)
               const u = User.get()
-              if (u.id) body.user = u.id
+              if (u.sapId) body.user = u.sapId
               body.tags = ["test-design"]
               opts.body = JSON.stringify(body)
-              log.info("userID", { user: u.id })
+              log.info("userID", { sapId: u.sapId })
             } catch {}
           }
 

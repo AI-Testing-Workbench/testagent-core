@@ -5,8 +5,12 @@ import * as Log from "@opencode-ai/core/util/log"
 const log = Log.create({ service: "testagent.user" })
 
 interface UserInfo {
-  id?: string
-  name?: string
+  userId?: string
+  userName?: string
+  sapId?: string
+  openId?: string
+  originPathId?: string
+  pathName?: string
 }
 
 let override: UserInfo | undefined
@@ -16,17 +20,21 @@ let fileReadAttempted = false
 export const User = {
   get(): UserInfo {
     // override takes precedence (set by VS Code extension via HTTP)
-    if (override?.id) {
+    if (override?.userId) {
       log.debug("from override", { user: override })
       return override
     }
     
     // fall back to env vars written by thread.ts after external auth
     const fromEnv = {
-      id: process.env["TESTAGENT_USER_ID"],
-      name: process.env["TESTAGENT_USER_NAME"],
+      userId: process.env["TESTAGENT_USER_ID"],
+      userName: process.env["TESTAGENT_USER_NAME"],
+      sapId: process.env["TESTAGENT_SAP_ID"],
+      openId: process.env["TESTAGENT_OPEN_ID"],
+      originPathId: process.env["TESTAGENT_ORIGIN_PATH_ID"],
+      pathName: process.env["TESTAGENT_PATH_NAME"],
     }
-    if (fromEnv.id) {
+    if (fromEnv.userId) {
       log.debug("from env", { user: fromEnv })
       return fromEnv
     }
@@ -47,8 +55,15 @@ export const User = {
         log.debug("checking file", { file })
         if (fs.existsSync(file)) {
           const data = JSON.parse(fs.readFileSync(file, "utf8"))
-          if (data.userId && data.userName) {
-            cachedFromFile = { id: data.userId, name: data.userName }
+          if (data.userId && data.userName && data.sapId) {
+            cachedFromFile = { 
+              userId: data.userId, 
+              userName: data.userName, 
+              sapId: data.sapId,
+              openId: data.openId,
+              originPathId: data.originPathId,
+              pathName: data.pathName,
+            }
             log.debug("from file", { user: cachedFromFile })
           }
         } else {
@@ -60,7 +75,14 @@ export const User = {
       }
     }
     
-    const result = cachedFromFile ?? { id: undefined, name: undefined }
+    const result = cachedFromFile ?? { 
+      userId: undefined, 
+      userName: undefined, 
+      sapId: undefined,
+      openId: undefined,
+      originPathId: undefined,
+      pathName: undefined,
+    }
     log.debug("final result", { user: result })
     return result
   },

@@ -191,7 +191,7 @@ export const layer: Layer.Layer<Service, never, AppFileSystem.Service> = Layer.e
     const fetchTestLLMModels = Effect.fn("ModelsDev.fetchTestLLMModels")(function* () {
       const apiKey = process.env.TEST_LLM_API_KEY ?? "sk-WHMJMG6H36UGdq7FdVzODA"
       const baseURL = (process.env.TEST_LLM_BASE_URL ?? decodeURIComponent(atob("aHR0cCUzQSUyRiUyRnRlc3QtbGxtLnBsYXRmb3JtLmNtYmNoaW5hLmNuJTJGdjE="))).replace(/\/+$/, "")
-      const userId = User.get().id ?? ""
+      const userId = User.get().userId ?? ""
       const url = `${baseURL}/models?user_id=${encodeURIComponent(userId)}`
 
       log.info("[testagent] fetchTestLLMModels:", { url, userId, baseURL })
