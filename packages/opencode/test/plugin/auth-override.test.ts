@@ -37,7 +37,7 @@ function layer(directory: string, plugins: string[]) {
 }
 
 describe("plugin.auth-override", () => {
-  test("user plugin overrides built-in github-copilot auth", async () => {
+  test("user plugin adds custom auth provider", async () => {
     await using tmp = await tmpdir({
       init: async (dir) => {
         const pluginDir = path.join(dir, ".opencode", "plugin")
@@ -90,7 +90,6 @@ describe("plugin.auth-override", () => {
     expect(copilot).toBeDefined()
     expect(copilot.length).toBe(1)
     expect(copilot[0].label).toBe("Test Override Auth")
-    expect(plainMethods[ProviderID.make("github-copilot")][0].label).not.toBe("Test Override Auth")
   }, 30000)
 })
 

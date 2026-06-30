@@ -1,6 +1,8 @@
 import { readFileSync, writeFileSync, readdirSync, unlinkSync, copyFileSync, existsSync } from "fs";
 import { join, basename } from "path";
-import { getMemoryDir, getMemoryEntrypoint, ENTRYPOINT_NAME, validateMemoryFileName, MAX_MEMORY_FILES, MAX_MEMORY_FILE_BYTES, MAX_ENTRYPOINT_LINES, MAX_ENTRYPOINT_BYTES, FRONTMATTER_MAX_LINES, getPersonalMemoryFile, getPersonalMemoryFileBackup, } from "./paths.js";
+import { getMemoryDir, getMemoryEntrypoint, ENTRYPOINT_NAME, validateMemoryFileName, MAX_MEMORY_FILES, MAX_MEMORY_FILE_BYTES, MAX_ENTRYPOINT_LINES, MAX_ENTRYPOINT_BYTES, FRONTMATTER_MAX_LINES, getPersonalMemoryFile, getPersonalMemoryBackupDir, } from "./paths.js";
+import * as log from "./core/log.js";
+import { config } from "./core/config.js";
 export const MEMORY_TYPES = ["user", "feedback", "project", "reference"];
 function parseFrontmatter(raw) {
     const trimmed = raw.trim();
@@ -124,10 +126,19 @@ export function deleteMemory(worktree, fileName) {
 }
 export function searchMemories(worktree, query) {
     const all = listMemories(worktree);
-    const lowerQuery = query.toLowerCase();
-    return all.filter((entry) => entry.name.toLowerCase().includes(lowerQuery) ||
-        entry.description.toLowerCase().includes(lowerQuery) ||
-        entry.content.toLowerCase().includes(lowerQuery));
+    const queryTerms = query.split(/\s+/).filter(t => t.length > 0).map(t => t.toLowerCase());
+    if (queryTerms.length > 0) {
+        return all.filter((entry) => {
+            const lowerName = entry.name.toLowerCase();
+            const lowerDescription = entry.description.toLowerCase();
+            const lowerContent = entry.content.toLowerCase();
+            // 所有查询词都必须在 name、description 或 content 中出现（与逻辑）
+            return queryTerms.every(term => lowerName.includes(term) ||
+                lowerDescription.includes(term) ||
+                lowerContent.includes(term));
+        });
+    }
+    return [];
 }
 /**
  * 读取个人全局记忆内容
@@ -148,14 +159,40 @@ export function readPersonalMemory() {
  * @returns
  */
 export function savePersonalMemory(content) {
-    const memoryFilePath = getPersonalMemoryFile();
-    const backupFile = getPersonalMemoryFileBackup();
-    // 写入前保留 先前记忆
-    if (existsSync(memoryFilePath)) {
-        copyFileSync(memoryFilePath, backupFile);
+    try {
+        const memoryFilePath = getPersonalMemoryFile();
+        // 写入前备份到 persona-back/ 目录，轮转保留最近10个
+        if (existsSync(memoryFilePath)) {
+            const backupDir = getPersonalMemoryBackupDir();
+            const now = new Date();
+            const fmt = new Intl.DateTimeFormat("en-CA", {
+                timeZone: "Asia/Shanghai",
+                year: "numeric", month: "2-digit", day: "2-digit",
+                hour: "2-digit", minute: "2-digit", second: "2-digit",
+                hour12: false,
+            });
+            const parts = fmt.formatToParts(now);
+            const m = Object.fromEntries(parts.filter(p => p.type !== "literal").map(p => [p.type, p.value]));
+            const ts = `${m.year}${m.month}${m.day}_${m.hour}${m.minute}${m.second}`;
+            const backupPath = join(backupDir, `PERSONA_${ts}.md`);
+            copyFileSync(memoryFilePath, backupPath);
+            const files = readdirSync(backupDir, { encoding: "utf-8" })
+                .filter(f => f.startsWith("PERSONA_") && f.endsWith(".md"))
+                .sort()
+                .reverse();
+            if (files.length > config().memory.personalMemoryBackupSize) {
+                for (const f of files.slice(config().memory.personalMemoryBackupSize)) {
+                    unlinkSync(join(backupDir, f));
+                }
+            }
+        }
+        writeFileSync(memoryFilePath, content, "utf-8");
+        return memoryFilePath;
     }
-    writeFileSync(memoryFilePath, content, "utf-8");
-    return memoryFilePath;
+    catch (e) {
+        log.error("savePersonalMemory fail ", e);
+        return "个人全局记忆保存失败";
+    }
 }
 export function readIndex(worktree) {
     const entrypoint = getMemoryEntrypoint(worktree);

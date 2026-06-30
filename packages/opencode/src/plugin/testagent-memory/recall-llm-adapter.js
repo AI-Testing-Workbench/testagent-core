@@ -1,3 +1,4 @@
+import * as log from "./core/log.js";
 import { workerSessionIDs } from "./core/worker.js";
 let isPrompting = false;
 /**
@@ -34,19 +35,44 @@ export function createOpenCodeRecallLLMClient(client, parentID, opts) {
                 workerSessionIDs.add(workerID);
                 // ==================== 3：关键！只调用 一次 prompt ====================
                 if (opts?.model?.providerID) {
-                    llmResult = await client.session.prompt({
-                        path: { id: workerID },
-                        body: {
-                            //system: system, // 关键：把提示词放这里
-                            parts: [
-                                { type: "text", text: `${system}` },
-                            ],
-                            // 可选配置
-                            model: opts?.model,
-                            agent: "memory-recall",
-                            // model: { providerID: "opencode", modelID: "gpt-5-nano" }, // 免费轻量
-                        },
-                    });
+                    try {
+                        llmResult = await client.session.prompt({
+                            path: { id: workerID },
+                            body: {
+                                //system: system, // 关键：把提示词放这里
+                                parts: [
+                                    { type: "text", text: `${system}` },
+                                ],
+                                // 可选配置
+                                model: opts?.model,
+                                agent: "memory-recall",
+                                // model: { providerID: "opencode", modelID: "gpt-5-nano" }, // 免费轻量
+                            },
+                        });
+                    }
+                    catch (e) {
+                        log.error("[llmRecall retry] error:", e);
+                        // 2. 失败重试：第二次调用 — 无 agent
+                        await client.session.delete({ path: { id: childSession.data.id } });
+                        workerSessionIDs.delete(childSession.data.id);
+                        childSession = await client.session.create({
+                            body: { parentID, title: `opencode-memory ${opts?.workerID ?? "worker"}` },
+                        });
+                        if (!childSession.data) {
+                            return null;
+                        }
+                        workerID = childSession.data.id;
+                        workerSessionIDs.add(workerID);
+                        llmResult = await client.session.prompt({
+                            path: { id: workerID },
+                            body: {
+                                //system: system, // 关键：把提示词放这里
+                                parts: [
+                                    { type: "text", text: `${system}` },
+                                ],
+                            },
+                        });
+                    }
                 }
                 else {
                     llmResult = await client.session.prompt({
@@ -65,7 +91,7 @@ export function createOpenCodeRecallLLMClient(client, parentID, opts) {
                 }
             }
             catch (e) {
-                //appendLog('', parentID, `createOpenCodeLLMClient prompt error：\n ${e}\n llmResult: \n${JSON.stringify(llmResult)}`, {logDir:'.opencode-memory-logs/llm-error-log'});
+                log.error("[llmRecall final] error:", e);
             }
             finally {
                 // ==================== 4：无论如何都释放锁 ====================

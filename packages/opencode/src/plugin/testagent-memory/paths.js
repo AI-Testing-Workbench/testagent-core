@@ -5,6 +5,7 @@ import { homedir } from "os";
 import { join, dirname, resolve, sep } from "path";
 import { mkdirSync, existsSync, readFileSync, statSync, realpathSync } from "fs";
 export const ENTRYPOINT_NAME = "MEMORY.md";
+export const PERSONA_NAME = "PERSONA.md";
 export const MAX_ENTRYPOINT_LINES = 200;
 export const MAX_ENTRYPOINT_BYTES = 25_000;
 export const MAX_MEMORY_FILES = 200;
@@ -179,4 +180,13 @@ export function getPersonalMemoryFile() {
  */
 export function getPersonalMemoryFileBackup() {
     return join(getOpencodeConfigHomeDir(), "PERSONA_BK.md");
+}
+/**
+ * 个人全局记忆备份目录（轮转保留最近10个）
+ * @returns
+ */
+export function getPersonalMemoryBackupDir() {
+    const dir = join(getOpencodeConfigHomeDir(), "persona-back");
+    ensureDir(dir);
+    return dir;
 }

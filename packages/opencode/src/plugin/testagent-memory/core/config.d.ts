@@ -25,6 +25,7 @@ export declare const MemoryConfig: z.ZodObject<{
         autoDreamEnable: z.ZodDefault<z.ZodBoolean>;
         /** 控制是否开启自动提取 */
         autoExtractEnable: z.ZodDefault<z.ZodBoolean>;
+        personalMemoryBackupSize: z.ZodDefault<z.ZodNumber>;
     }, "strip", z.ZodTypeAny, {
         autoExtractMaxLength: number;
         autoExtractBufferSize: number;
@@ -32,6 +33,7 @@ export declare const MemoryConfig: z.ZodObject<{
         personalMemoryPrompt: string;
         autoDreamEnable: boolean;
         autoExtractEnable: boolean;
+        personalMemoryBackupSize: number;
     }, {
         autoExtractMaxLength?: number | undefined;
         autoExtractBufferSize?: number | undefined;
@@ -39,17 +41,20 @@ export declare const MemoryConfig: z.ZodObject<{
         personalMemoryPrompt?: string | undefined;
         autoDreamEnable?: boolean | undefined;
         autoExtractEnable?: boolean | undefined;
+        personalMemoryBackupSize?: number | undefined;
     }>>;
     recall: z.ZodDefault<z.ZodObject<{
         recallEnable: z.ZodDefault<z.ZodBoolean>;
         /** 是否使用模型进行语义分析召回，false：仅使用向量分析召回 */
         llmRecall: z.ZodDefault<z.ZodBoolean>;
         /** 使用llm召回记忆超时时间 */
+        llmRecallTimeout: z.ZodDefault<z.ZodNumber>;
         providerID: z.ZodString;
         modelID: z.ZodString;
     }, "strip", z.ZodTypeAny, {
         recallEnable: boolean;
         llmRecall: boolean;
+        llmRecallTimeout: number;
         providerID: string;
         modelID: string;
     }, {
@@ -57,6 +62,7 @@ export declare const MemoryConfig: z.ZodObject<{
         modelID: string;
         recallEnable?: boolean | undefined;
         llmRecall?: boolean | undefined;
+        llmRecallTimeout?: number | undefined;
     }>>;
 }, "strip", z.ZodTypeAny, {
     memory: {
@@ -66,6 +72,7 @@ export declare const MemoryConfig: z.ZodObject<{
         personalMemoryPrompt: string;
         autoDreamEnable: boolean;
         autoExtractEnable: boolean;
+        personalMemoryBackupSize: number;
     };
     enable: boolean;
     debug: boolean;
@@ -76,6 +83,7 @@ export declare const MemoryConfig: z.ZodObject<{
     recall: {
         recallEnable: boolean;
         llmRecall: boolean;
+        llmRecallTimeout: number;
         providerID: string;
         modelID: string;
     };
@@ -87,6 +95,7 @@ export declare const MemoryConfig: z.ZodObject<{
         personalMemoryPrompt?: string | undefined;
         autoDreamEnable?: boolean | undefined;
         autoExtractEnable?: boolean | undefined;
+        personalMemoryBackupSize?: number | undefined;
     } | undefined;
     enable?: boolean | undefined;
     debug?: boolean | undefined;
@@ -99,6 +108,7 @@ export declare const MemoryConfig: z.ZodObject<{
         modelID: string;
         recallEnable?: boolean | undefined;
         llmRecall?: boolean | undefined;
+        llmRecallTimeout?: number | undefined;
     } | undefined;
 }>;
 export type MemoryConfig = z.infer<typeof MemoryConfig>;

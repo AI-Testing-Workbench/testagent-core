@@ -28,7 +28,7 @@ export function error(...args) {
 }
 export function debug(...args) {
     if (config().debug) {
-        log("[error]" + logText(args));
+        log("[debug]" + logText(args));
     }
 }
 function logText(...args) {

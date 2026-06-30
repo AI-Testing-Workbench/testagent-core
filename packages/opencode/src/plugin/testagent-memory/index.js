@@ -1,9 +1,8 @@
 import { tool } from "@opencode-ai/plugin";
 import { buildMemorySystemPrompt } from "./prompt.js";
-import { formatRecalledMemories } from "./recall.js";
+import { searchHybrid, recallRelevantMemoriesByLLM, formatRecalledMemories } from "./recall.js";
 import { saveMemory, deleteMemory, listMemories, searchMemories, readMemory, MEMORY_TYPES, readPersonalMemory, savePersonalMemory, } from "./memory.js";
 import { getMemoryDir, getOpencodeConfigHomeDir } from "./paths.js";
-import { findRelevantMemories } from "./findRelevantMemories.js";
 import { createOpenCodeRecallLLMClient } from "./recall-llm-adapter.js";
 import { isWorkerSession } from "./core/worker.js";
 import * as log from "./core/log.js";
@@ -76,43 +75,6 @@ function isAutoMemoryPart(part) {
     return typeof part.text === "string" &&
         part.text.includes("# Auto Memory");
 }
-function stripMemoryText(text) {
-    const markers = ["\n\n# Memory", "\n# Memory", "# Memory", "\n\n# Auto Memory", "\n# Auto Memory", "# Auto Memory", "\n\n## Recalled Memories", "\n## Recalled Memories", "## Recalled Memories"];
-    for (const marker of markers) {
-        const index = text.indexOf(marker);
-        if (index === -1)
-            continue;
-        if (index === 0)
-            return "";
-        return text.slice(0, index).trimEnd();
-    }
-    return text;
-}
-function stripMemoryMessages(output) {
-    output.messages = output.messages
-        .map((message) => {
-        const role = String(message.info.role);
-        if (role !== "system")
-            return message;
-        const parts = message.parts
-            .map((part) => {
-            if (!part || typeof part !== "object")
-                return part;
-            if (typeof part.text !== "string")
-                return part;
-            return { ...part, text: stripMemoryText(part.text) };
-        })
-            .filter((part) => {
-            if (!part || typeof part !== "object")
-                return true;
-            if (typeof part.text !== "string")
-                return true;
-            return part.text.trim().length > 0 && !isAutoMemoryPart(part);
-        });
-        return { ...message, parts };
-    })
-        .filter((message) => message.parts.length > 0);
-}
 // Parses "### <name> (<type>)" headers from the ## Recalled Memories section
 // of system prompts. After compaction old system messages disappear, so
 // the returned set naturally shrinks — no manual reset needed.
@@ -162,29 +124,65 @@ function isUsefulRecallQuery(query) {
         return true;
     return trimmed.length >= 4;
 }
-function startRecallPrefetch(llm, sessionID, turnID, worktree, query, alreadySurfaced, recentTools, model) {
+async function startRecallPrefetch(llm, sessionID, turnID, worktree, query, alreadySurfaced, recentTools, model) {
     if (!llm || !isUsefulRecallQuery(query))
         return undefined;
     const handle = {
-        turnID: turnID,
+        turnID,
         settled: false,
         consumed: false,
         result: [],
     };
-    const promise = findRelevantMemories(createOpenCodeRecallLLMClient(llm, sessionID || ""), sessionID || "", worktree, query, config()?.recall?.llmRecall ?? false, alreadySurfaced, recentTools, model);
-    void promise.then((result) => {
-        handle.result = result;
-    }).finally(() => {
+    try {
+        // 异步获取混合检索结果
+        const hybridMemories = await searchHybrid(worktree, sessionID, query, alreadySurfaced, 10);
+        // LLM 召回逻辑 + 超时处理
+        if (config()?.recall?.llmRecall && hybridMemories.length > 3) {
+            let llmRecallFinish = false;
+            const timeoutMs = config()?.recall?.llmRecallTimeout ?? 8000;
+            // 启动 LLM 召回（后台执行，不阻塞返回）
+            const llmPromise = recallRelevantMemoriesByLLM(createOpenCodeRecallLLMClient(llm, sessionID || ''), sessionID, worktree, query, hybridMemories, model).then((llmResult) => {
+                // LLM 召回完成，更新结果
+                handle.result = llmResult;
+                handle.settled = true;
+                llmRecallFinish = true;
+            }).catch((err) => {
+                // LLM 召回失败，保持默认结果
+                log.error(`[llmRecall] LLM召回失败:`, err);
+            });
+            // 设置超时定时器：超时后将结果设为前5条混合检索结果
+            setTimeout(() => {
+                // 如果 LLM 还未完成，使用混合检索前5条结果
+                if (!llmRecallFinish) {
+                    log.info(`[llmRecall] 超时，使用混合检索前5条结果`);
+                    handle.result = hybridMemories.slice(0, 5);
+                    handle.settled = true;
+                }
+            }, timeoutMs);
+        }
+        else {
+            // 关闭 LLM → 直接前 5 条
+            handle.result = hybridMemories.slice(0, 5);
+            handle.settled = true;
+        }
+    }
+    catch (err) {
+        // 出错兜底：返回空结果
+        handle.result = [];
+        console.error('[RecallPrefetch] 失败:', err);
         handle.settled = true;
-    });
+    }
     return handle;
 }
 function consumeRecallPrefetch(ctx) {
     const prefetch = ctx?.recallPrefetch;
     if (!prefetch || !prefetch.settled || prefetch.consumed)
         return [];
-    prefetch.consumed = true;
-    return prefetch.result;
+    if (prefetch.result) {
+        // prefetch.consumed = true
+        return prefetch.result;
+    }
+    return [];
 }
 const states = new Map();
 function getState(projectPath) {
@@ -211,25 +209,17 @@ export const MemoryPlugin = async (params) => {
     const projectPath = directory || worktreeOrigin;
     const worktree = projectPath;
     log.info(`[prjPath]worktreeOrigin=${worktreeOrigin}, directory=${directory}`);
-    getMemoryDir(worktree);
     // 等待配置加载完成
     await load(getOpencodeConfigHomeDir());
-    // 初始化或删除命令
-    initMemCmd();
     // 如果插件未启用，直接返回空插件
     if (!config().enable) {
         log.debug("[MemoryPlugin] plugin is disabled, skipping initialization");
-        return {
-            "experimental.chat.messages.transform": async (_input, output) => {
-                stripMemoryMessages(output);
-            },
-            "experimental.chat.system.transform": async (_input, output) => {
-                output.system = output.system
-                    .map((text) => stripMemoryText(text))
-                    .filter((text) => text.trim().length > 0);
-            },
-        };
+        return {};
     }
+    // 初始化工作区记忆目录
+    getMemoryDir(worktree);
+    // 初始化或删除命令
+    initMemCmd();
     const state = getState(projectPath);
     const activeSessions = state.activeSessions;
     const skipSessions = state.skipSessions;
@@ -409,13 +399,19 @@ export const MemoryPlugin = async (params) => {
                     hidden: true,
                     mode: "subagent",
                     description: "You are a file/memory matching engine.",
+                    permission: {
+                        "grep": "deny",
+                        "glob": "deny",
+                        "memory_search": "deny",
+                    },
+                    prompt: "You are a file/memory matching engine. Select the top 5 most semantically relevant items from [memories List] that match the [Query].You may only match based on filename / name / description / type",
                 },
             };
         },
         event: async ({ event }) => {
             if (event.type === "message.updated") {
                 const msg = event.properties.info;
-                if (config().enable) {
+                if (config().enable && config().memory.autoExtractEnable) {
                     // log.info(`message.updated msg: ${JSON.stringify(msg)}`);
                     // 子Agent的子session 跳过
                     if (await shouldSkip(msg.sessionID))
@@ -446,7 +442,7 @@ export const MemoryPlugin = async (params) => {
                 const part = event.properties.part;
                 if (!part || !part.sessionID)
                     return;
-                if (config().enable) {
+                if (config().enable && config().memory.autoExtractEnable) {
                     try {
                         // 子Agent的子session 跳过
                         if (await shouldSkip(part.sessionID))
@@ -549,7 +545,7 @@ export const MemoryPlugin = async (params) => {
                 if (config().recall.recallEnable && !shouldIgnoreMemoryContext(query) && query) {
                     recallPrefetch = ctx?.turnID === turnID
                         ? ctx.recallPrefetch
-                        : startRecallPrefetch(params.client, sessionID, turnID, worktree, query, alreadySurfaced, recentTools, config()?.recall?.providerID ?
+                        : await startRecallPrefetch(params.client, sessionID, turnID, worktree, query, alreadySurfaced, recentTools, config()?.recall?.providerID ?
                             { providerID: config()?.recall?.providerID?.trim(), modelID: config()?.recall?.modelID?.trim() }
                             : modelCache.get("currentModel"));
                 }
@@ -592,7 +588,6 @@ export const MemoryPlugin = async (params) => {
             const ignoreMemoryContext = !config().recall.recallEnable || shouldIgnoreMemoryContext(query);
             const recalled = ignoreMemoryContext ? [] : consumeRecallPrefetch(ctx);
             const recalledSection = formatRecalledMemories(recalled);
-            //appendLog(worktree, sessionID || '', `召回 recalledSection: \n ${recalledSection}`);
             // for (const key of extractSurfacedMemoryKeys(recalledSection)) {
             //   alreadySurfaced.add(key)
             // }
@@ -603,12 +598,14 @@ export const MemoryPlugin = async (params) => {
             // 提示词不为空才追加
             if (typeof memoryPrompt === "string" && memoryPrompt.trim().length > 0) {
                 // 不用判断query是否为空，解决压缩
-                if (output.system.length > 0 && isqwen3p) {
+                // if (output.system.length > 0 && isqwen3p) {
+                //   output.system[0] += '\n\n'+ memoryPrompt;
+                //   //log.info("qwen3p prompt",output.system[0])
+                // } else {
+                //   output.system.push(memoryPrompt);
+                // }
+                if (output.system.length > 0) {
                     output.system[0] += '\n\n' + memoryPrompt;
-                    //log.info("qwen3p prompt",output.system[0])
-                }
-                else {
-                    output.system.push(memoryPrompt);
                 }
             }
         },

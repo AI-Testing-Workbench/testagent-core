@@ -1,6 +1,6 @@
 import { MEMORY_TYPES } from "./memory.js";
-import { readIndex, truncateEntrypoint } from "./memory.js";
-import { getMemoryDir, ENTRYPOINT_NAME, MAX_ENTRYPOINT_LINES, getProjectDir } from "./paths.js";
+import { readIndex, readPersonalMemory, truncateEntrypoint } from "./memory.js";
+import { getMemoryDir, PERSONA_NAME, ENTRYPOINT_NAME, MAX_ENTRYPOINT_LINES, getProjectDir } from "./paths.js";
 // Port of Claude Code's MEMORY_FRONTMATTER_EXAMPLE from memoryTypes.ts
 const FRONTMATTER_EXAMPLE = [
     "```markdown",
@@ -108,7 +108,7 @@ const WHEN_TO_ACCESS = [
     "## 何时调用记忆",
     "- 当记忆内容与当前话题相关，或用户提及了之前对话中处理过的内容时。",
     "- 当用户明确要求你查看、回忆或记住某事时，**必须**调用记忆。",
-    "- 如果用户要求*忽略*或*不使用*记忆：则视为 MEMORY.md 文件为空。不要应用记忆中的内容、不要引用、不要对比，也不要提及任何记忆内容。",
+    "- 如果用户要求*忽略*或*不使用*记忆：则视 PERSONA.md 和 MEMORY.md 文件为空。不要应用记忆中的内容、不要引用、不要对比，也不要提及任何记忆内容。",
     "- 记忆记录可能会随时间失效。使用记忆作为上下文时，需明确这只是某个时间点的状态。在仅依据记忆记录回答用户或建立假设之前，请通过读取文件或资源的当前状态，验证记忆是否仍然准确且最新。如果 recalled 的记忆与当前信息冲突，请相信你现在观察到的事实 —— 并更新或移除失效的记忆，而不是基于它采取行动。",
 ].join("\n");
 // const WHEN_TO_ACCESS = [
@@ -149,24 +149,19 @@ const TRUSTING_RECALL = [
 // Guides the model to grep memory files and session transcripts when
 // looking for past context, rather than guessing or hallucinating.
 function buildSearchingPastContextSection(memoryDir, projectDir) {
-    const memSearch = `grep -rn "<search term>" ${memoryDir} --include="*.md"`;
-    const transcriptSearch = `grep -rn "<search term>" ${projectDir}/ --include="*.jsonl"`;
+    // const memSearch = `grep -rn "<search term>" ${memoryDir} --include="*.md"`
+    // const transcriptSearch = `grep -rn "<search term>" ${projectDir}/ --include="*.jsonl"`
     return [
-        "## Searching past context",
+        "## 记忆工具调用指南",
         "",
-        "When looking for past context:",
-        "",
-        "⚠️ IMPORTANT: Only use these search methods if **no recalled Memories are available**.",
-        "",
-        "1. First, Search topic files in your memory directory:",
-        "```",
-        memSearch,
-        "```",
-        // "2.  If needed, Session transcript logs (last resort — large files, slow):",
-        // "```",
-        // transcriptSearch,
-        // "```",
-        "Use narrow search terms (error messages, file paths, function names) rather than broad keywords.",
+        "当下方注入的记忆片段不足以回答用户问题时，可主动调用以下工具获取更多信息：",
+        "- **memory_search**：在记忆目录下搜索结构化记忆md文件，适用于回忆用户偏好、历史事件节点、规则等关键信息。",
+        "- **memory_read**：阅读原始记忆文件，适用于查找具体消息原文、时间线、上下文细节；也可用于补充或校验 memory_search 的结果。",
+        "- **grep**：memory_search检索不到有效记忆时，酌情扩大搜索记忆范围。",
+        "### ⚠️ 调用次数限制",
+        "每轮对话中，memory_search 和 grep、glob等记忆搜索 **合计最多调用 3 次**。",
+        "-首次搜索无结果时，可换关键词或换工具重试，但总调用次数不要超过 3 次。",
+        "-若 3 次搜索后仍无结果，说明该信息不在记忆中，请直接根据已有信息回复用户，不要继续搜索。",
         "",
     ];
 }
@@ -263,6 +258,16 @@ export function buildMemorySystemPrompt(worktree, recalledMemoriesSection, isLoa
         // ]
         const includeIndex = options.includeIndex ?? true;
         if (includeIndex) {
+            // 用户个人全局记忆
+            const personalContent = readPersonalMemory();
+            if (personalContent.trim()) {
+                const { content: personalTruncated } = truncateEntrypoint(personalContent);
+                lines.push(`## ${PERSONA_NAME}`, "", personalTruncated, "");
+            }
+            else {
+                lines.push(`## ${PERSONA_NAME}`, "", `Your ${PERSONA_NAME} is currently empty. When you save new personal global memories, they will appear here.`, "");
+            }
+            // 记忆索引文件      
             const indexContent = readIndex(worktree);
             if (indexContent.trim()) {
                 const { content: truncated } = truncateEntrypoint(indexContent);
