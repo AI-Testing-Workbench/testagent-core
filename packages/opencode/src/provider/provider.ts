@@ -1706,6 +1706,14 @@ const layer: Layer.Layer<
           const startTime = Date.now()
           // testagent_change end
 
+          // Strip runtime/node.js/... from User-Agent added by @ai-sdk/provider-utils
+          if (opts.headers) {
+            const h = new Headers(opts.headers as Record<string, string>)
+            const ua = h.get("user-agent") || ""
+            h.set("user-agent", ua.replace(/\bruntime\/node\.js\/[^\s]*/g, "").trim())
+            opts.headers = Object.fromEntries(h.entries())
+          }
+
           const res = await fetchFn(input, {
             ...opts,
             // @ts-ignore see here: https://github.com/oven-sh/bun/issues/16682
