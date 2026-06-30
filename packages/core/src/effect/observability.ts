@@ -45,6 +45,8 @@ export function resource(): { serviceName: string; serviceVersion: string; attri
     attributes: {
       ...attributes,
       "deployment.environment.name": InstallationChannel,
+      "user.id": userID,
+      "user.name": userName,
       "opencode.client": Flag.OPENCODE_CLIENT,
       "opencode.process_role": processMetadata.processRole,
       "opencode.run_id": processMetadata.runID,
@@ -80,9 +82,15 @@ async function initMetrics() {
     const { PeriodicExportingMetricReader } = await import("@opentelemetry/sdk-metrics")
     const { OTLPMetricExporter, AggregationTemporalityPreference } = await import("@opentelemetry/exporter-metrics-otlp-http")
     const { makeProducer } = await import("@effect/opentelemetry/Metrics")
-    const { layerEmpty: resourceLayerEmpty } = await import("@effect/opentelemetry/Resource")
+    const { layer: resourceLayer } = await import("@effect/opentelemetry/Resource")
 
-    const producer = Effect.runSync(Effect.provide(makeProducer("delta"), resourceLayerEmpty))
+    const res = resource()
+    const producer = Effect.runSync(
+      Effect.provide(
+        makeProducer("delta"),
+        resourceLayer({ serviceName: res.serviceName, serviceVersion: res.serviceVersion, attributes: res.attributes }),
+      ),
+    )
     const reader = new PeriodicExportingMetricReader({
       exporter: new OTLPMetricExporter({
         url: `${base}/v1/metrics`,
@@ -139,6 +147,14 @@ export const layer = !base
     )
 
 // testagent_change start
+let userID = ""
+let userName = ""
+
+export function setUser(id: string, name: string) {
+  userID = id
+  userName = name
+}
+
 export const failPermission = Metric.counter("tool.fail.permission", {
   description: "Tool call failures due to permission rejection",
 })

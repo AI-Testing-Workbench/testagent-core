@@ -12,9 +12,9 @@ export const InvalidTool = Tool.define(
   Effect.succeed({
     description: "Do not use",
     parameters: Parameters,
-    execute: (params: { tool: string; error: string }) =>
+    execute: (params: { tool: string; error: string }, ctx: Tool.Context) =>
       Effect.gen(function* () {
-        yield* Metric.update(failInvalidArgs, 1)
+        yield* Metric.update(Metric.withAttributes(failInvalidArgs, { session_id: ctx.sessionID }), 1)
         return {
           title: "Invalid Tool",
           output: `The arguments provided to the tool are invalid: ${params.error}`,

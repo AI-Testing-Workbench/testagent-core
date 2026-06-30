@@ -1,6 +1,7 @@
 // testagent_change - new file
 // Stores the current user info set by the VS Code extension via HTTP or env vars.
 import * as Log from "@opencode-ai/core/util/log"
+import * as Observability from "@opencode-ai/core/effect/observability"
 
 const log = Log.create({ service: "testagent.user" })
 
@@ -89,5 +90,11 @@ export const User = {
   set(info: UserInfo) {
     log.debug("set", { user: info })
     override = info
+    Observability.setUser(info.id ?? "", info.name ?? "")
   },
+}
+
+const initial = User.get()
+if (initial.id || initial.name) {
+  Observability.setUser(initial.id ?? "", initial.name ?? "")
 }
