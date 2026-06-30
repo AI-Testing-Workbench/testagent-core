@@ -171,16 +171,35 @@ export const callTotal = Metric.counter("tool.call.total", {
   description: "Total tool calls made by LLM",
 })
 export const sessionCreated = Metric.counter("session.created", {
-  description: "Number of new sessions created",
+  description: "Total of new sessions created",
 })
 export const llmRequest = Metric.counter("session.llm.request", {
-  description: "Number of LLM requests made",
+  description: "Total of LLM requests made",
 })
 export const sessionCompacted = Metric.counter("session.compacted", {
-  description: "Number of sessions compacted",
+  description: "Total of sessions compacted",
 })
 export const taskCall = Metric.counter("tool.task.call", {
   description: "Total task tool calls",
+})
+export const ttft = Metric.histogram("llm.ttft", {
+  boundaries: [50, 100, 200, 500, 1000, 2000, 5000, 10000, 30000],
+  description: "Time to first token (ms)",
+})
+export const tokenInput = Metric.counter("session.token.input", {
+  description: "Input tokens consumed",
+})
+export const tokenOutput = Metric.counter("session.token.output", {
+  description: "Output tokens generated",
+})
+export const tokenReasoning = Metric.counter("session.token.reasoning", {
+  description: "Reasoning tokens generated",
+})
+export const tokenCacheRead = Metric.counter("session.token.cache_read", {
+  description: "Cache read tokens",
+})
+export const tokenCacheWrite = Metric.counter("session.token.cache_write", {
+  description: "Cache write tokens",
 })
 // testagent_change end
 

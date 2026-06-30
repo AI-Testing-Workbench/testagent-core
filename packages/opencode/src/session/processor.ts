@@ -25,7 +25,7 @@ import { SessionEvent } from "@/v2/session-event"
 import { Modelv2 } from "@/v2/model"
 import * as DateTime from "effect/DateTime"
 
-import { failPermission, failQuestion, failExecution, callTotal } from "@opencode-ai/core/effect/observability" // testagent_change
+import { failPermission, failQuestion, failExecution, callTotal, ttft, tokenInput, tokenOutput, tokenReasoning, tokenCacheRead, tokenCacheWrite } from "@opencode-ai/core/effect/observability" // testagent_change
 
 const DOOM_LOOP_THRESHOLD = 3
 const log = Log.create({ service: "session.processor" })
@@ -492,6 +492,12 @@ export const layer: Layer.Layer<
             ctx.assistantMessage.finish = value.finishReason
             ctx.assistantMessage.cost += usage.cost
             ctx.assistantMessage.tokens = usage.tokens
+            const attrs = { sessionID: ctx.sessionID, modelID: ctx.model.id, providerID: ctx.model.providerID }
+            yield* Metric.update(Metric.withAttributes(tokenInput, attrs), usage.tokens.input)
+            yield* Metric.update(Metric.withAttributes(tokenOutput, attrs), usage.tokens.output)
+            yield* Metric.update(Metric.withAttributes(tokenReasoning, attrs), usage.tokens.reasoning)
+            yield* Metric.update(Metric.withAttributes(tokenCacheRead, attrs), usage.tokens.cache.read)
+            yield* Metric.update(Metric.withAttributes(tokenCacheWrite, attrs), usage.tokens.cache.write)
             yield* session.updatePart({
               id: PartID.ascending(),
               reason: value.finishReason,
@@ -714,6 +720,7 @@ export const layer: Layer.Layer<
             const streamStartTime = Date.now()
             let eventCount = 0
             let firstEventTime: number | undefined
+            let ttftValue: number | undefined
             slog.info("📡 Starting LLM stream", {
               sessionID: streamInput.sessionID,
               modelID: streamInput.model.id,
@@ -729,9 +736,9 @@ export const layer: Layer.Layer<
                 eventCount++
                 if (!firstEventTime) {
                   firstEventTime = Date.now()
-                  const ttfb = firstEventTime - streamStartTime
-                  slog.info("⚡ First event received (TTFB)", {
-                    ttfb: `${ttfb}ms`,
+                  ttftValue = firstEventTime - streamStartTime
+                  slog.info("⚡ First event received (TTFT)", {
+                    ttft: `${ttftValue}ms`,
                     eventType: event.type,
                   })
                 }
@@ -756,6 +763,9 @@ export const layer: Layer.Layer<
               totalElapsed: `${totalElapsed}ms`,
               avgEventTime: eventCount > 0 ? `${(totalElapsed / eventCount).toFixed(2)}ms` : "N/A",
             })
+            if (ttftValue != null) {
+              yield* Metric.update(Metric.withAttributes(ttft, { sessionID: ctx.sessionID, modelID: streamInput.model.id, providerID: streamInput.model.providerID }), ttftValue)
+            }
             // testagent_change end
           }).pipe(
             Effect.onInterrupt(() =>
