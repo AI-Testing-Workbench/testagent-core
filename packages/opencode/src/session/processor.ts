@@ -75,6 +75,7 @@ interface ProcessorContext extends Input {
   needsCompaction: boolean
   currentText: MessageV2.TextPart | undefined
   reasoningMap: Record<string, MessageV2.ReasoningPart>
+  tokenEstimates?: { system: number; messages: number; tools: number }
 }
 
 type StreamEvent = Event
@@ -457,6 +458,17 @@ export const layer: Layer.Layer<
               usage: value.usage,
               metadata: value.providerMetadata,
             })
+            // Calibrate estimated breakdown against actual input_tokens
+            if (ctx.tokenEstimates) {
+              const est = ctx.tokenEstimates
+              const estTotal = est.system + est.messages + est.tools
+              const scale = estTotal > 0 ? usage.tokens.input / estTotal : 1
+              usage.tokens.breakdown = {
+                system:   Math.round(est.system   * scale),
+                messages: Math.round(est.messages * scale),
+                tools:    Math.round(est.tools    * scale),
+              }
+            }
             if (!ctx.assistantMessage.summary) {
               // TODO(v2): Temporary dual-write while migrating session messages to v2 events.
               EventV2.run(SessionEvent.Step.Ended.Sync, {
@@ -667,13 +679,22 @@ export const layer: Layer.Layer<
           sessionID: ctx.assistantMessage.sessionID,
           error: ctx.assistantMessage.error,
         })
-        yield* status.set(ctx.sessionID, { type: "idle" })
+        const idleReason = MessageV2.AbortedError.isInstance(error) ? "user_abort" as const : "error" as const
+        yield* status.set(ctx.sessionID, { type: "idle", reason: idleReason })
       })
 
       const process = Effect.fn("SessionProcessor.process")(function* (streamInput: LLM.StreamInput) {
         slog.info("process")
         ctx.needsCompaction = false
         ctx.shouldBreak = (yield* config.get()).experimental?.continue_loop_on_deny !== true
+
+        // Estimate token breakdown for system / messages / tools before LLM call
+        const estimate = (input: string) => Math.max(1, Math.round((input || "").length / 4))
+        ctx.tokenEstimates = {
+          system:   estimate(JSON.stringify(streamInput.system)),
+          messages: estimate(JSON.stringify(streamInput.messages)),
+          tools:    estimate(JSON.stringify(streamInput.tools)),
+        }
 
         return yield* Effect.gen(function* () {
           yield* Effect.gen(function* () {

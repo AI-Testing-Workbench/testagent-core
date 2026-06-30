@@ -7,9 +7,13 @@ import { NonNegativeInt, withStatics } from "@/util/schema"
 import { Effect, Layer, Context, Schema } from "effect"
 import z from "zod"
 
+export const IdleReason = Schema.Union([Schema.Literal("completed"), Schema.Literal("user_abort"), Schema.Literal("error")])
+export type IdleReason = Schema.Schema.Type<typeof IdleReason>
+
 export const Info = Schema.Union([
   Schema.Struct({
     type: Schema.Literal("idle"),
+    reason: Schema.optional(IdleReason),
   }),
   Schema.Struct({
     type: Schema.Literal("retry"),
@@ -48,6 +52,7 @@ export const Event = {
     "session.idle",
     Schema.Struct({
       sessionID: SessionID,
+      reason: Schema.optional(IdleReason),
     }),
   ),
 }
@@ -80,9 +85,13 @@ export const layer = Layer.effect(
 
     const set = Effect.fn("SessionStatus.set")(function* (sessionID: SessionID, status: Info) {
       const data = yield* InstanceState.get(state)
+      // Skip duplicate idle — the first caller (halt or onIdle) already
+      // published and deleted the session from state.
+      if (status.type === "idle" && !data.has(sessionID)) return
       yield* bus.publish(Event.Status, { sessionID, status })
       if (status.type === "idle") {
-        yield* bus.publish(Event.Idle, { sessionID })
+        const reason = "reason" in status ? (status as { reason?: IdleReason }).reason : undefined
+        yield* bus.publish(Event.Idle, { sessionID, reason })
         data.delete(sessionID)
         return
       }

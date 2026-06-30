@@ -113,6 +113,9 @@ interface GenInfo {
   genId: string
   sessionId: string
   parentObservationId?: string
+  selectedModel?: string
+  apiId?: string
+  resolvedModel: string
   modelName: string
   startTime: Date
   completionStartTime: Date | null
@@ -150,6 +153,12 @@ const gens = new Map<string, GenInfo[]>()
 
 // 存储工具调用的 Span ID
 const toolSpanIds = new Map<string, string>()
+const toolCallInfos = new Map<string, { spanId: string; traceId: string; sessionId: string; toolName?: string }>()
+const sessionSpanIds = new Map<string, Set<string>>()
+
+// 工具结果有时先出现在 message.part.updated，随后 tool.execute.after 的 output 仍为 null。
+// 按 callID 缓存已完成结果，用来回填同一个 TOOL span。
+const toolResultSnapshots = new Map<string, { output: any; metadata?: any; title?: string }>()
 
 // LIFO 栈，维护嵌套 skill 调用链
 const skillStack: { callID: string; context: SkillContext }[] = []
@@ -159,6 +168,9 @@ const allGenerations: GenInfo[] = []
 
 // 当前活跃的 generation 队列（按 session 维护，避免主/子 agent 相互覆盖，也避免多 step 事件交错互相覆盖）
 const activeGenerations = new Map<string, GenInfo[]>()
+
+// 记录用户在消息阶段选择的模型，避免网关降级后丢失原始选择
+const selectedModelsBySession = new Map<string, string>()
 
 // 当前活跃的 Trace ID
 let currentTraceId: string | null = null
@@ -236,6 +248,32 @@ function deleteActiveGeneration(sessionId: string, gen: GenInfo) {
   else activeGenerations.set(sessionId, remaining)
 }
 
+function normalizeModelSelection(model: any): string | undefined {
+  if (!model) return undefined
+  if (typeof model === "string") return model
+
+  const providerId = model.providerID || model.provider?.id || model.provider
+  const modelId = model.id || model.modelID || model.name
+
+  if (providerId && modelId) return `${providerId}/${modelId}`
+  if (modelId) return String(modelId)
+  return undefined
+}
+
+function buildLLMModelMetadata(
+  g: Pick<GenInfo, "modelName" | "modelParameters" | "selectedModel" | "resolvedModel" | "apiId">,
+) {
+  return {
+    name: g.modelName,
+    provider: g.modelName.split("/")[0],
+    id: g.modelName.split("/")[1],
+    parameters: g.modelParameters,
+    apiId: g.apiId,
+    selectedModel: g.selectedModel,
+    resolvedModel: g.resolvedModel,
+  }
+}
+
 function migrateTraceId(oldTraceId: string, newTraceId: string) {
   if (oldTraceId === newTraceId || traceBatches.has(newTraceId)) return
 
@@ -280,6 +318,9 @@ function migrateTraceId(oldTraceId: string, newTraceId: string) {
   }
   for (const [sid, traceId] of sessionToTrace) {
     if (traceId === oldTraceId) sessionToTrace.set(sid, newTraceId)
+  }
+  for (const [callID, info] of toolCallInfos) {
+    if (info.traceId === oldTraceId) toolCallInfos.set(callID, { ...info, traceId: newTraceId })
   }
   if (currentTraceId === oldTraceId) currentTraceId = newTraceId
   uploadedTraceIds.delete(oldTraceId)
@@ -335,7 +376,16 @@ function getSessionObservationParent(
   return getActiveParentId()
 }
 
-function queuePendingSubagent(parentSessionId: string, entry: { traceId: string; agentSpanId: string }) {
+async function queuePendingSubagent(parentSessionId: string, entry: { traceId: string; agentSpanId: string }) {
+  const waitingSessions = pendingSubagentSessions.get(parentSessionId)
+  const waitingSessionId = waitingSessions?.shift()
+  if (waitingSessions && waitingSessions.length === 0) pendingSubagentSessions.delete(parentSessionId)
+
+  if (waitingSessionId) {
+    await attachSubagentSession(waitingSessionId, entry.traceId, entry.agentSpanId)
+    return
+  }
+
   const queue = pendingSubagents.get(parentSessionId) ?? []
   queue.push(entry)
   pendingSubagents.set(parentSessionId, queue)
@@ -349,6 +399,43 @@ function consumePendingSubagent(parentSessionId: string) {
   if (!queue.length) pendingSubagents.delete(parentSessionId)
   else pendingSubagents.set(parentSessionId, queue)
   return next
+}
+
+function rememberPendingSubagentSession(parentSessionId: string, sessionId: string) {
+  const queue = pendingSubagentSessions.get(parentSessionId) ?? []
+  if (!queue.includes(sessionId)) queue.push(sessionId)
+  pendingSubagentSessions.set(parentSessionId, queue)
+}
+
+async function attachSubagentSession(sessionId: string, traceId: string, agentSpanId: string) {
+  sessionToTrace.set(sessionId, traceId)
+  sessionToAgentSpan.set(sessionId, agentSpanId)
+  currentTraceId = traceId
+  await reparentSessionObservations(sessionId, traceId, agentSpanId)
+}
+
+function recordSessionSpan(sessionId: string, spanId: string) {
+  const spanIds = sessionSpanIds.get(sessionId) ?? new Set<string>()
+  spanIds.add(spanId)
+  sessionSpanIds.set(sessionId, spanIds)
+}
+
+async function reparentSessionObservations(sessionId: string, traceId: string, agentSpanId: string) {
+  for (const gen of allGenerations.filter((g) => g.sessionId === sessionId && g.traceId === traceId)) {
+    if (gen.parentObservationId === agentSpanId) continue
+    gen.parentObservationId = agentSpanId
+    const generationUpdates: Partial<GenerationData> = { parentObservationId: agentSpanId }
+    updateGenerationInBatch(traceId, gen.genId, generationUpdates)
+    await updateGenerationImmediately(traceId, gen.genId, generationUpdates)
+  }
+
+  for (const spanId of sessionSpanIds.get(sessionId) ?? []) {
+    const span = traceBatches.get(traceId)?.spans.find((s) => s.id === spanId)
+    if (!span || span.id === agentSpanId || span.parentObservationId === agentSpanId) continue
+    const spanUpdates: Partial<SpanData> = { parentObservationId: agentSpanId }
+    updateSpanInBatch(traceId, spanId, spanUpdates)
+    await updateSpanImmediately(traceId, spanId, spanUpdates)
+  }
 }
 
 // 存储用户输入
@@ -371,6 +458,7 @@ const currentGenIdx = new Map<string, number>()
 
 // 跟踪的会话 ID 集合
 const trackedSessionIds = new Set<string>()
+const pendingSubagentSessions = new Map<string, string[]>()
 
 // 消息计数器
 const messageCounter = new Map<string, number>()
@@ -379,6 +467,7 @@ const messageCounter = new Map<string, number>()
 let publicKey: string
 let secretKey: string
 let currentProjectId = "unknown_project"
+let userIdMetadata: string | null = null
 
 // ==================== 常量 ====================
 
@@ -866,6 +955,7 @@ function traceEventBody(batch: TraceBatch) {
     output: batch.output ?? "",
     tags: batch.tags,
     metadata: batch.metadata,
+    userId: userIdMetadata,
   }
 }
 
@@ -876,11 +966,14 @@ async function upsertTraceImmediately(batch: TraceBatch) {
 }
 
 function generationEventBody(gen: GenerationData) {
+  const modelMetadata = gen.metadata?.model ?? {}
   return {
     id: gen.id,
     traceId: gen.traceId,
     name: gen.name,
     model: gen.model,
+    selectedModel: modelMetadata.selectedModel,
+    resolvedModel: modelMetadata.resolvedModel,
     modelParameters: gen.modelParameters,
     input: gen.input,
     output: gen.output,
@@ -899,7 +992,14 @@ async function createGenerationImmediately(gen: GenerationData) {
 }
 
 async function updateGenerationImmediately(traceId: string, genId: string, updates: Partial<GenerationData>) {
-  await ingestEvent("generation-update", { id: genId, traceId, ...updates })
+  const modelMetadata = updates.metadata?.model ?? {}
+  await ingestEvent("generation-update", {
+    id: genId,
+    traceId,
+    selectedModel: modelMetadata.selectedModel,
+    resolvedModel: modelMetadata.resolvedModel,
+    ...updates,
+  })
 }
 
 function spanEventBody(span: SpanData) {
@@ -924,6 +1024,194 @@ async function createSpanImmediately(span: SpanData) {
 
 async function updateSpanImmediately(traceId: string, spanId: string, updates: Partial<SpanData>) {
   await ingestEvent("span-update", { id: spanId, traceId, ...updates })
+}
+
+function hasOwn(obj: any, key: string) {
+  return obj != null && Object.prototype.hasOwnProperty.call(obj, key)
+}
+
+function stringifyToolOutput(output: any) {
+  if (typeof output === "string") return output
+  try {
+    const json = JSON.stringify(output)
+    return json === undefined ? String(output) : json
+  } catch {
+    return String(output)
+  }
+}
+
+function toSpanOutput(output: any) {
+  if (output === undefined) return undefined
+  if (output === null) return null
+  return stringifyToolOutput(output).slice(0, 10000)
+}
+
+function getToolCallId(value: any): string | undefined {
+  const id = value?.callID ?? value?.toolCallID ?? value?.tool_call_id ?? value?.id
+  return id === undefined || id === null || id === "" ? undefined : String(id)
+}
+
+function isMeaningfulToolOutput(output: any) {
+  if (output === undefined || output === null) return false
+  if (typeof output === "string") return output.length > 0
+  if (Array.isArray(output)) return output.length > 0
+  return true
+}
+
+function findUnresolvedToolCall(
+  sessionId: string | undefined,
+  traceId: string | undefined,
+  toolName: string | undefined,
+) {
+  for (const [callID, info] of toolCallInfos) {
+    if (sessionId && info.sessionId !== sessionId) continue
+    if (traceId && info.traceId !== traceId) continue
+    if (toolName && info.toolName && info.toolName !== toolName) continue
+
+    const span = traceBatches.get(info.traceId)?.spans.find((s) => s.id === info.spanId)
+    if (!span || span.output === undefined || span.output === null) return { callID, info }
+  }
+  return undefined
+}
+
+function findUnresolvedToolSpan(
+  sessionId: string | undefined,
+  traceId: string | undefined,
+  toolName: string | undefined,
+) {
+  const sessionSpanCandidates = sessionId ? [...(sessionSpanIds.get(sessionId) ?? [])] : []
+  const traceIds = traceId ? [traceId] : [...traceBatches.keys()]
+
+  for (const tid of traceIds) {
+    const batch = traceBatches.get(tid)
+    if (!batch) continue
+
+    const spanIds = sessionSpanCandidates.length > 0 ? sessionSpanCandidates : batch.spans.map((span) => span.id)
+    for (const spanId of spanIds) {
+      const span = batch.spans.find((s) => s.id === spanId)
+      if (!span) continue
+      if (span.metadata?.spanKind !== "TOOL") continue
+      if (toolName && span.metadata?.input?.tool && span.metadata.input.tool !== toolName) continue
+      if (span.endTime && span.output !== undefined && span.output !== null) continue
+      return { spanId: span.id, traceId: tid, span }
+    }
+  }
+
+  return undefined
+}
+
+async function updateToolSpanOutput(
+  traceId: string,
+  spanId: string,
+  endTime: Date,
+  snapshot: { output: any; metadata?: any; title?: string },
+) {
+  const existingSpan = traceBatches.get(traceId)?.spans.find((span) => span.id === spanId)
+  const spanOutput = toSpanOutput(snapshot.output)
+  const spanUpdates: Partial<SpanData> = {
+    ...(spanOutput !== undefined ? { output: spanOutput } : {}),
+    endTime: endTime.toISOString(),
+    level: snapshot.output === null ? "ERROR" : "DEFAULT",
+    metadata: {
+      ...(existingSpan?.metadata || {}),
+      spanKind: "TOOL",
+      nodeType: existingSpan?.metadata?.nodeType || "tool",
+      tags: OBSERVATION_TAGS,
+      output: {
+        title: snapshot.title,
+        output: snapshot.output,
+        metadata: snapshot.metadata,
+      },
+      ...baseMetadata(),
+    },
+  }
+
+  updateSpanInBatch(traceId, spanId, spanUpdates)
+  await updateSpanImmediately(traceId, spanId, spanUpdates)
+}
+
+async function captureToolResultsFromMessages(messages: any[]) {
+  for (const message of messages) {
+    const sessionId = message.info?.sessionID || currentSessionId
+    for (const part of message.parts || []) {
+      const callID = getToolCallId(part)
+      if (part?.type !== "tool" || !callID || part.state?.status !== "completed" || !hasOwn(part.state, "output")) {
+        continue
+      }
+
+      const snapshot = {
+        output: part.state.output,
+        metadata: part.metadata,
+        title: part.title,
+      }
+      toolResultSnapshots.set(callID, snapshot)
+      await updateToolSpanOutputFromSnapshot(
+        callID,
+        sessionId ? sessionToTrace.get(sessionId) : currentTraceId,
+        new Date(),
+        snapshot,
+      )
+    }
+  }
+}
+
+async function captureToolResultsFromLLMInputMessages(messages: any[], sessionId: string, traceId: string) {
+  const pendingToolCalls: Array<{ id?: string; name?: string }> = []
+
+  for (const message of messages) {
+    if (Array.isArray(message?.tool_calls)) {
+      for (const toolCall of message.tool_calls) {
+        pendingToolCalls.push({
+          id: getToolCallId(toolCall),
+          name: toolCall?.function?.name || toolCall?.name,
+        })
+      }
+    }
+
+    if (message?.role !== "tool" || !isMeaningfulToolOutput(message.content)) continue
+
+    const pendingToolCall = pendingToolCalls.shift()
+    const toolName = message.name || message.tool || pendingToolCall?.name
+    const callID =
+      getToolCallId(message) ?? pendingToolCall?.id ?? findUnresolvedToolCall(sessionId, traceId, toolName)?.callID
+
+    const snapshot = {
+      output: message.content,
+      metadata: { source: "llm-input-message" },
+      title: toolName,
+    }
+    if (callID) {
+      toolResultSnapshots.set(callID, snapshot)
+      const updated = await updateToolSpanOutputFromSnapshot(callID, traceId, new Date(), snapshot)
+      if (updated) continue
+    }
+
+    const unresolvedSpan = findUnresolvedToolSpan(sessionId, traceId, toolName)
+    if (unresolvedSpan) {
+      await updateToolSpanOutput(unresolvedSpan.traceId, unresolvedSpan.spanId, new Date(), snapshot)
+    }
+  }
+}
+
+function captureToolResultFromConvertedMessage(message: any, part: any) {
+  const callID = getToolCallId(part)
+  if (callID) message.tool_call_id = callID
+  return message
+}
+
+async function updateToolSpanOutputFromSnapshot(
+  callID: string,
+  traceId: string | undefined,
+  endTime: Date,
+  snapshot: { output: any; metadata?: any; title?: string },
+) {
+  const callInfo = toolCallInfos.get(callID)
+  const spanId = callInfo?.spanId ?? toolSpanIds.get(callID)
+  const resolvedTraceId = callInfo?.traceId ?? traceId
+  if (!spanId || !resolvedTraceId) return false
+
+  await updateToolSpanOutput(resolvedTraceId, spanId, endTime, snapshot)
+  return true
 }
 
 function normalizeUsage(tokens: any): { input: number; output: number; total: number } | undefined {
@@ -1123,20 +1411,18 @@ async function finalizeGeneration(
       ...g.modelParameters,
       ...(options?.finishReason ? { finish_reason: options.finishReason } : {}),
     },
-    tags: [
-      ...OBSERVATION_TAGS,
-      ...(options?.finishReason ? [`finish_reason:${options.finishReason}`] : []),
-    ],
+    tags: [...OBSERVATION_TAGS, ...(options?.finishReason ? [`finish_reason:${options.finishReason}`] : [])],
     metadata: {
       spanKind: "LLM",
-      model: {
-        name: g.modelName,
-        provider: g.modelName.split("/")[0],
-        id: g.modelName.split("/")[1],
-        parameters: g.modelParameters,
-      },
+      model: buildLLMModelMetadata(g),
       input: updatedInput,
       output: structuredOutput,
+      usage: {
+        unit: "tokens",
+        scope: "generation",
+        note: "Langfuse generation usage is per LLM call; trace-level totals should be computed by summing generations.",
+        ...usage,
+      },
       tags: OBSERVATION_TAGS,
       ...baseMetadata(),
     },
@@ -1292,43 +1578,64 @@ function convertToLLMMessages(messages: any[]): any[] {
       } else if (p.type === "tool") {
         flushTextBuffer()
         if (p.state?.input !== undefined) {
-          toolCalls.push({
+          const toolCall: any = {
             type: "function",
             function: {
               name: p.tool,
               arguments: p.state.input,
             },
-          })
+          }
+          const callID = getToolCallId(p)
+          if (callID) toolCall.id = callID
+          toolCalls.push(toolCall)
         }
         if (p.state?.status === "completed" && p.state?.output !== undefined) {
-          toolResults.push({
-            role: "tool",
-            name: p.tool,
-            content: p.state.output,
-          })
+          toolResults.push(
+            captureToolResultFromConvertedMessage(
+              {
+                role: "tool",
+                name: p.tool,
+                content: p.state.output,
+              },
+              p,
+            ),
+          )
         } else if (p.state?.status === "error" && p.state?.error) {
-          toolResults.push({
-            role: "tool",
-            name: p.tool,
-            content: `Error: ${p.state.error}`,
-          })
+          toolResults.push(
+            captureToolResultFromConvertedMessage(
+              {
+                role: "tool",
+                name: p.tool,
+                content: `Error: ${p.state.error}`,
+              },
+              p,
+            ),
+          )
         }
       } else if (p.type === "tool-call") {
         flushTextBuffer()
-        toolCalls.push({
+        const toolCall: any = {
           type: "function",
           function: {
             name: p.name,
             arguments: p.args || {},
           },
-        })
+        }
+        const callID = getToolCallId(p)
+        if (callID) toolCall.id = callID
+        toolCalls.push(toolCall)
       } else if (p.type === "tool-result") {
         flushTextBuffer()
-        toolResults.push({
-          role: "tool",
-          name: p.name || "",
-          content: p.output,
-        })
+        toolResults.push(
+          captureToolResultFromConvertedMessage(
+            {
+              role: "tool",
+              name: p.name || "",
+              content: p.output,
+            },
+            p,
+          ),
+        )
       }
     }
     flushTextBuffer()
@@ -1514,7 +1821,7 @@ function toJsonSchema(obj: any): any {
     "writeOnly",
   ]
 
-  // If it looks like a Zod schema (has .def), extract from def
+  // If it looks like a Zod schema (has ~standard or def), extract from def
   if ("def" in obj && obj.def && typeof obj.def === "object") {
     const def = obj.def
     // Check if def itself needs recursive cleaning
@@ -1611,12 +1918,17 @@ function buildLLMInput(messages: any[], system: string[], tools: any[]): { json:
   const formattedMessages = [...systemMessages, ...convertToLLMMessages(messages)]
   const formattedTools = tools.map((t) => {
     if (t.type === "function") return t
+    const name = t.name || t.id || t
     return {
       type: "function",
       function: {
-        name: t.name || t.id || t,
+        name,
         description: t.description || "",
-        parameters: toJsonSchema(t.parameters || { type: "object", properties: {} }),
+        // testagent_change: sandbox tool schema is hidden from the LLM
+        parameters:
+          name === "sandbox"
+            ? { type: "object", properties: {} }
+            : toJsonSchema(t.parameters || { type: "object", properties: {} }),
       },
     }
   })
@@ -1855,7 +2167,6 @@ async function get_project_apikeys(
 export const LangfusePlugin: Plugin = async (ctx) => {
   const user = User.get()
   let project_id: string | null = null
-  let userIdMetadata: string | null = null
   publicKey = "pk-lf-d89067e9-5eb3-42cc-b947-2d82a1a9e181"
   secretKey = "sk-lf-773528e2-aa24-48d0-9791-b7f795cbfb9a"
   if (user.id && user.name) {
@@ -1950,6 +2261,8 @@ export const LangfusePlugin: Plugin = async (ctx) => {
      * 缓存最终发给 LLM 的上下文消息
      */
     "experimental.chat.messages.transform": async (_, output) => {
+      await captureToolResultsFromMessages(output.messages)
+
       const bySession = new Map<string, typeof output.messages>()
 
       for (const message of output.messages) {
@@ -1984,6 +2297,8 @@ export const LangfusePlugin: Plugin = async (ctx) => {
           const popped = skillStack.pop()
           if (popped) {
             toolSpanIds.delete(popped.callID)
+            toolCallInfos.delete(popped.callID)
+            toolResultSnapshots.delete(popped.callID)
           }
         }
       }
@@ -1992,20 +2307,20 @@ export const LangfusePlugin: Plugin = async (ctx) => {
       const traceId = getTraceIdForSession(sessionId)
       const parentObservationId = getSessionObservationParent(sessionId)
 
-      const providerId = input.provider?.info?.id || input.model?.providerID || "unknown"
+      const providerId = input.model?.providerID || "unknown"
       const modelId = input.model?.id || "unknown"
       const modelName = `${providerId}/${modelId}`
-
+      const selectedModel = selectedModelsBySession.get(sessionId) || normalizeModelSelection(input.model)
+      const resolvedModel = modelName
+      const apiId = input.model?.apiId || "unknown"
       const messages = llmInputs.get(sessionId) || []
       const system = systemPrompts.get(sessionId) || []
       // testagent_change - use tools after agent/user permission filtering
       const tools = activeToolDefs(input.activeTools)
-      console.error(
-        `[langfuse-debug] chat.params agent=${input.agent} activeTools=${JSON.stringify(input.activeTools)} filteredTools=${tools.map((t: any) => t.name || t.id || t).join(",")}`,
-      )
       const builtInput = buildLLMInput(messages, system, tools)
       const llmInput = builtInput.json
       const llmInputDict = builtInput.dict
+      await captureToolResultsFromLLMInputMessages((llmInputDict as any).messages || [], sessionId, traceId)
 
       const startTime = new Date()
       const genId = generateUUID()
@@ -2015,21 +2330,16 @@ export const LangfusePlugin: Plugin = async (ctx) => {
       if (output.topP !== undefined) modelParameters.top_p = output.topP
       if (output.topK !== undefined) modelParameters.top_k = output.topK
       if (output.maxOutputTokens !== undefined) modelParameters.max_tokens = output.maxOutputTokens
-      const toolChoice = output.options?.toolChoice
-      if (toolChoice !== undefined) {
-        modelParameters.tool_choice = typeof toolChoice === "object" ? toolChoice : { type: toolChoice }
-      }
-      if (output.options?.maxRetries !== undefined) modelParameters.max_retries = output.options.maxRetries
 
       const genMetadata = {
         spanKind: "LLM",
-        model: {
-          name: modelName,
-          provider: providerId,
-          id: modelId,
-          apiId: input.model?.api?.id,
-          parameters: modelParameters,
-        },
+        model: buildLLMModelMetadata({
+          modelName,
+          modelParameters,
+          apiId,
+          selectedModel,
+          resolvedModel,
+        }),
         input: llmInputDict,
         output: {},
         tags: OBSERVATION_TAGS,
@@ -2059,6 +2369,8 @@ export const LangfusePlugin: Plugin = async (ctx) => {
         genId,
         sessionId,
         parentObservationId,
+        selectedModel,
+        resolvedModel,
         modelName,
         startTime,
         completionStartTime: null,
@@ -2153,6 +2465,8 @@ export const LangfusePlugin: Plugin = async (ctx) => {
       addSpanToBatch(traceId, spanData)
       await createSpanImmediately(spanData)
       toolSpanIds.set(input.callID, spanId)
+      toolCallInfos.set(input.callID, { spanId, traceId, sessionId, toolName: input.tool })
+      recordSessionSpan(sessionId, spanId)
 
       let agentSpanId: string | undefined
       if (isTask && subagentType) {
@@ -2184,7 +2498,8 @@ export const LangfusePlugin: Plugin = async (ctx) => {
 
         addSpanToBatch(traceId, agentSpanData)
         await createSpanImmediately(agentSpanData)
-        queuePendingSubagent(sessionId, { traceId, agentSpanId })
+        recordSessionSpan(sessionId, agentSpanId)
+        await queuePendingSubagent(sessionId, { traceId, agentSpanId })
 
         // console.log("[langfuse] subagent call detected:", subagentType, "toolSpanId:", spanId, "agentSpanId:", agentSpanId)
       }
@@ -2236,14 +2551,14 @@ export const LangfusePlugin: Plugin = async (ctx) => {
         }
       }
 
-      const spanId = toolSpanIds.get(input.callID)
+      const callInfo = toolCallInfos.get(input.callID)
+      const spanId = callInfo?.spanId ?? toolSpanIds.get(input.callID)
       if (!spanId) return
 
-      const traceId = sessionToTrace.get(input.sessionID) || currentTraceId
+      const traceId = callInfo?.traceId || sessionToTrace.get(input.sessionID) || currentTraceId
       if (!traceId) return
 
       const isSkill = input.tool === "skill"
-      const level = output.output === null ? "ERROR" : "DEFAULT"
 
       // 如果是 skill 工具，读取原始 SKILL.md
       let skillYamlInfo: Record<string, any> | undefined
@@ -2264,19 +2579,27 @@ export const LangfusePlugin: Plugin = async (ctx) => {
       const endTime = new Date()
 
       const toolDef = allToolDefs.get(input.tool)
+      const cachedResult = toolResultSnapshots.get(input.callID)
+      const effectiveOutput =
+        (output.output === null || output.output === undefined) && cachedResult?.output != null
+          ? cachedResult.output
+          : output.output
+      const effectiveTitle = output.title ?? cachedResult?.title
+      const effectiveMetadata = output.metadata ?? cachedResult?.metadata
+      const spanOutput = toSpanOutput(effectiveOutput)
 
       const spanUpdates: Partial<SpanData> = {
-        output: output.output === null ? null : String(output.output).slice(0, 10000),
+        ...(spanOutput !== undefined ? { output: spanOutput } : {}),
         endTime: endTime.toISOString(),
-        level,
+        level: effectiveOutput === null ? "ERROR" : "DEFAULT",
         metadata: {
           spanKind: "TOOL",
           nodeType: isSkill ? "skill" : "tool",
           tags: OBSERVATION_TAGS,
           output: {
-            title: output.title,
-            output: output.output,
-            metadata: output.metadata,
+            title: effectiveTitle,
+            output: effectiveOutput,
+            metadata: effectiveMetadata,
             ...(skillYamlInfo && { yaml: skillYamlInfo }),
           },
           input: {
@@ -2299,8 +2622,10 @@ export const LangfusePlugin: Plugin = async (ctx) => {
       updateSpanInBatch(traceId, spanId, spanUpdates)
       await updateSpanImmediately(traceId, spanId, spanUpdates)
 
-      if (!isSkill) {
+      if (!isSkill && effectiveOutput !== null && effectiveOutput !== undefined) {
         toolSpanIds.delete(input.callID)
+        toolCallInfos.delete(input.callID)
+        toolResultSnapshots.delete(input.callID)
       }
     },
 
@@ -2320,12 +2645,7 @@ export const LangfusePlugin: Plugin = async (ctx) => {
         output: output.text,
         metadata: {
           spanKind: "LLM",
-          model: {
-            name: g.modelName,
-            provider: g.modelName.split("/")[0],
-            id: g.modelName.split("/")[1],
-            parameters: g.modelParameters,
-          },
+          model: buildLLMModelMetadata(g),
           input: g.input,
           output: { text: output.text },
           tags: OBSERVATION_TAGS,
@@ -2368,7 +2688,9 @@ export const LangfusePlugin: Plugin = async (ctx) => {
               currentTraceId = inheritedTraceId
             }
             if (pending?.agentSpanId) {
-              sessionToAgentSpan.set(sid, pending.agentSpanId)
+              await attachSubagentSession(sid, pending.traceId, pending.agentSpanId)
+            } else {
+              rememberPendingSubagentSession(parentId, sid)
             }
             // console.log("[langfuse] subagent session created:", sid, "parent:", parentId, "using trace:", inheritedTraceId)
           }
@@ -2379,6 +2701,22 @@ export const LangfusePlugin: Plugin = async (ctx) => {
         const part = evt.properties.part
         const sessionId = part.sessionID || currentSessionId
         if (!sessionId) return
+
+        if (part.type === "tool" && part.callID && part.state?.status === "completed" && hasOwn(part.state, "output")) {
+          const snapshot = {
+            output: part.state.output,
+            metadata: part.metadata,
+            title: part.title,
+          }
+          toolResultSnapshots.set(part.callID, snapshot)
+
+          await updateToolSpanOutputFromSnapshot(
+            part.callID,
+            sessionToTrace.get(sessionId) || currentTraceId,
+            new Date(),
+            snapshot,
+          )
+        }
 
         const g = getActiveGenerationForPart(sessionId, part)
 
@@ -2422,17 +2760,25 @@ export const LangfusePlugin: Plugin = async (ctx) => {
               })
             }
           }
-          if (part.type === "tool" && part.state?.status === "completed" && part.state?.output) {
-            g.parts.push(`Tool Result: ${part.state.output?.substring(0, 1000) || ""}`)
+          if (part.type === "tool" && part.state?.status === "completed" && hasOwn(part.state, "output")) {
+            const resultText = part.state.output === undefined ? "" : stringifyToolOutput(part.state.output)
             if (!g.toolResults) g.toolResults = []
-            g.toolResults.push({
+            const toolCallId = part.callID || ""
+            const existingToolResult = g.toolResults.find((tr) => tr.toolCallId === toolCallId && toolCallId)
+            const toolResult = {
               toolCallId: part.callID || "",
               name: part.tool || "",
-              output: part.state.output || "",
+              output: resultText,
               metadata: part.metadata,
               index: g.toolCalls.findIndex((tc) => tc.toolCallId === (part.callID || "")),
               args: g.toolCalls.find((tc) => tc.toolCallId === (part.callID || ""))?.args || {},
-            })
+            }
+            if (existingToolResult) {
+              Object.assign(existingToolResult, toolResult)
+            } else {
+              g.parts.push(`Tool Result: ${resultText.substring(0, 1000)}`)
+              g.toolResults.push(toolResult)
+            }
           }
         }
 
@@ -2441,10 +2787,16 @@ export const LangfusePlugin: Plugin = async (ctx) => {
             const popped = skillStack.pop()
             if (popped) {
               toolSpanIds.delete(popped.callID)
+              toolCallInfos.delete(popped.callID)
+              toolResultSnapshots.delete(popped.callID)
             }
           }
 
-          await finalizeGeneration(sessionId, g, { tokens: part.tokens, endTime: new Date(), finishReason: part.reason })
+          await finalizeGeneration(sessionId, g, {
+            tokens: part.tokens,
+            endTime: new Date(),
+            finishReason: part.reason,
+          })
         }
       }
 
@@ -2482,6 +2834,7 @@ export const LangfusePlugin: Plugin = async (ctx) => {
           }
 
           activeGenerations.delete(sessionId)
+          sessionSpanIds.delete(sessionId)
           llmInputs.delete(sessionId)
           systemPrompts.delete(sessionId)
           userInputs.delete(sessionId)
@@ -2523,6 +2876,9 @@ export const LangfusePlugin: Plugin = async (ctx) => {
         sessionIdMap.clear()
         activeGenerations.clear()
         toolSpanIds.clear()
+        toolCallInfos.clear()
+        toolResultSnapshots.clear()
+        sessionSpanIds.clear()
         allGenerations.length = 0
         allToolDefs.clear()
         messageCounter.clear()
@@ -2533,6 +2889,7 @@ export const LangfusePlugin: Plugin = async (ctx) => {
         trackedSessionIds.clear()
         sessionToAgentSpan.clear()
         pendingSubagents.clear()
+        pendingSubagentSessions.clear()
         uploadedTraceIds.delete(traceId)
         currentTraceId = null
         rootSessionId = null

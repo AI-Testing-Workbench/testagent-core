@@ -133,6 +133,9 @@ const LogLevelRef = Schema.Literals(["DEBUG", "INFO", "WARN", "ERROR"]).annotate
   description: "Log level",
 })
 
+// testagent_change
+const Percent = Schema.Number.check(Schema.isGreaterThan(0), Schema.isLessThanOrEqualTo(100))
+
 // The Effect Schema is the canonical source of truth. The `.zod` compatibility
 // surface is derived from it so plugin/SDK Zod consumers keep working without
 // a parallel hand-maintained Zod definition.
@@ -223,6 +226,21 @@ export const Info = Schema.Struct({
   small_model: Schema.optional(ConfigModelID).annotate({
     description: "Small model to use for tasks like title generation in the format of provider/model",
   }),
+  // testagent_change start
+  subagent_model: Schema.optional(Schema.NullOr(ConfigModelID)).annotate({
+    description:
+      "Default model for task-tool subagents in the format of provider/model. If unset or unavailable, subagents inherit the calling agent model.",
+  }),
+  subagent_variant: Schema.optional(Schema.NullOr(Schema.String)).annotate({
+    description: "Default model variant for task-tool subagents when subagent_model is configured.",
+  }),
+  subagent_variant_overrides: Schema.optional(
+    Schema.NullOr(Schema.Record(Schema.String, Schema.NullOr(Schema.String))),
+  ).annotate({
+    description:
+      "Model-specific variant overrides for task-tool subagents, keyed by provider/model. Valid overrides take precedence over saved, agent-specific, and inherited variants.",
+  }),
+  // testagent_change end
   default_agent: Schema.optional(Schema.String).annotate({
     description:
       "Default agent to use when none is specified. Must be a primary agent. Falls back to 'build' if not set or if the specified agent is invalid.",
@@ -311,6 +329,12 @@ export const Info = Schema.Struct({
       auto: Schema.optional(Schema.Boolean).annotate({
         description: "Enable automatic compaction when context is full (default: true)",
       }),
+      // testagent_change start
+      threshold_percent: Schema.optional(Schema.NullOr(Percent)).annotate({
+        description:
+          "Percentage of the model input/context window that triggers automatic compaction. The reserved safety buffer still applies if it would compact sooner.",
+      }),
+      // testagent_change end
       prune: Schema.optional(Schema.Boolean).annotate({
         description: "Enable pruning of old tool outputs (default: true)",
       }),

@@ -54,6 +54,9 @@ import { Worktree } from "@/worktree"
 import { WorktreeDiff } from "@/testagent/review/worktree-diff"
 import { Workspace } from "@/control-plane/workspace"
 import { CorsConfig, isAllowedCorsOrigin, type CorsOptions } from "@/server/cors"
+import * as Log from "@opencode-ai/core/util/log"
+
+const serverLog = Log.create({ service: "server" })
 import { serveUIEffect } from "@/server/shared/ui"
 import { ServerAuth } from "@/server/auth"
 import { InstanceHttpApi, RootHttpApi } from "./api"
@@ -175,7 +178,9 @@ const uiRoute = HttpRouter.use((router) =>
 ).pipe(Layer.provide(authOnlyRouterLayer))
 
 export function createRoutes(corsOptions?: CorsOptions) {
-  return Layer.mergeAll(rootApiRoutes, eventApiRoutes, instanceRoutes, docRoute, uiRoute).pipe(
+  const t0 = performance.now()
+
+  const result = Layer.mergeAll(rootApiRoutes, eventApiRoutes, instanceRoutes, docRoute, uiRoute).pipe(
     Layer.provide([
       errorLayer,
       compressionLayer,
@@ -231,6 +236,11 @@ export function createRoutes(corsOptions?: CorsOptions) {
     Layer.provideMerge(InstanceLayer.layer),
     Layer.provideMerge(Observability.layer),
   )
+
+  const t1 = performance.now()
+  serverLog.info("createRoutes done", { duration: `${Math.round((t1 - t0) * 100) / 100}ms` })
+
+  return result
 }
 
 export const routes = createRoutes()

@@ -14,9 +14,11 @@ import type { CorsOptions } from "./cors"
 // @ts-ignore This global is needed to prevent ai-sdk from logging warnings to stdout https://github.com/vercel/ai/blob/2dc67e0ef538307f21368db32d5a12345d98831b/packages/ai/src/logger/log-warnings.ts#L85
 globalThis.AI_SDK_LOG_WARNINGS = false
 
+const t0 = performance.now()
 initProjectors()
-
+const t1 = performance.now()
 const log = Log.create({ service: "server" })
+log.info("initProjectors done", { duration: `${Math.round((t1 - t0) * 100) / 100}ms` })
 
 export type Listener = {
   hostname: string
@@ -58,6 +60,7 @@ export let url: URL
 
 export async function listen(opts: ListenOptions): Promise<Listener> {
   log.info("server backend", { "opencode.server.runtime": HttpApiServer.name })
+  const listenStart = performance.now()
 
   const buildLayer = (port: number) =>
     HttpRouter.serve(ExperimentalHttpApiServer.createRoutes(opts), {
@@ -77,13 +80,19 @@ export async function listen(opts: ListenOptions): Promise<Listener> {
 
   const start = async (port: number) => {
     const scope = Scope.makeUnsafe()
+    const buildStart = performance.now()
     try {
       const layer = buildLayer(port) as Layer.Layer<
         HttpServer.HttpServer | WebSocketTracker.Service | HttpApiServer.Service,
         unknown,
         never
       >
+      const buildLayersDone = performance.now()
+      log.info("service layer composition done", { port, duration: `${Math.round((buildLayersDone - buildStart) * 100) / 100}ms` })
+
       const ctx = await Effect.runPromise(Layer.buildWithMemoMap(layer, Layer.makeMemoMapUnsafe(), scope))
+      const buildDone = performance.now()
+      log.info("all service layers built", { port, duration: `${Math.round((buildDone - buildStart) * 100) / 100}ms` })
       return { scope, ctx }
     } catch (err) {
       await Effect.runPromise(Scope.close(scope, Exit.void)).catch(() => undefined)
@@ -121,6 +130,13 @@ export async function listen(opts: ListenOptions): Promise<Listener> {
   } else if (opts.mdns) {
     log.warn("mDNS enabled but hostname is loopback; skipping mDNS publish")
   }
+
+  const listenDone = performance.now()
+  log.info("server listening", {
+    url: innerUrl.href,
+    port,
+    duration: `${Math.round((listenDone - listenStart) * 100) / 100}ms`,
+  })
 
   let forceStopPromise: Promise<void> | undefined
   let stopPromise: Promise<void> | undefined

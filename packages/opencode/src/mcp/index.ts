@@ -240,6 +240,12 @@ export interface Interface {
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/MCP") {}
 
+function notifyVSCode(type: "info" | "error", message: string) {
+  // Output JSON to stderr with special prefix for VS Code extension to parse
+  const notification = JSON.stringify({ type: "plugin-notification", level: type, message })
+  console.error(`[TESTAGENT_NOTIFICATION] ${notification}`)
+}
+
 export const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
@@ -420,6 +426,11 @@ export const layer = Layer.effect(
         })),
         Effect.catch((error): Effect.Effect<{ client: MCPClient | undefined; status: Status }> => {
           const msg = error instanceof Error ? error.message : String(error)
+          // 检查是否是 npm 网络/源错误，给出针对性提示
+          const isNpmRegistryError = /FETCH_ERROR|invalid json response|Unexpected token|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|fetch failed|ERR_NETWORK|socket hung up/i.test(msg)
+          if(isNpmRegistryError && key=='testagent-playwright'){
+            notifyVSCode("error", "npm 源访问失败，请手动修改npm 源或前往【通用设置】修改")
+          }
           log.error("local mcp startup failed", { key, command: mcp.command, cwd, error: msg })
           return Effect.succeed({ client: undefined, status: { status: "failed", error: msg } })
         }),

@@ -539,13 +539,13 @@ test("default permission includes doom_loop and external_directory as ask", asyn
   })
 })
 
-test("webfetch is allowed by default", async () => {
+test("webfetch is denied by default", async () => {
   await using tmp = await tmpdir()
   await WithInstance.provide({
     directory: tmp.path,
     fn: async () => {
       const build = await load(tmp.path, (svc) => svc.get("build"))
-      expect(evalPerm(build, "webfetch")).toBe("allow")
+      expect(evalPerm(build, "webfetch")).toBe("deny")
     },
   })
 })
