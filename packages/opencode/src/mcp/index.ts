@@ -112,7 +112,7 @@ function isMcpConfigured(entry: McpEntry): entry is ConfigMCP.Info {
   return typeof entry === "object" && entry !== null && "type" in entry
 }
 
-const sanitize = (s: string) => s.replace(/[^a-zA-Z0-9_-]/g, "_")
+const sanitize = (s: string) => s.replace(/[\s\x00-\x1f\x7f\\/<>:"|?*.`'$@#%^&\(\)\[\]\{\},;!=+]+/g, "_")
 
 function remoteURL(key: string, value: string) {
   if (URL.canParse(value)) return new URL(value)
