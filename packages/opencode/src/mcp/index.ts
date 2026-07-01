@@ -313,7 +313,7 @@ export const layer = Layer.effect(
       const userData = User.get()
       let uid = userData.id;
       let token = userData.token;
-      const headers = uid && token ? { ...mcp.headers, "sap_id": uid, "yst_id_token": token } : mcp.headers
+      const headers = { ...(uid && token ? { ...mcp.headers, "sap_id": uid, "yst_id_token": token } : mcp.headers), "User-Agent": "testagent" }
 
       const transports: Array<{ name: string; transport: TransportWithAuth }> = [
         {
@@ -785,7 +785,7 @@ export const layer = Layer.effect(
         auth,
       )
 
-      const transport = new StreamableHTTPClientTransport(url, { authProvider })
+      const transport = new StreamableHTTPClientTransport(url, { authProvider, requestInit: { headers: { "User-Agent": "testagent" } } })
 
       return yield* Effect.tryPromise({
         try: () => {
