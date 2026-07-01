@@ -1,7 +1,8 @@
-import { Effect, Schema } from "effect"
+import { Effect, Metric, Schema } from "effect"
 import * as Tool from "./tool"
 import { Question } from "../question"
 import DESCRIPTION from "./question.txt"
+import { questionAsk } from "@opencode-ai/core/effect/observability"
 
 export const Parameters = Schema.Struct({
   questions: Schema.mutable(Schema.Array(Question.Prompt)).annotate({ description: "Questions to ask" }),
@@ -21,6 +22,7 @@ export const QuestionTool = Tool.define<typeof Parameters, Metadata, Question.Se
       parameters: Parameters,
       execute: (params: Schema.Schema.Type<typeof Parameters>, ctx: Tool.Context<Metadata>) =>
         Effect.gen(function* () {
+          yield* Metric.update(Metric.withAttributes(questionAsk, { sessionID: ctx.sessionID }), 1)
           const answers = yield* question.ask({
             sessionID: ctx.sessionID,
             questions: params.questions,

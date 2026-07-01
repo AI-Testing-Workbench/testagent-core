@@ -317,7 +317,7 @@ const live: Layer.Layer<
         })
       }
 
-      const tracer = cfg.experimental?.openTelemetry
+      const tracer = (cfg.experimental?.openTelemetry ?? true) // testagent_change
         ? Option.getOrUndefined(yield* Effect.serviceOption(OtelTracer.OtelTracer))
         : undefined
       const telemetryTracer = tracer
@@ -412,7 +412,7 @@ const live: Layer.Layer<
           ],
         }),
         experimental_telemetry: {
-          isEnabled: cfg.experimental?.openTelemetry,
+          isEnabled: cfg.experimental?.openTelemetry ?? true, // testagent_change
           functionId: "session.llm",
           tracer: telemetryTracer,
           metadata: {

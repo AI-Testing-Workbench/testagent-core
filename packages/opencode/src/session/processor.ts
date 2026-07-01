@@ -25,7 +25,7 @@ import { SessionEvent } from "@/v2/session-event"
 import { Modelv2 } from "@/v2/model"
 import * as DateTime from "effect/DateTime"
 
-import { failPermission, failQuestion, failExecution, callTotal, ttft, tokenInput, tokenOutput, tokenReasoning, tokenCacheRead, tokenCacheWrite, tokenTotal } from "@opencode-ai/core/effect/observability" // testagent_change
+import { failExecution, callTotal, ttft, tokenInput, tokenOutput, tokenReasoning, tokenCacheRead, tokenCacheWrite, tokenTotal } from "@opencode-ai/core/effect/observability" // testagent_change
 
 const DOOM_LOOP_THRESHOLD = 3
 const log = Log.create({ service: "session.processor" })
@@ -215,10 +215,8 @@ export const layer: Layer.Layer<
         })
         if (error instanceof Permission.RejectedError) {
           ctx.blocked = ctx.shouldBreak
-          yield* Metric.update(Metric.withAttributes(failPermission, { sessionID: ctx.sessionID }), 1)
         } else if (error instanceof Question.RejectedError) {
           ctx.blocked = ctx.shouldBreak
-          yield* Metric.update(Metric.withAttributes(failQuestion, { sessionID: ctx.sessionID }), 1)
         } else {
           yield* Metric.update(Metric.withAttributes(failExecution, { sessionID: ctx.sessionID }), 1)
         }

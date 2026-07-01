@@ -7,7 +7,7 @@ import { InstallationChannel, InstallationVersion } from "../installation/versio
 import { ensureProcessMetadata } from "../util/opencode-process"
 
 const base = "http://localhost:4318"
-export const enabled = !!base
+export const enabled = true
 const processID = crypto.randomUUID()
 
 const headers = Flag.OTEL_EXPORTER_OTLP_HEADERS
@@ -154,13 +154,6 @@ export function setUser(id: string, name: string) {
   userID = id
   userName = name
 }
-
-export const failPermission = Metric.counter("tool.fail.permission", {
-  description: "Tool call failures due to permission rejection",
-})
-export const failQuestion = Metric.counter("tool.fail.question", {
-  description: "Tool call failures due to question rejection",
-})
 export const failExecution = Metric.counter("tool.fail.execution", {
   description: "Tool call failures due to execution error",
 })
@@ -179,11 +172,13 @@ export const llmRequest = Metric.counter("session.llm.request", {
 export const sessionCompacted = Metric.counter("session.compacted", {
   description: "Total of sessions compacted",
 })
+export const questionAsk = Metric.counter("tool.question.ask", {
+  description: "Total question tool calls",
+})
 export const taskCall = Metric.counter("tool.task.call", {
   description: "Total task tool calls",
 })
-export const ttft = Metric.histogram("llm.ttft", {
-  boundaries: [50, 100, 200, 500, 1000, 2000, 5000, 10000, 30000],
+export const ttft = Metric.gauge("session.llm.ttft", {
   description: "Time to first token (ms)",
 })
 export const tokenInput = Metric.counter("session.token.input", {
