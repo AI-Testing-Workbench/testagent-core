@@ -90,11 +90,11 @@ export const User = {
   set(info: UserInfo) {
     log.debug("set", { user: info })
     override = info
-    Observability.setUser(info.id ?? "", info.name ?? "")
+    Observability.setUser(info.userId ?? "", info.userName ?? "", info.pathName)
   },
 }
 
 const initial = User.get()
-if (initial.id || initial.name) {
-  Observability.setUser(initial.id ?? "", initial.name ?? "")
+if (initial.userId || initial.userName) {
+  Observability.setUser(initial.userId ?? "", initial.userName ?? "", initial.pathName)
 }

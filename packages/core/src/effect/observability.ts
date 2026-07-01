@@ -38,19 +38,30 @@ export function resource(): { serviceName: string; serviceVersion: string; attri
       return {}
     }
   })()
+  const pathPart = userPathName ? userPathName.split("/") : []
 
   return {
-    serviceName: "opencode",
+    serviceName: "testagent",
     serviceVersion: InstallationVersion,
     attributes: {
       ...attributes,
       "deployment.environment.name": InstallationChannel,
       "user.id": userID,
       "user.name": userName,
-      "opencode.client": Flag.OPENCODE_CLIENT,
-      "opencode.process_role": processMetadata.processRole,
-      "opencode.run_id": processMetadata.runID,
+      "testagent.client": Flag.OPENCODE_CLIENT,
+      "testagent.process_role": processMetadata.processRole,
+      "testagent.run_id": processMetadata.runID,
       "service.instance.id": processID,
+      ...(pathPart.length > 0 ? {
+        "user.path_name": userPathName,
+        "user.org.enterprise": pathPart[0] || "",
+        "user.org.institution": pathPart[1] || "",
+        "user.org.department": pathPart[2] || "",
+        "user.org.center": pathPart[3] || "",
+        "user.org.team": pathPart[4] || "",
+        "user.org.room": pathPart[5] || "",
+        "user.org.group": pathPart[6] || "",
+      } : {}),
     },
   }
 }
@@ -149,10 +160,12 @@ export const layer = !base
 // testagent_change start
 let userID = ""
 let userName = ""
+let userPathName = ""
 
-export function setUser(id: string, name: string) {
+export function setUser(id: string, name: string, pathName?: string) {
   userID = id
   userName = name
+  userPathName = pathName ?? ""
 }
 export const failExecution = Metric.counter("tool.fail.execution", {
   description: "Tool call failures due to execution error",
