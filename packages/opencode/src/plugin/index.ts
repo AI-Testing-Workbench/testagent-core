@@ -196,27 +196,36 @@ export const layer = Layer.effect(
           },
           // @ts-expect-error
           $: typeof Bun === "undefined" ? undefined : Bun.$,
+          // testagent_change start
           metric: (name, value, attributes) => {
             bridge.fork(
               Metric.update(
-                Metric.withAttributes(Metric.counter(name), attributes ?? {}),
+                Metric.withAttributes(Metric.counter(name), { ...attributes, "data_stream.dataset": "plugins" }),
                 value,
               ),
             )
           },
           log: (level, message, data) => {
-            const logger = Log.create({ service: "log-plugin" })
             bridge.fork(
-              Effect.sync(() => {
+              Effect.gen(function* () {
                 switch (level) {
-                  case "debug": return logger.debug(message, data)
-                  case "info": return logger.info(message, data)
-                  case "warn": return logger.warn(message, data)
-                  case "error": return logger.error(message, data)
+                  case "debug":
+                    yield* Effect.logDebug(message).pipe(Effect.annotateLogs({ ...data, "data_stream.dataset": "plugins" }))
+                    break
+                  case "info":
+                    yield* Effect.logInfo(message).pipe(Effect.annotateLogs({ ...data, "data_stream.dataset": "plugins" }))
+                    break
+                  case "warn":
+                    yield* Effect.logWarning(message).pipe(Effect.annotateLogs({ ...data, "data_stream.dataset": "plugins" }))
+                    break
+                  case "error":
+                    yield* Effect.logError(message).pipe(Effect.annotateLogs({ ...data, "data_stream.dataset": "plugins" }))
+                    break
                 }
               }),
             )
           },
+          // testagent_change end
         }
 
         for (const plugin of INTERNAL_PLUGINS) {
