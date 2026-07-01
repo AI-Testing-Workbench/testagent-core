@@ -16,7 +16,7 @@ import { Session } from "@/session/session"
 import { NamedError } from "@opencode-ai/core/util/error"
 import { LangfusePlugin } from "./langfuse" // testagent_change
 import { MemoryPlugin } from "./testagent-memory/index.js" // testagent_change
-import { Effect, Layer, Context, Queue, Stream } from "effect"
+import { Effect, Layer, Context, Queue, Stream, Metric } from "effect"
 import { EffectBridge } from "@/effect/bridge"
 import { InstanceState } from "@/effect/instance-state"
 import { errorMessage } from "@/util/error"
@@ -191,6 +191,27 @@ export const layer = Layer.effect(
           },
           // @ts-expect-error
           $: typeof Bun === "undefined" ? undefined : Bun.$,
+          metric: (name, value, attributes) => {
+            bridge.fork(
+              Metric.update(
+                Metric.withAttributes(Metric.counter(name), attributes ?? {}),
+                value,
+              ),
+            )
+          },
+          log: (level, message, data) => {
+            const logger = Log.create({ service: "log-plugin" })
+            bridge.fork(
+              Effect.sync(() => {
+                switch (level) {
+                  case "debug": return logger.debug(message, data)
+                  case "info": return logger.info(message, data)
+                  case "warn": return logger.warn(message, data)
+                  case "error": return logger.error(message, data)
+                }
+              }),
+            )
+          },
         }
 
         for (const plugin of INTERNAL_PLUGINS) {
