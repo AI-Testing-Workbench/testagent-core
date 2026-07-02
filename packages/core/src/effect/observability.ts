@@ -48,7 +48,7 @@ export function resource(): { serviceName: string; serviceVersion: string; attri
       "deployment.environment.name": InstallationChannel,
       "user.id": userID,
       "user.name": userName,
-      "testagent.client": process.env["KILO_CLIENT"] === "vscode" || process.env["KILOCODE_FEATURE"] === "vscode-extension" || process.env["KILO_PLATFORM"] === "vscode" ? "插件" : "cli",
+      "testagent.client": process.env["KILO_CLIENT"] === "tscode" || process.env["KILOCODE_FEATURE"] === "tscode-extension" || process.env["KILO_PLATFORM"] === "tscode" ? "tscode" : "cli",
       "testagent.process_role": processMetadata.processRole,
       "testagent.run_id": processMetadata.runID,
       "service.instance.id": processID,
