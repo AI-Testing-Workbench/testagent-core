@@ -1,0 +1,57 @@
+packages/opencode/src/tool/shell.ts
+  s_279ae775b22a65::t_0c431cf2350f5a 29-32
+  s_36d61e37b7614e::t_60c81caa393b6d 85,88
+  s_279ae775b22a65::t_93ab1569b59df3 79-82
+  s_7eaac10bbc91e8::t_ce09643beb15f3 87,448
+  s_279ae775b22a65::t_bb0832d1889c4b 33
+  s_5f3bc0cd7ee6a7::t_276dd0bc7149d4 84
+  s_7eaac10bbc91e8::t_21f8d8387d7ac1 86
+  s_7eaac10bbc91e8::t_274c656afc11c1 83
+  s_7eaac10bbc91e8::t_5233f8cb3a54a7 445-447
+  s_7eaac10bbc91e8::t_7ec16474c964d0 449
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.9",
+  "base_commit_sha": "3cf8d66f8660795ebb10e8a93361cdb271a8e40b",
+  "prompts": {},
+  "humans": {
+    "h_cb3d00609d57f2": {
+      "author": "BoSeal <1135378788@qq.com>"
+    }
+  },
+  "sessions": {
+    "s_279ae775b22a65": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "c2dca0a6-365e-4d3b-9c70-edcf3c5843cf",
+        "model": "0828c39f871a262f"
+      },
+      "human_author": "BoSeal <1135378788@qq.com>"
+    },
+    "s_36d61e37b7614e": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "aed45d4b-c6e9-4734-ba4c-0d4b63721b75",
+        "model": "0828c39f871a262f"
+      },
+      "human_author": "BoSeal <1135378788@qq.com>"
+    },
+    "s_5f3bc0cd7ee6a7": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "42c76222-e36e-412b-861b-2a85419e1f85",
+        "model": "0828c39f871a262f"
+      },
+      "human_author": "BoSeal <1135378788@qq.com>"
+    },
+    "s_7eaac10bbc91e8": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "54845b61-fece-4864-ae18-68e46e308576",
+        "model": "0828c39f871a262f"
+      },
+      "human_author": "BoSeal <1135378788@qq.com>"
+    }
+  }
+}
