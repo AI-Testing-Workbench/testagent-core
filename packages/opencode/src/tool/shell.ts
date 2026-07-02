@@ -26,6 +26,11 @@ import { ChildProcessSpawner } from "effect/unstable/process/ChildProcessSpawner
 import { ShellPrompt, type Parameters } from "./shell/prompt"
 import { BashArity } from "@/permission/arity"
 
+// testagent_change start: Import for reading python config and checking file existence
+import { readFile, access } from "node:fs/promises"
+import { constants } from "node:fs"
+// testagent_change end
+
 export { Parameters } from "./shell/prompt"
 
 const MAX_METADATA_LENGTH = 30_000
@@ -70,6 +75,16 @@ const CMD_FILES = new Set([
 ])
 const FLAGS = new Set(["-destination", "-literalpath", "-path"])
 const SWITCHES = new Set(["-confirm", "-debug", "-force", "-nonewline", "-recurse", "-verbose", "-whatif"])
+
+// testagent_change start: Python interpreter info
+interface PythonInterpreterInfo {
+  path: string
+  version?: string
+  envName?: string
+  envPath?: string
+  timestamp: number
+}
+// testagent_change end
 
 type Part = {
   type: string
@@ -328,7 +343,7 @@ function decodeWindowsShellOutput(buffer: Uint8Array): string {
   }
 }
 
-function shouldUseWindowsShellDecoding(shell: string): boolean {
+function shouldUseWindowsShellDecoding(): boolean {
   // testagent_change: Apply smart decoding to all shells on Windows
   // Git Bash and other POSIX shells can also output GBK-encoded text
   // when executing Windows-native commands like powershell.exe
@@ -405,6 +420,33 @@ function cmd(shell: string, command: string, cwd: string, env: NodeJS.ProcessEnv
     detached: process.platform !== "win32",
   })
 }
+// testagent_change start: Read Python interpreter config from .testagent directory
+const readPythonInterpreterConfig = Effect.fn("ShellTool.readPythonInterpreterConfig")(function* (
+  projectRoot: string,
+) {
+  const configPath = path.join(projectRoot, ".testagent", "python-interpreter.json")
+  
+  const result = yield* Effect.promise<PythonInterpreterInfo | null>(async () => {
+    try {
+      await access(configPath, constants.F_OK)
+      const content = await readFile(configPath, "utf-8")
+      const config: PythonInterpreterInfo = JSON.parse(content)
+      return config
+    } catch {
+      return null
+    }
+  })
+  
+  if (result) {
+    yield* Effect.logInfo(`Python interpreter config loaded path="${result.path}" version="${result.version || 'unknown'}" envName="${result.envName || 'none'}"`)
+  } else {
+    yield* Effect.logDebug(`No Python interpreter config found configPath="${configPath}"`)
+  }
+  
+  return result
+})
+// testagent_change end
+
 const parser = lazy(async () => {
   const { Parser } = await import("web-tree-sitter")
   const { default: treeWasm } = await import("web-tree-sitter/tree-sitter.wasm" as string, {
@@ -441,10 +483,49 @@ export const ShellTool = Tool.define(
     const trunc = yield* Truncate.Service
     const plugin = yield* Plugin.Service
 
+    // testagent_change start: Add function to find project root with error handling
+    const findProjectRoot = Effect.fn("ShellTool.findProjectRoot")(function* (startDir: string) {
+      yield* Effect.logInfo(`findProjectRoot: starting search from startDir="${startDir}"`)
+      
+      let currentDir = startDir
+      const root = path.parse(currentDir).root
+      let depth = 0
+      
+      while (currentDir !== root) {
+        const testagentDir = path.join(currentDir, ".testagent")
+        
+        yield* Effect.logDebug(`findProjectRoot: checking directory currentDir="${currentDir}" testagentDir="${testagentDir}" depth=${depth}`)
+        
+        const exists = yield* fs.exists(testagentDir).pipe(Effect.orElseSucceed(() => false))
+        if (exists) {
+          yield* Effect.logDebug(`findProjectRoot: .testagent found, checking if directory testagentDir="${testagentDir}"`)
+          const isDir = yield* fs.isDir(testagentDir).pipe(Effect.orElseSucceed(() => false))
+          if (isDir) {
+            yield* Effect.logInfo(`findProjectRoot: project root found projectRoot="${currentDir}" depth=${depth}`)
+            return currentDir
+          }
+          yield* Effect.logDebug(`findProjectRoot: .testagent exists but is not a directory testagentDir="${testagentDir}"`)
+        }
+        
+        const parentDir = path.dirname(currentDir)
+        if (parentDir === currentDir) {
+          yield* Effect.logDebug(`findProjectRoot: reached filesystem root="${currentDir}"`)
+          break
+        }
+        currentDir = parentDir
+        depth++
+      }
+      
+      // If not found, return the start directory
+      yield* Effect.logInfo(`findProjectRoot: no project root found, returning start directory startDir="${startDir}" depth=${depth}`)
+      return startDir
+    })
+    // testagent_change end
+
     const cygpath = Effect.fn("ShellTool.cygpath")(function* (shell: string, text: string) {
       const lines = yield* spawner
         .lines(ChildProcess.make(shell, ["-lc", 'cygpath -w -- "$1"', "_", text]))
-        .pipe(Effect.catch(() => Effect.succeed([] as string[])))
+        .pipe(Effect.orElseSucceed(() => [] as string[]))
       const file = lines[0]?.trim()
       if (!file) return
       return AppFileSystem.normalizePath(file)
@@ -492,7 +573,7 @@ export const ShellTool = Tool.define(
         if (cmd && (FILES.has(cmd) || (shellKind === "cmd" && CMD_FILES.has(cmd)))) {
           for (const arg of pathArgs(command, ps, shellKind === "cmd")) {
             const resolved = yield* argPath(arg, cwd, ps, shell)
-            yield* Effect.logInfo("resolved path", { arg, resolved })
+            yield* Effect.logInfo(`resolved path arg="${arg}" resolved="${resolved}"`)
             if (!resolved || containsPath(resolved, instance)) continue
             const dir = (yield* fs.isDir(resolved)) ? resolved : path.dirname(resolved)
             scan.dirs.add(dir)
@@ -514,18 +595,39 @@ export const ShellTool = Tool.define(
         { cwd, sessionID: ctx.sessionID, callID: ctx.callID },
         { env: {} },
       )
-      // testagent_change start - ensure UTF-8 encoding on Windows
-      const baseEnv = {
+      // testagent_change start: Set Python PATH and UTF-8 encoding
+      const baseEnv: NodeJS.ProcessEnv = {
         ...process.env,
         ...extra.env,
       }
+      
+      const projectRoot = yield* findProjectRoot(cwd)
+      const pythonConfig = yield* readPythonInterpreterConfig(projectRoot)
+      
+      if (pythonConfig) {
+        yield* Effect.logInfo(`Adding Python to PATH pythonPath="${pythonConfig.path}" envPath="${pythonConfig.envPath || 'none'}"`)
+        
+        const pythonDir = path.dirname(pythonConfig.path)
+        const currentPath = baseEnv["PATH"] || ""
+        
+        if (pythonConfig.envPath) {
+          const binDir = process.platform === "win32" 
+            ? path.join(pythonConfig.envPath, "Scripts")
+            : path.join(pythonConfig.envPath, "bin")
+          baseEnv["PATH"] = binDir + path.delimiter + pythonDir + path.delimiter + currentPath
+          baseEnv["VIRTUAL_ENV"] = pythonConfig.envPath
+        } else {
+          baseEnv["PATH"] = pythonDir + path.delimiter + currentPath
+        }
+        
+        baseEnv["PYTHONPATH"] = projectRoot + (baseEnv["PYTHONPATH"] ? path.delimiter + baseEnv["PYTHONPATH"] : "")
+      }
+      
       if (process.platform === "win32") {
         return {
           ...baseEnv,
           PYTHONIOENCODING: "utf-8",
           PYTHONUTF8: "1",
-          // Force cmd.exe to use UTF-8
-          // Note: This doesn't affect PowerShell which uses its own encoding settings
         }
       }
       // testagent_change end
@@ -544,6 +646,22 @@ export const ShellTool = Tool.define(
       },
       ctx: Tool.Context,
     ) {
+      // testagent_change start: Log command and environment before execution
+      yield* Effect.logInfo(`run: executing command="${input.command}" cwd="${input.cwd}" shell="${input.shell}" timeout=${input.timeout} background=${input.background}`)
+      
+      // Log Python-related environment variables if present
+      const pythonEnvVars = {
+        VIRTUAL_ENV: input.env.VIRTUAL_ENV,
+        PYTHONPATH: input.env.PYTHONPATH,
+        PYTHONIOENCODING: input.env.PYTHONIOENCODING,
+        PYTHONUTF8: input.env.PYTHONUTF8,
+      }
+      const hasPythonEnv = Object.values(pythonEnvVars).some(v => v !== undefined)
+      if (hasPythonEnv) {
+        yield* Effect.logInfo(`run: Python environment variables VIRTUAL_ENV="${pythonEnvVars.VIRTUAL_ENV || 'none'}" PYTHONPATH="${pythonEnvVars.PYTHONPATH || 'none'}" PYTHONIOENCODING="${pythonEnvVars.PYTHONIOENCODING || 'none'}" PYTHONUTF8="${pythonEnvVars.PYTHONUTF8 || 'none'}"`)
+      }
+      // testagent_change end
+      
       const limits = yield* trunc.limits()
       const keep = limits.maxBytes * 2
       let full = ""
@@ -567,7 +685,7 @@ export const ShellTool = Tool.define(
         Effect.gen(function* () {
           const handle = yield* spawner.spawn(cmd(input.shell, input.command, input.cwd, input.env))
           // testagent_change: Use custom decoding for Windows shells (cmd.exe and PowerShell) to handle GBK encoding
-          const useCustomDecoding = shouldUseWindowsShellDecoding(input.shell)
+          const useCustomDecoding = shouldUseWindowsShellDecoding()
 
           yield* Effect.forkScoped(
             Stream.runForEach(
@@ -710,7 +828,7 @@ export const ShellTool = Tool.define(
         const name = Shell.name(shell)
         const limits = yield* trunc.limits()
         const prompt = ShellPrompt.render(name, process.platform, limits)
-        yield* Effect.logInfo("shell tool using shell", { shell })
+        yield* Effect.logInfo(`shell tool using shell="${shell}"`)
 
         return {
           description: prompt.description,
@@ -726,6 +844,7 @@ export const ShellTool = Tool.define(
               }
               const timeout = params.timeout ?? (params.background ? BGR_TIMEOUT : DEFAULT_TIMEOUT)
               const ps = Shell.ps(shell)
+              
               yield* Effect.scoped(
                 Effect.gen(function* () {
                   const tree = yield* Effect.acquireRelease(parse(params.command, ps), (tree) =>
