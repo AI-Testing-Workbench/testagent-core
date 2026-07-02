@@ -499,8 +499,16 @@ export const layer = Layer.effect(
     const loadFile = Effect.fnUntraced(function* (filepath: string) {
       yield* Effect.logInfo("loading", { path: filepath })
       const text = yield* readConfigFile(filepath)
-      if (!text) return {} as Info
-      return yield* loadConfig(text, { path: filepath })
+      if (!text) {
+        yield* Effect.logInfo("file empty, skipping", { path: filepath })
+        return {} as Info
+      }
+      // testagent_change start - log raw and parsed config
+      yield* Effect.logInfo("raw config", text)
+      const data = yield* loadConfig(text, { path: filepath })
+      yield* Effect.logInfo("success parsed", data)
+      // testagent_change end
+      return data
     })
 
     const loadGlobal = Effect.fnUntraced(function* () {
@@ -859,6 +867,7 @@ export const layer = Layer.effect(
           result.compaction = { ...result.compaction, prune: false }
         }
 
+        yield* Effect.logInfo("final merged config loaded", { config: result }) // testagent_change
         return {
           config: result,
           directories,
