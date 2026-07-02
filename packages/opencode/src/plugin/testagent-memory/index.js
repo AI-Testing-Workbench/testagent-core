@@ -209,8 +209,11 @@ export const MemoryPlugin = async (params) => {
     const projectPath = directory || worktreeOrigin;
     const worktree = projectPath;
     log.info(`[prjPath]worktreeOrigin=${worktreeOrigin}, directory=${directory}`);
+    params.log?.("info", "MemoryPlugin initialized", { service: "offical-memory" })
+    params.metric?.("plugin.startup", 1, { service: "offical-memory" })
     // 等待配置加载完成
     await load(getOpencodeConfigHomeDir());
+    params.log?.("info", "memory config", { ...config(), service: "offical-memory" })
     // 如果插件未启用，直接返回空插件
     if (!config().enable) {
         log.debug("[MemoryPlugin] plugin is disabled, skipping initialization");

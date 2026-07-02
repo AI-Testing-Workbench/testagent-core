@@ -16,7 +16,7 @@ import { Session } from "@/session/session"
 import { NamedError } from "@opencode-ai/core/util/error"
 import { LangfusePlugin } from "./langfuse" // testagent_change
 import { MemoryPlugin } from "./testagent-memory/index.js" // testagent_change
-import { Effect, Layer, Context, Queue, Stream } from "effect"
+import { Effect, Layer, Context, Queue, Stream, Metric } from "effect"
 import { EffectBridge } from "@/effect/bridge"
 import { InstanceState } from "@/effect/instance-state"
 import { errorMessage } from "@/util/error"
@@ -163,7 +163,12 @@ export const layer = Layer.effect(
         const hooks: Hooks[] = []
         const bridge = yield* EffectBridge.make()
 
+        // Deduplicate plugin error messages across repeated state initializations
+        // to prevent the same error from rendering as multiple error cards.
+        const sentErrors = new Set<string>()
         function publishPluginError(message: string) {
+          if (sentErrors.has(message)) return
+          sentErrors.add(message)
           bridge.fork(bus.publish(Session.Event.Error, { error: new NamedError.Unknown({ message }).toObject() }))
         }
 
@@ -191,6 +196,36 @@ export const layer = Layer.effect(
           },
           // @ts-expect-error
           $: typeof Bun === "undefined" ? undefined : Bun.$,
+          // testagent_change start
+          metric: (name, value, attributes) => {
+            bridge.fork(
+              Metric.update(
+                Metric.withAttributes(Metric.counter(name), { ...attributes, "data_stream.dataset": "plugins" }),
+                value,
+              ),
+            )
+          },
+          log: (level, message, data) => {
+            bridge.fork(
+              Effect.gen(function* () {
+                switch (level) {
+                  case "debug":
+                    yield* Effect.logDebug(message).pipe(Effect.annotateLogs({ ...data, "data_stream.dataset": "plugins" }))
+                    break
+                  case "info":
+                    yield* Effect.logInfo(message).pipe(Effect.annotateLogs({ ...data, "data_stream.dataset": "plugins" }))
+                    break
+                  case "warn":
+                    yield* Effect.logWarning(message).pipe(Effect.annotateLogs({ ...data, "data_stream.dataset": "plugins" }))
+                    break
+                  case "error":
+                    yield* Effect.logError(message).pipe(Effect.annotateLogs({ ...data, "data_stream.dataset": "plugins" }))
+                    break
+                }
+              }),
+            )
+          },
+          // testagent_change end
         }
 
         for (const plugin of INTERNAL_PLUGINS) {
@@ -216,9 +251,12 @@ export const layer = Layer.effect(
         }
 
         // testagent_change start - track plugin loading results
+        const pluginFailed = new Map<string, string>()
         const pluginResults = {
           success: [] as string[],
-          failed: [] as { spec: string; error: string }[],
+          get failed() {
+            return Array.from(pluginFailed, ([spec, error]) => ({ spec, error }))
+          },
         }
         // testagent_change end
 
@@ -253,7 +291,9 @@ export const layer = Layer.effect(
               missing(candidate, _retry, message) {
                 log.warn("plugin has no server entrypoint", { path: candidate.plan.spec, message })
                 // testagent_change start - track missing plugin
-                pluginResults.failed.push({ spec: candidate.plan.spec, error: message })
+                if (!pluginFailed.has(candidate.plan.spec)) {
+                  pluginFailed.set(candidate.plan.spec, message)
+                }
                 // testagent_change end
               },
               error(candidate, _retry, stage, error, resolved) {
@@ -262,7 +302,9 @@ export const layer = Layer.effect(
                 const message = stage === "load" ? errorMessage(error) : errorMessage(cause)
 
                 // testagent_change start - track failed plugin
-                pluginResults.failed.push({ spec, error: message })
+                if (!pluginFailed.has(spec)) {
+                  pluginFailed.set(spec, message)
+                }
                 // testagent_change end
 
                 if (stage === "install") {

@@ -16,8 +16,9 @@ export function usable(input: { cfg: Config.Info; model: Provider.Model }) {
     : Math.max(0, context - ProviderTransform.maxOutputTokens(input.model))
 
   // testagent_change start - threshold_percent support
+  // threshold_percent only applies when auto compaction is enabled
   const percent = input.cfg.compaction?.threshold_percent
-  if (typeof percent === "number") {
+  if (input.cfg.compaction?.auto !== false && typeof percent === "number") {
     const win = input.model.limit.input || context
     const cap = Math.floor(win * (percent / 100))
     return Math.min(base, cap)
@@ -28,8 +29,11 @@ export function usable(input: { cfg: Config.Info; model: Provider.Model }) {
 }
 
 export function isOverflow(input: { cfg: Config.Info; tokens: MessageV2.Assistant["tokens"]; model: Provider.Model }) {
-  if (input.cfg.compaction?.auto === false) return false
   if (input.model.limit.context === 0) return false
+
+  // testagent_change start - force compaction support
+  if (input.cfg.compaction?.auto === false && !(input.cfg.compaction?.force ?? false)) return false
+  // testagent_change end
 
   const count =
     input.tokens.total || input.tokens.input + input.tokens.output + input.tokens.cache.read + input.tokens.cache.write

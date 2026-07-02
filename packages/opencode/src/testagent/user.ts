@@ -56,7 +56,7 @@ export const User = {
         log.debug("checking file", { file })
         if (fs.existsSync(file)) {
           const data = JSON.parse(fs.readFileSync(file, "utf8"))
-          if (data.userId && data.userName && data.sapId) {
+          if (data.userId && data.userName) {
             cachedFromFile = { 
               userId: data.userId, 
               userName: data.userName, 
