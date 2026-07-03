@@ -566,8 +566,8 @@ export const layer = Layer.effect(
         yield* fs
           .writeFileString(
             gitignore,
-            ["node_modules", "package.json", "package-lock.json", "bun.lock", ".gitignore"].join("\n"),
-          )
+            ["node_modules", "package.json", "package-lock.json", "bun.lock", "python-interpreter.json", ".gitignore"].join("\n"),
+          )     // testagent_change - add python-interpreter.json to .gitignore
           .pipe(
             Effect.catchIf(
               (e) => e.reason._tag === "PermissionDenied",
