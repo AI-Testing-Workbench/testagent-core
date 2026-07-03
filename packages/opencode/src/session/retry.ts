@@ -74,9 +74,14 @@ export function retryable(error: Err, provider: string) {
     const bodyJson = parseJSON(error.data.responseBody)
     const msgJson = parseJSON(error.data.message) ?? parseJSON(error.data.message?.replace(/^[^{]*/, ""))
     const body = (bodyJson ?? msgJson) as any
-    if (body && typeof body === "object" && typeof body.returnCode === "string" && body.returnCode.startsWith("LAI")) {
-      const errorMsg = typeof body.errorMsg === "string" ? body.errorMsg : error.data.message
-      return { message: `【极算】${errorMsg}` }
+    if (body && typeof body === "object") {
+      if (typeof body.returnCode === "string" && body.returnCode.startsWith("LAI")) {
+        const errorMsg = typeof body.errorMsg === "string" ? body.errorMsg : error.data.message
+        return { message: `【极算】${errorMsg}` }
+      } else if (body.error && typeof body.error === "object") {
+        const errorMsg = typeof body.error.message === "string" ? body.error.message : error.data.message
+        return { message: `【testllm】${errorMsg}` }
+      }
     }
     // testagent_change end
     // 5xx errors are transient server failures and should always be retried,
@@ -194,7 +199,7 @@ export function policy(opts: {
       if (!retry) return Cause.done(meta.attempt)
       return Effect.gen(function* () {
         // testagent_change start - 固定等待 20s
-        const isLailgw = retry.message.startsWith("【极算】")
+        const isLailgw = retry.message.startsWith("【极算】") || retry.message.startsWith("【testllm】")
         const wait = isLailgw ? LAI_DELAY : delay(meta.attempt, MessageV2.APIError.isInstance(error) ? error : undefined)
         // testagent_change end
         const now = yield* Clock.currentTimeMillis
