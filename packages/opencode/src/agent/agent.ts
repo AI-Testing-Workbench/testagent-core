@@ -1,4 +1,5 @@
 import { Config } from "@/config/config"
+import { ConfigAgent } from "@/config/agent" // testagent_change
 import z from "zod"
 import { Provider } from "@/provider/provider"
 import { ModelID, ProviderID } from "../provider/schema"
@@ -35,6 +36,7 @@ export const Info = Schema.Struct({
   description: Schema.optional(Schema.String),
   mode: Schema.Literals(["subagent", "primary", "all"]),
   native: Schema.optional(Schema.Boolean),
+  source: Schema.optional(Schema.Literals(["builtin", "project-json", "project-md", "global-json", "global-md"])), // testagent_change
   hidden: Schema.optional(Schema.Boolean),
   topP: Schema.optional(Schema.Finite),
   temperature: Schema.optional(Schema.Finite),
@@ -56,9 +58,9 @@ export const Info = Schema.Struct({
 export type Info = DeepMutable<Schema.Schema.Type<typeof Info>>
 
 export interface Interface {
-  readonly get: (agent: string) => Effect.Effect<Info>
-  readonly list: () => Effect.Effect<Info[]>
-  readonly defaultAgent: () => Effect.Effect<string>
+  readonly get: (agent: string) => Effect.Effect<Info, never, never>
+  readonly list: () => Effect.Effect<Info[], never, never>
+  readonly defaultAgent: () => Effect.Effect<string, never, never>
   readonly generate: (input: {
     description: string
     model?: { providerID: ProviderID; modelID: ModelID }
@@ -66,7 +68,7 @@ export interface Interface {
     identifier: string
     whenToUse: string
     systemPrompt: string
-  }>
+  }, never, never>
 }
 
 type State = Omit<Interface, "generate">
@@ -397,6 +399,38 @@ export const layer = Layer.effect(
 
         const list = Effect.fnUntraced(function* () {
           const cfg = yield* config.get()
+          // testagent_change start - determine source scope for each non-native agent
+          const projectCfg = yield* config.getProject().pipe(Effect.catch(() => Effect.succeed({ agent: {} } as typeof cfg)))
+          // Separate directories into project-level and global-level for .md detection
+          const dirs = yield* config.directories().pipe(Effect.catch(() => Effect.succeed([] as string[])))
+          const tdirs = yield* config.testagentDirectories().pipe(Effect.catch(() => Effect.succeed([] as string[])))
+          const allDirs = [...dirs, ...tdirs]
+          const wk = ctx.worktree  // worktree root = project boundary
+          const projMdNames = new Set<string>()
+          const globalMdNames = new Set<string>()
+          for (const d of allDirs) {
+            const isProject = wk && wk !== "/" ? d.startsWith(wk) : d.startsWith(ctx.directory)
+            const names = yield* Effect.promise(() => ConfigAgent.listMdAgentNames(d)).pipe(Effect.catch(() => Effect.succeed(new Set<string>())))
+            if (isProject) {
+              for (const n of names) projMdNames.add(n)
+            } else {
+              for (const n of names) globalMdNames.add(n)
+            }
+          }
+          for (const agent of Object.values(agents)) {
+            if (agent.native) {
+              agent.source = "builtin"
+            } else if (projMdNames.has(agent.name)) {
+              agent.source = "project-md"
+            } else if (globalMdNames.has(agent.name)) {
+              agent.source = "global-md"
+            } else if (projectCfg.agent?.[agent.name]) {
+              agent.source = "project-json"
+            } else {
+              agent.source = "global-json"
+            }
+          }
+          // testagent_change end
           return pipe(
             agents,
             values(),

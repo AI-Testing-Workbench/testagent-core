@@ -695,6 +695,130 @@
         ]
       }
     },
+    "/config/overlay": {
+      "get": {
+        "tags": ["config"],
+        "operationId": "config.overlay",
+        "parameters": [
+          {
+            "name": "directory",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Project config overlay",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConfigOverlayResponse"
+                }
+              }
+            }
+          }
+        },
+        "description": "Retrieve the raw project-level config overlay for scope-aware settings editing.",
+        "summary": "Get config overlay",
+        "x-codeSamples": [
+          {
+            "lang": "js",
+            "source": "import { createOpencodeClient } from \"@opencode-ai/sdk\n\nconst client = createOpencodeClient()\nawait client.config.overlay({\n  ...\n})"
+          }
+        ]
+      },
+      "patch": {
+        "tags": ["config"],
+        "operationId": "config.overlayUpdate",
+        "parameters": [
+          {
+            "name": "directory",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Effective configuration after patch",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Config"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BadRequestError"
+                }
+              }
+            }
+          }
+        },
+        "description": "Apply a minimal global or project config patch, including unset paths for reverting local overrides.",
+        "summary": "Patch config overlay",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "scope": {
+                    "type": "string",
+                    "enum": ["global", "project"]
+                  },
+                  "set": {
+                    "type": "object"
+                  },
+                  "unset": {
+                    "type": "array",
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "js",
+            "source": "import { createOpencodeClient } from \"@opencode-ai/sdk\n\nconst client = createOpencodeClient()\nawait client.config.overlayUpdate({\n  ...\n})"
+          }
+        ]
+      }
+    },
     "/config/providers": {
       "get": {
         "tags": ["config"],
@@ -13097,6 +13221,9 @@
               "reserved": {
                 "type": "integer",
                 "minimum": 0
+              },
+              "force": {
+                "type": "boolean"
               }
             },
             "additionalProperties": false
@@ -13130,6 +13257,16 @@
             "additionalProperties": false
           }
         },
+        "additionalProperties": false
+      },
+      "ConfigOverlayResponse": {
+        "type": "object",
+        "properties": {
+          "project": {
+            "$ref": "#/components/schemas/Config"
+          }
+        },
+        "required": ["project"],
         "additionalProperties": false
       },
       "Model": {
@@ -14069,6 +14206,10 @@
           },
           "native": {
             "type": "boolean"
+          },
+          "source": {
+            "type": "string",
+            "enum": ["builtin", "project-json", "project-md", "global-json", "global-md"]
           },
           "hidden": {
             "type": "boolean"

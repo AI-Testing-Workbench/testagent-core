@@ -406,6 +406,7 @@ type State = {
 export interface Interface {
   readonly get: () => Effect.Effect<Info>
   readonly getGlobal: () => Effect.Effect<Info>
+  readonly getProject: () => Effect.Effect<Info> // testagent_change
   readonly getConsoleState: () => Effect.Effect<ConsoleState>
   readonly update: (config: Info) => Effect.Effect<void>
   readonly updateGlobal: (config: Info) => Effect.Effect<{ info: Info; changed: boolean }>
@@ -700,7 +701,7 @@ export const layer = Layer.effect(
             for (const file of ["opencode.json", "opencode.jsonc"]) {
               const source = path.join(dir, file)
               log.debug(`loading config from ${source}`)
-              yield* merge(source, yield* loadFile(source))
+              merge(source, yield* loadFile(source))
               result.agent ??= {}
               result.mode ??= {}
               result.plugin ??= []
@@ -711,7 +712,7 @@ export const layer = Layer.effect(
             for (const file of ["testagent.json", "testagent.jsonc"]) {
               const source = path.join(dir, file)
               log.debug(`loading config from ${source}`)
-              yield* merge(source, yield* loadFile(source))
+              merge(source, yield* loadFile(source))
               result.agent ??= {}
               result.mode ??= {}
               result.plugin ??= []
@@ -903,6 +904,52 @@ export const layer = Layer.effect(
     })
     // testagent_change end
 
+    // testagent_change start - add getProject method for scope-aware config overlay
+    const getProject = Effect.fn("Config.getProject")(function* () {
+      const ctx = yield* InstanceState.context
+      let result: Info = {}
+      const merge = (source: string, next: Info) => {
+        result = mergeConfigConcatArrays(result, next)
+      }
+      if (!Flag.OPENCODE_DISABLE_PROJECT_CONFIG) {
+        for (const file of yield* ConfigPaths.files("opencode", ctx.directory, ctx.worktree).pipe(Effect.orDie)) {
+          merge(file, yield* loadFile(file))
+        }
+        for (const file of yield* ConfigPaths.files("testagent", ctx.directory, ctx.worktree).pipe(Effect.orDie)) {
+          merge(file, yield* loadFile(file))
+        }
+      }
+      const directories = yield* ConfigPaths.directories(ctx.directory, ctx.worktree)
+      const testagentDirs = yield* ConfigPaths.testagentDirectories(ctx.directory, ctx.worktree)
+      const wk = ctx.worktree
+      // Only load from project-level directories (not Global.Path.config / home dirs)
+      for (const dir of [...directories, ...testagentDirs]) {
+        const isProject = wk && wk !== "/" ? dir.startsWith(wk) : dir.startsWith(ctx.directory)
+        if (!isProject) continue
+        if (dir.endsWith(".opencode") || dir === Flag.OPENCODE_CONFIG_DIR) {
+          for (const file of ["opencode.json", "opencode.jsonc"]) {
+            const source = path.join(dir, file)
+            merge(source, yield* loadFile(source))
+          }
+        }
+        if (dir.endsWith(".testagent")) {
+          for (const file of ["testagent.json", "testagent.jsonc"]) {
+            const source = path.join(dir, file)
+            merge(source, yield* loadFile(source))
+          }
+        }
+      }
+      // Load .md agent files from project-level directories only
+      for (const dir of [...directories, ...testagentDirs]) {
+        const isProject = wk && wk !== "/" ? dir.startsWith(wk) : dir.startsWith(ctx.directory)
+        if (!isProject) continue
+        result.agent = mergeDeep(result.agent ?? {}, yield* Effect.promise(() => ConfigAgent.load(dir)).pipe(Effect.catch(() => Effect.succeed({} as Record<string, unknown>)))) as typeof result.agent
+        result.agent = mergeDeep(result.agent ?? {}, yield* Effect.promise(() => ConfigAgent.loadMode(dir)).pipe(Effect.catch(() => Effect.succeed({} as Record<string, unknown>)))) as typeof result.agent
+      }
+      return result
+    }) as () => Effect.Effect<Info>
+    // testagent_change end
+
     const getConsoleState = Effect.fn("Config.getConsoleState")(function* () {
       return yield* InstanceState.use(state, (s) => s.consoleState)
     })
@@ -915,7 +962,26 @@ export const layer = Layer.effect(
 
     const update = Effect.fn("Config.update")(function* (config: Info) {
       const dir = yield* InstanceState.directory
-      const file = path.join(dir, "config.json")
+      // testagent_change start - write to the correct project config file(s)
+      // Previously wrote to {dir}/config.json which is never loaded by the config loader.
+      // Now detect existing project config files or default to .testagent/testagent.json.
+      const candidates = [
+        path.join(dir, ".testagent", "testagent.json"),
+        path.join(dir, ".testagent", "testagent.jsonc"),
+        path.join(dir, ".opencode", "opencode.json"),
+        path.join(dir, ".opencode", "opencode.jsonc"),
+        path.join(dir, "testagent.json"),
+        path.join(dir, "testagent.jsonc"),
+        path.join(dir, "opencode.json"),
+        path.join(dir, "opencode.jsonc"),
+      ]
+      let file = candidates.find((f) => existsSync(f))
+      if (!file) {
+        // Default: create .testagent/testagent.json
+        file = path.join(dir, ".testagent", "testagent.json")
+        yield* fs.makeDirectory(path.join(dir, ".testagent")).pipe(Effect.ignore)
+      }
+      // testagent_change end
       const existing = yield* loadFile(file)
       yield* fs
         .writeFileString(file, JSON.stringify(mergeDeep(writable(existing), writable(config)), null, 2))
@@ -941,7 +1007,7 @@ export const layer = Layer.effect(
         const serialized = JSON.stringify(merged, null, 2)
         changed = serialized !== before
         if (changed) yield* fs.writeFileString(file, serialized).pipe(Effect.orDie)
-        next = merged
+        next = stripNulls(merged) as Info // testagent_change - strip null sentinels before returning
       } else {
         const updated = patchJsonc(before, patch)
         next = ConfigParse.effectSchema(Info, ConfigParse.jsonc(updated, file), file)
@@ -972,6 +1038,7 @@ export const layer = Layer.effect(
     return Service.of({
       get,
       getGlobal,
+      getProject, // testagent_change
       getConsoleState,
       update,
       updateGlobal,

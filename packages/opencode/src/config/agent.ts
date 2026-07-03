@@ -1,5 +1,6 @@
 export * as ConfigAgent from "./agent"
 
+import matter from "gray-matter"
 import { Exit, Schema, SchemaGetter } from "effect"
 import { Bus } from "@/bus"
 import { zod } from "@/util/effect-zod"
@@ -173,3 +174,88 @@ export async function loadMode(dir: string) {
   }
   return result
 }
+
+// testagent_change start - save agent config back to .md file
+const AGENT_MD_PATTERNS = ["/.opencode/agent/", "/.opencode/agents/", "/.testagent/agent/", "/.testagent/agents/", "/agent/", "/agents/"]
+
+/** Get the set of agent names that originate from .md files in the project. */
+export async function listMdAgentNames(dir: string): Promise<Set<string>> {
+  const names = new Set<string>()
+  for (const item of await Glob.scan("{agent,agents}/**/*.md", {
+    cwd: dir,
+    absolute: true,
+    dot: true,
+    symlink: true,
+  })) {
+    names.add(configEntryNameFromPath(item, AGENT_MD_PATTERNS))
+  }
+  return names
+}
+
+/** Find the .md file path for a given agent name, or undefined if not found. */
+export async function findMdFile(dir: string, name: string): Promise<string | undefined> {
+  for (const item of await Glob.scan("{agent,agents}/**/*.md", {
+    cwd: dir,
+    absolute: true,
+    dot: true,
+    symlink: true,
+  })) {
+    if (configEntryNameFromPath(item, AGENT_MD_PATTERNS) === name) return item
+  }
+  return undefined
+}
+
+/**
+ * Save an agent's config back to its .md file.
+ * `prompt` is written as the markdown body, all other fields go to YAML frontmatter.
+ */
+export async function save(dir: string, name: string, config: Info): Promise<void> {
+  const filePath = await findMdFile(dir, name)
+  if (!filePath) throw new NamedError.Unknown({ message: `Agent ${name} has no .md file in ${dir}` })
+
+  // Separate prompt from the rest — prompt goes to body, everything else to frontmatter
+  const { prompt, ...rest } = config as Record<string, unknown>
+  const frontmatter: Record<string, unknown> = {}
+
+  for (const [k, v] of Object.entries(rest)) {
+    if (k === "options" && v && typeof v === "object") {
+      // Flatten options back to top-level keys (reversing normalize())
+      for (const [ok, ov] of Object.entries(v as Record<string, unknown>)) {
+        if (!KNOWN_KEYS.has(ok)) frontmatter[ok] = ov
+      }
+    } else if (k === "name") {
+      // name is derived from filename, not written to frontmatter
+      continue
+    } else if (v !== null && v !== undefined) {
+      frontmatter[k] = v
+    }
+  }
+
+  const content = matter.stringify(String(prompt ?? ""), frontmatter)
+  const { default: fs } = await import("fs/promises")
+  await fs.writeFile(filePath, content)
+}
+
+/**
+ * Save an agent's config directly to a specific .md file path.
+ * Same as save() but skips the file lookup step.
+ */
+export async function saveToFile(filePath: string, config: Info): Promise<void> {
+  const { prompt, ...rest } = config as Record<string, unknown>
+  const frontmatter: Record<string, unknown> = {}
+  for (const [k, v] of Object.entries(rest)) {
+    if (k === "options" && v && typeof v === "object") {
+      for (const [ok, ov] of Object.entries(v as Record<string, unknown>)) {
+        if (!KNOWN_KEYS.has(ok)) frontmatter[ok] = ov
+      }
+    } else if (k === "name") {
+      continue
+    } else if (v !== null && v !== undefined) {
+      frontmatter[k] = v
+    }
+  }
+  const content = matter.stringify(String(prompt ?? ""), frontmatter)
+  const { default: fs } = await import("fs/promises")
+  await fs.writeFile(filePath, content)
+}
+// testagent_change end
