@@ -220,10 +220,10 @@ export const Info = Schema.Struct({
   enabled_providers: Schema.optional(Schema.mutable(Schema.Array(Schema.String))).annotate({
     description: "When set, ONLY these providers will be enabled. All other providers will be ignored",
   }),
-  model: Schema.optional(ConfigModelID).annotate({
+  model: Schema.optional(Schema.NullOr(ConfigModelID)).annotate({
     description: "Model to use in the format of provider/model, eg anthropic/claude-2",
   }),
-  small_model: Schema.optional(ConfigModelID).annotate({
+  small_model: Schema.optional(Schema.NullOr(ConfigModelID)).annotate({
     description: "Small model to use for tasks like title generation in the format of provider/model",
   }),
   // testagent_change start
@@ -241,7 +241,7 @@ export const Info = Schema.Struct({
       "Model-specific variant overrides for task-tool subagents, keyed by provider/model. Valid overrides take precedence over saved, agent-specific, and inherited variants.",
   }),
   // testagent_change end
-  default_agent: Schema.optional(Schema.String).annotate({
+  default_agent: Schema.optional(Schema.NullOr(Schema.String)).annotate({
     description:
       "Default agent to use when none is specified. Must be a primary agent. Falls back to 'build' if not set or if the specified agent is invalid.",
   }),
