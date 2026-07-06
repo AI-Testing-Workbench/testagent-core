@@ -566,8 +566,15 @@ export const layer = Layer.effect(
         yield* fs
           .writeFileString(
             gitignore,
-            ["node_modules", "package.json", "package-lock.json", "bun.lock", "python-interpreter.json", ".gitignore"].join("\n"),
-          )     // testagent_change - add python-interpreter.json to .gitignore
+            [
+              "node_modules",
+              "package.json",
+              "package-lock.json",
+              "bun.lock",
+              "python-interpreter.json",
+              ".gitignore",
+            ].join("\n"),
+          ) // testagent_change - add python-interpreter.json to .gitignore
           .pipe(
             Effect.catchIf(
               (e) => e.reason._tag === "PermissionDenied",
@@ -918,7 +925,14 @@ export const layer = Layer.effect(
       const file = path.join(dir, "config.json")
       const existing = yield* loadFile(file)
       yield* fs
-        .writeFileString(file, JSON.stringify(mergeDeep(writable(existing), writable(config)), null, 2))
+        .writeFileString(
+          file,
+          JSON.stringify(
+            stripNulls(mergeDeep(writable(existing), writable(config)) as Record<string, unknown>),
+            null,
+            2,
+          ),
+        )
         .pipe(Effect.orDie)
     })
 
@@ -937,7 +951,7 @@ export const layer = Layer.effect(
       let changed: boolean
       if (!file.endsWith(".jsonc")) {
         const existing = ConfigParse.effectSchema(Info, ConfigParse.jsonc(before, file), file)
-        const merged = mergeDeep(writable(existing), patch)
+        const merged = stripNulls(mergeDeep(writable(existing), patch) as Record<string, unknown>) as Info
         const serialized = JSON.stringify(merged, null, 2)
         changed = serialized !== before
         if (changed) yield* fs.writeFileString(file, serialized).pipe(Effect.orDie)
@@ -957,10 +971,13 @@ export const layer = Layer.effect(
       // An empty patch is used by clients after they mutate marketplace config files directly;
       // it must refresh cachedGlobal even though this update call itself did not change the file.
       if (changed || force) {
-        yield* Effect.logInfo(changed ? "config changed, invalidating cache" : "config refresh requested, invalidating cache", {
-          changed,
-          force,
-        })
+        yield* Effect.logInfo(
+          changed ? "config changed, invalidating cache" : "config refresh requested, invalidating cache",
+          {
+            changed,
+            force,
+          },
+        )
         yield* invalidate()
       } else {
         yield* Effect.logInfo("config unchanged, skipping cache invalidation", { changed, force })
