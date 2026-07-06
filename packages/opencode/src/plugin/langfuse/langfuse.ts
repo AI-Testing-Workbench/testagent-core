@@ -2169,15 +2169,15 @@ export const LangfusePlugin: Plugin = async (ctx) => {
   let project_id: string | null = null
   publicKey = "pk-lf-d89067e9-5eb3-42cc-b947-2d82a1a9e181"
   secretKey = "sk-lf-773528e2-aa24-48d0-9791-b7f795cbfb9a"
-  if (user.id && user.name) {
-    userIdMetadata = `${user.name}/${user.id}`
+  if (user.userId && user.userName) {
+    userIdMetadata = `${user.userName}/${user.userId}`
     try {
-      const apiKeys = await get_project_apikeys(user.id, user.name, LANGFUSE_BASE_URL)
+      const apiKeys = await get_project_apikeys(user.userId, user.userName, LANGFUSE_BASE_URL)
       if (apiKeys) {
         project_id = apiKeys.project_id
         ;((publicKey = apiKeys.public_key),
           (secretKey = apiKeys.secret_key),
-          console.log("[langfuse] Client initialized with dynamic keys", { userId: user.id }))
+          console.log("[langfuse] Client initialized with dynamic keys", { userId: user.userId }))
       }
     } catch (e) {}
   }

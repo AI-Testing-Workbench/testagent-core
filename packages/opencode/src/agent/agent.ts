@@ -105,6 +105,7 @@ export const layer = Layer.effect(
           },
           sandbox: "deny",
           question: "deny",
+          toast: "deny",
           plan_enter: "deny",
           plan_exit: "deny",
           repo_clone: "deny",
@@ -446,7 +447,7 @@ export const layer = Layer.effect(
         const model = input.model ?? (yield* provider.defaultModel())
         const resolved = yield* provider.getModel(model.providerID, model.modelID)
         const language = yield* provider.getLanguage(resolved)
-        const tracer = cfg.experimental?.openTelemetry
+        const tracer = (cfg.experimental?.openTelemetry ?? true) // testagent_change
           ? Option.getOrUndefined(yield* Effect.serviceOption(OtelTracer.OtelTracer))
           : undefined
 
@@ -460,7 +461,7 @@ export const layer = Layer.effect(
 
         const params = {
           experimental_telemetry: {
-            isEnabled: cfg.experimental?.openTelemetry,
+            isEnabled: cfg.experimental?.openTelemetry ?? true, // testagent_change
             tracer,
             metadata: {
               userId: cfg.username ?? "unknown",

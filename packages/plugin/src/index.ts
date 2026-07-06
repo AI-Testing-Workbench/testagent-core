@@ -64,6 +64,8 @@ export type PluginInput = {
   }
   serverUrl: URL
   $: BunShell
+  log: (level: "debug" | "info" | "warn" | "error", message: string, data?: Record<string, unknown>) => void // testagent_change
+  metric: (name: string, value: number, attributes?: Record<string, string>) => void // testagent_change
 }
 
 export type PluginOptions = Record<string, unknown>

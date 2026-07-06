@@ -590,9 +590,23 @@ export class User extends HeyApiClient {
     parameters?: {
       directory?: string
       workspace?: string
-      id?: string
-      name?: string
       token?: string
+      userId?: string
+      userName?: string
+      employeeId?: string
+      enterpriseId?: string
+      enterpriseName?: string
+      idToken?: string
+      joinedEnterpriseIds?: string
+      netEnv?: string
+      openId?: string
+      originPathId?: string
+      pathId?: string
+      pathName?: string
+      refreshToken?: string
+      rtcId?: string
+      sapId?: string
+      ystId?: string
     },
     options?: Options<never, ThrowOnError>,
   ) {
@@ -603,9 +617,23 @@ export class User extends HeyApiClient {
           args: [
             { in: "query", key: "directory" },
             { in: "query", key: "workspace" },
-            { in: "body", key: "id" },
-            { in: "body", key: "name" },
             { in: "body", key: "token" },
+            { in: "body", key: "userId" },
+            { in: "body", key: "userName" },
+            { in: "body", key: "employeeId" },
+            { in: "body", key: "enterpriseId" },
+            { in: "body", key: "enterpriseName" },
+            { in: "body", key: "idToken" },
+            { in: "body", key: "joinedEnterpriseIds" },
+            { in: "body", key: "netEnv" },
+            { in: "body", key: "openId" },
+            { in: "body", key: "originPathId" },
+            { in: "body", key: "pathId" },
+            { in: "body", key: "pathName" },
+            { in: "body", key: "refreshToken" },
+            { in: "body", key: "rtcId" },
+            { in: "body", key: "sapId" },
+            { in: "body", key: "ystId" },
           ],
         },
       ],
@@ -4057,6 +4085,7 @@ export class Session2 extends HeyApiClient {
       model?: string
       arguments?: string
       command?: string
+      goal?: string
       variant?: string
       parts?: Array<{
         id?: string
@@ -4082,6 +4111,7 @@ export class Session2 extends HeyApiClient {
             { in: "body", key: "model" },
             { in: "body", key: "arguments" },
             { in: "body", key: "command" },
+            { in: "body", key: "goal" },
             { in: "body", key: "variant" },
             { in: "body", key: "parts" },
           ],

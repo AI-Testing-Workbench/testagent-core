@@ -8,7 +8,6 @@ import type {
 import { Config } from "@/config/config"
 import { Bus } from "../bus"
 import { GlobalBus, type GlobalEvent } from "@/bus/global" // testagent_change
-import * as Log from "@opencode-ai/core/util/log"
 import { createOpencodeClient } from "@opencode-ai/sdk"
 import { Flag } from "@opencode-ai/core/flag/flag"
 import { ServerAuth } from "@/server/auth"
@@ -16,7 +15,7 @@ import { Session } from "@/session/session"
 import { NamedError } from "@opencode-ai/core/util/error"
 import { LangfusePlugin } from "./langfuse" // testagent_change
 import { MemoryPlugin } from "./testagent-memory/index.js" // testagent_change
-import { Effect, Layer, Context, Queue, Stream } from "effect"
+import { Effect, Layer, Context, Queue, Stream, Metric } from "effect"
 import { EffectBridge } from "@/effect/bridge"
 import { InstanceState } from "@/effect/instance-state"
 import { errorMessage } from "@/util/error"
@@ -24,8 +23,6 @@ import { PluginLoader } from "./loader"
 import { parsePluginSpecifier, readPluginId, readV1Plugin, resolvePluginId } from "./shared"
 import { registerAdapter } from "@/control-plane/adapters"
 import type { WorkspaceAdapter } from "@/control-plane/types"
-
-const log = Log.create({ service: "plugin" })
 
 // testagent_change start - VS Code notification helpers
 function isVSCodeEnvironment(): boolean {
@@ -153,7 +150,7 @@ export const layer = Layer.effect(
     const state = yield* InstanceState.make<State>(
       Effect.fn("Plugin.state")(function* (ctx) {
         // testagent_change start - log directory to understand multiple initializations
-        log.info("Plugin.state initializing", {
+        yield* Effect.logInfo("插件状态正在初始化", {
           directory: ctx.directory,
           worktree: ctx.worktree,
           projectId: ctx.project.id,
@@ -163,7 +160,12 @@ export const layer = Layer.effect(
         const hooks: Hooks[] = []
         const bridge = yield* EffectBridge.make()
 
+        // Deduplicate plugin error messages across repeated state initializations
+        // to prevent the same error from rendering as multiple error cards.
+        const sentErrors = new Set<string>()
         function publishPluginError(message: string) {
+          if (sentErrors.has(message)) return
+          sentErrors.add(message)
           bridge.fork(bus.publish(Session.Event.Error, { error: new NamedError.Unknown({ message }).toObject() }))
         }
 
@@ -191,20 +193,50 @@ export const layer = Layer.effect(
           },
           // @ts-expect-error
           $: typeof Bun === "undefined" ? undefined : Bun.$,
+          // testagent_change start
+          metric: (name, value, attributes) => {
+            bridge.fork(
+              Metric.update(
+                Metric.withAttributes(Metric.counter(name), { ...attributes, "data_stream.dataset": "plugins" }),
+                value,
+              ),
+            )
+          },
+          log: (level, message, data) => {
+            bridge.fork(
+              Effect.gen(function* () {
+                switch (level) {
+                  case "debug":
+                    yield* Effect.logDebug(message).pipe(Effect.annotateLogs({ ...data, "data_stream.dataset": "plugins" }))
+                    break
+                  case "info":
+                    yield* Effect.logInfo(message).pipe(Effect.annotateLogs({ ...data, "data_stream.dataset": "plugins" }))
+                    break
+                  case "warn":
+                    yield* Effect.logWarning(message).pipe(Effect.annotateLogs({ ...data, "data_stream.dataset": "plugins" }))
+                    break
+                  case "error":
+                    yield* Effect.logError(message).pipe(Effect.annotateLogs({ ...data, "data_stream.dataset": "plugins" }))
+                    break
+                }
+              }),
+            )
+          },
+          // testagent_change end
         }
 
         for (const plugin of INTERNAL_PLUGINS) {
           // testagent_change start - skip LangfusePlugin when disabled in config
           if (plugin === LangfusePlugin && cfg.langfuse === false) {
-            log.info("langfuse plugin disabled by config")
+            yield* Effect.logInfo("Langfuse 插件已被配置禁用")
             continue
           }
           // testagent_change end
-          log.info("loading internal plugin", { name: plugin.name })
+          yield* Effect.logInfo("正在加载内置插件", { name: plugin.name })
           const init = yield* Effect.tryPromise({
             try: () => plugin(input),
             catch: (err) => {
-              log.error("failed to load internal plugin", { name: plugin.name, error: err })
+              bridge.fork(Effect.logError("内置插件加载失败", { name: plugin.name, error: err }))
             },
           }).pipe(Effect.option)
           if (init._tag === "Some") hooks.push(init.value)
@@ -212,24 +244,23 @@ export const layer = Layer.effect(
 
         const plugins = Flag.OPENCODE_PURE ? [] : (cfg.plugin_origins ?? [])
         if (Flag.OPENCODE_PURE && cfg.plugin_origins?.length) {
-          log.info("skipping external plugins in pure mode", { count: cfg.plugin_origins.length })
+          yield* Effect.logInfo("纯模式跳过外部插件", { count: cfg.plugin_origins.length })
         }
 
         // testagent_change start - track plugin loading results
+        const pluginFailed = new Map<string, string>()
         const pluginResults = {
           success: [] as string[],
-          failed: [] as { spec: string; error: string }[],
+          get failed() {
+            return Array.from(pluginFailed, ([spec, error]) => ({ spec, error }))
+          },
         }
         // testagent_change end
 
         if (plugins.length) {
           // testagent_change start - notify plugin installation start
           const message = `正在安装 ${plugins.length} 个插件...`
-          if (isVSCodeEnvironment()) {
-            // notifyVSCode("info", message)
-          } else {
-            log.info(message)
-          }
+            yield* Effect.logInfo(message)
           // testagent_change end
           yield* config.waitForDependencies()
         }
@@ -245,15 +276,17 @@ export const layer = Layer.effect(
                 if (isVSCodeEnvironment()) {
                   // notifyVSCode("info", message)
                 } else {
-                  log.info(message)
+                  bridge.fork(Effect.logInfo(message))
                 }
                 // testagent_change end
-                log.info("loading plugin", { path: candidate.plan.spec })
+                bridge.fork(Effect.logInfo("正在加载插件", { path: candidate.plan.spec }))
               },
               missing(candidate, _retry, message) {
-                log.warn("plugin has no server entrypoint", { path: candidate.plan.spec, message })
+                bridge.fork(Effect.logWarning("插件没有服务端入口", { path: candidate.plan.spec, message }))
                 // testagent_change start - track missing plugin
-                pluginResults.failed.push({ spec: candidate.plan.spec, error: message })
+                if (!pluginFailed.has(candidate.plan.spec)) {
+                  pluginFailed.set(candidate.plan.spec, message)
+                }
                 // testagent_change end
               },
               error(candidate, _retry, stage, error, resolved) {
@@ -262,36 +295,38 @@ export const layer = Layer.effect(
                 const message = stage === "load" ? errorMessage(error) : errorMessage(cause)
 
                 // testagent_change start - track failed plugin
-                pluginResults.failed.push({ spec, error: message })
+                if (!pluginFailed.has(spec)) {
+                  pluginFailed.set(spec, message)
+                }
                 // testagent_change end
 
                 if (stage === "install") {
                   const parsed = parsePluginSpecifier(spec)
-                  log.error("failed to install plugin", { pkg: parsed.pkg, version: parsed.version, error: message })
+                  bridge.fork(Effect.logError("插件安装失败", { pkg: parsed.pkg, version: parsed.version, error: message }))
                   publishPluginError(`Failed to install plugin ${parsed.pkg}@${parsed.version}: ${message}`)
                   return
                 }
 
                 if (stage === "compatibility") {
-                  log.warn("plugin incompatible", { path: spec, error: message })
+                  bridge.fork(Effect.logWarning("插件不兼容", { path: spec, error: message }))
                   publishPluginError(`Plugin ${spec} skipped: ${message}`)
                   return
                 }
 
                 if (stage === "entry") {
-                  log.error("failed to resolve plugin server entry", { path: spec, error: message })
+                  bridge.fork(Effect.logError("插件服务端入口解析失败", { path: spec, error: message }))
                   publishPluginError(`Failed to load plugin ${spec}: ${message}`)
                   return
                 }
 
-                log.error("failed to load plugin", { path: spec, target: resolved?.entry, error: message })
+                bridge.fork(Effect.logError("插件加载失败", { path: spec, target: resolved?.entry, error: message }))
                 publishPluginError(`Failed to load plugin ${spec}: ${message}`)
               },
               success(candidate) {
                 // testagent_change start - track successful plugin
                 pluginResults.success.push(candidate.plan.spec)
                 // testagent_change end
-                log.info("plugin loaded successfully", { path: candidate.plan.spec })
+                bridge.fork(Effect.logInfo("插件加载成功", { path: candidate.plan.spec }))
               },
             },
           }),
@@ -320,15 +355,12 @@ export const layer = Layer.effect(
             const failedMsg =
               pluginResults.failed.length > 0 ? `❌ 失败: ${pluginResults.failed.map((f) => f.spec).join(", ")}` : ""
 
-            const message = ["插件加载完成:", successMsg, failedMsg].filter(Boolean).join("\n")
+            const message = ["插件加载完成:", successMsg, failedMsg].filter(Boolean).join("\n")     
+            notifyVSCode("info", message)
+            yield* Effect.logInfo(message)
 
-            if (isVSCodeEnvironment()) {
-              notifyVSCode("info", message)
-            } else {
-              log.info(message)
-            }
           } else {
-            log.debug("skipping duplicate plugin notification", {
+            yield* Effect.logDebug("跳过重复的插件通知", {
               directory: ctx.directory,
               pluginCount: plugins.length,
             })
@@ -344,7 +376,7 @@ export const layer = Layer.effect(
             try: () => applyPlugin(load, input, hooks),
             catch: (err) => {
               const message = errorMessage(err)
-              log.error("failed to load plugin", { path: load.spec, error: message })
+              bridge.fork(Effect.logError("插件加载失败", { path: load.spec, error: message }))
               return message
             },
           }).pipe(
@@ -365,7 +397,7 @@ export const layer = Layer.effect(
           yield* Effect.tryPromise({
             try: () => Promise.resolve((hook as any).config?.(cfg)),
             catch: (err) => {
-              log.error("plugin config hook failed", { error: err })
+              bridge.fork(Effect.logError("插件配置钩子执行失败", { error: err }))
             },
           }).pipe(Effect.ignore)
         }

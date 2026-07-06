@@ -220,10 +220,10 @@ export const Info = Schema.Struct({
   enabled_providers: Schema.optional(Schema.mutable(Schema.Array(Schema.String))).annotate({
     description: "When set, ONLY these providers will be enabled. All other providers will be ignored",
   }),
-  model: Schema.optional(ConfigModelID).annotate({
+  model: Schema.optional(Schema.NullOr(ConfigModelID)).annotate({
     description: "Model to use in the format of provider/model, eg anthropic/claude-2",
   }),
-  small_model: Schema.optional(ConfigModelID).annotate({
+  small_model: Schema.optional(Schema.NullOr(ConfigModelID)).annotate({
     description: "Small model to use for tasks like title generation in the format of provider/model",
   }),
   // testagent_change start
@@ -241,7 +241,7 @@ export const Info = Schema.Struct({
       "Model-specific variant overrides for task-tool subagents, keyed by provider/model. Valid overrides take precedence over saved, agent-specific, and inherited variants.",
   }),
   // testagent_change end
-  default_agent: Schema.optional(Schema.String).annotate({
+  default_agent: Schema.optional(Schema.NullOr(Schema.String)).annotate({
     description:
       "Default agent to use when none is specified. Must be a primary agent. Falls back to 'build' if not set or if the specified agent is invalid.",
   }),
@@ -344,6 +344,12 @@ export const Info = Schema.Struct({
       reserved: Schema.optional(NonNegativeInt).annotate({
         description: "Token buffer for compaction. Leaves enough window to avoid overflow during compaction.",
       }),
+      // testagent_change start - force compaction
+      force: Schema.optional(Schema.Boolean).annotate({
+        description:
+          "Force compaction when context is full even if auto compaction is disabled. Prevents overflow errors without user intervention.",
+      }),
+      // testagent_change end
     }),
   ),
   experimental: Schema.optional(
@@ -491,10 +497,18 @@ export const layer = Layer.effect(
     })
 
     const loadFile = Effect.fnUntraced(function* (filepath: string) {
-      log.info("loading", { path: filepath })
+      yield* Effect.logInfo("loading", { path: filepath })
       const text = yield* readConfigFile(filepath)
-      if (!text) return {} as Info
-      return yield* loadConfig(text, { path: filepath })
+      if (!text) {
+        yield* Effect.logInfo("file empty, skipping", { path: filepath })
+        return {} as Info
+      }
+      // testagent_change start - log raw and parsed config
+      yield* Effect.logInfo("raw config", text)
+      const data = yield* loadConfig(text, { path: filepath })
+      yield* Effect.logInfo("success parsed", data)
+      // testagent_change end
+      return data
     })
 
     const loadGlobal = Effect.fnUntraced(function* () {
@@ -552,8 +566,15 @@ export const layer = Layer.effect(
         yield* fs
           .writeFileString(
             gitignore,
-            ["node_modules", "package.json", "package-lock.json", "bun.lock", ".gitignore"].join("\n"),
-          )
+            [
+              "node_modules",
+              "package.json",
+              "package-lock.json",
+              "bun.lock",
+              "python-interpreter.json",
+              ".gitignore",
+            ].join("\n"),
+          ) // testagent_change - add python-interpreter.json to .gitignore
           .pipe(
             Effect.catchIf(
               (e) => e.reason._tag === "PermissionDenied",
@@ -853,6 +874,7 @@ export const layer = Layer.effect(
           result.compaction = { ...result.compaction, prune: false }
         }
 
+        yield* Effect.logInfo("final merged config loaded", { config: result }) // testagent_change
         return {
           config: result,
           directories,
@@ -903,7 +925,14 @@ export const layer = Layer.effect(
       const file = path.join(dir, "config.json")
       const existing = yield* loadFile(file)
       yield* fs
-        .writeFileString(file, JSON.stringify(mergeDeep(writable(existing), writable(config)), null, 2))
+        .writeFileString(
+          file,
+          JSON.stringify(
+            stripNulls(mergeDeep(writable(existing), writable(config)) as Record<string, unknown>),
+            null,
+            2,
+          ),
+        )
         .pipe(Effect.orDie)
     })
 
@@ -916,13 +945,13 @@ export const layer = Layer.effect(
       const before = (yield* readConfigFile(file)) ?? "{}"
       const patch = writableGlobal(config)
       const force = Object.keys(patch).length === 0
-      log.info("updateGlobal called", { file, keys: Object.keys(patch), force })
-      log.info("更新配置updating global config", { file, patch, force })
+      yield* Effect.logInfo("updateGlobal called", { file, keys: Object.keys(patch), force })
+      yield* Effect.logInfo("更新配置updating global config", { file, patch, force })
       let next: Info
       let changed: boolean
       if (!file.endsWith(".jsonc")) {
         const existing = ConfigParse.effectSchema(Info, ConfigParse.jsonc(before, file), file)
-        const merged = mergeDeep(writable(existing), patch)
+        const merged = stripNulls(mergeDeep(writable(existing), patch) as Record<string, unknown>) as Info
         const serialized = JSON.stringify(merged, null, 2)
         changed = serialized !== before
         if (changed) yield* fs.writeFileString(file, serialized).pipe(Effect.orDie)
@@ -942,13 +971,16 @@ export const layer = Layer.effect(
       // An empty patch is used by clients after they mutate marketplace config files directly;
       // it must refresh cachedGlobal even though this update call itself did not change the file.
       if (changed || force) {
-        log.info(changed ? "config changed, invalidating cache" : "config refresh requested, invalidating cache", {
-          changed,
-          force,
-        })
+        yield* Effect.logInfo(
+          changed ? "config changed, invalidating cache" : "config refresh requested, invalidating cache",
+          {
+            changed,
+            force,
+          },
+        )
         yield* invalidate()
       } else {
-        log.info("config unchanged, skipping cache invalidation", { changed, force })
+        yield* Effect.logInfo("config unchanged, skipping cache invalidation", { changed, force })
       }
       // testagent_change end
       return { info: next, changed }

@@ -238,6 +238,12 @@ export interface Interface {
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/MCP") {}
 
+function notifyVSCode(type: "info" | "error", message: string) {
+  // Output JSON to stderr with special prefix for VS Code extension to parse
+  const notification = JSON.stringify({ type: "plugin-notification", level: type, message })
+  console.error(`[TESTAGENT_NOTIFICATION] ${notification}`)
+}
+
 export const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
@@ -412,6 +418,9 @@ export const layer = Layer.effect(
         })),
         Effect.catch((error): Effect.Effect<{ client: MCPClient | undefined; status: Status }> => {
           const msg = error instanceof Error ? error.message : String(error)
+          if( key=='testagent-playwright'){
+            notifyVSCode("error", "当前playwright npm源访问失败，请手动修改npm 源或前往【通用设置】修改后重启TestAgent")
+          }
           log.error("local mcp startup failed", { key, command: mcp.command, cwd, error: msg })
           return Effect.succeed({ client: undefined, status: { status: "failed", error: msg } })
         }),
@@ -420,11 +429,11 @@ export const layer = Layer.effect(
 
     const create = Effect.fn("MCP.create")(function* (key: string, mcp: ConfigMCP.Info) {
       if (mcp.enabled === false) {
-        log.info("mcp server disabled", { key })
+        yield* Effect.logInfo("mcp server disabled", { key })
         return DISABLED_RESULT
       }
 
-      log.info("found", { key, type: mcp.type })
+      yield* Effect.logInfo("found", { key, type: mcp.type })
 
       const { client: mcpClient, status } =
         mcp.type === "remote"
@@ -441,7 +450,7 @@ export const layer = Layer.effect(
         return { status: { status: "failed", error: "Failed to get tools" } } satisfies CreateResult
       }
 
-      log.info("create() successfully created client", { key, toolCount: listed.length })
+      yield* Effect.logInfo("create() successfully created client", { key, toolCount: listed.length })
       return { mcpClient, status, defs: listed } satisfies CreateResult
     })
     const cfgSvc = yield* Config.Service
@@ -808,7 +817,7 @@ export const layer = Layer.effect(
         return yield* storeClient(s, mcpName, client, listed, mcpConfig.timeout)
       }
 
-      log.info("opening browser for oauth", { mcpName, url: result.authorizationUrl, state: result.oauthState })
+      yield* Effect.logInfo("opening browser for oauth", { mcpName, url: result.authorizationUrl, state: result.oauthState })
 
       const callbackPromise = McpOAuthCallback.waitForCallback(result.oauthState, mcpName)
 
@@ -874,7 +883,7 @@ export const layer = Layer.effect(
       yield* auth.remove(mcpName)
       McpOAuthCallback.cancelPending(mcpName)
       pendingOAuthTransports.delete(mcpName)
-      log.info("removed oauth credentials", { mcpName })
+      yield* Effect.logInfo("removed oauth credentials", { mcpName })
     })
 
     const supportsOAuth = Effect.fn("MCP.supportsOAuth")(function* (mcpName: string) {
@@ -897,7 +906,7 @@ export const layer = Layer.effect(
 
     // testagent_change start - add reload method to refresh MCP servers from config
     const reload = Effect.fn("MCP.reload")(function* () {
-      log.info("reloading mcp servers from config")
+      yield* Effect.logInfo("reloading mcp servers from config")
 
       // 1. Invalidate config cache to force re-read from disk
       // This clears both global and instance-level config caches
@@ -908,7 +917,7 @@ export const layer = Layer.effect(
       const cfg = yield* cfgSvc.get()
       const config = cfg.mcp ?? {}
 
-      log.info("config reloaded from disk", { 
+      yield* Effect.logInfo("config reloaded from disk", { 
         serverCount: Object.keys(config).length,
         servers: Object.keys(config)
       })
@@ -948,7 +957,7 @@ export const layer = Layer.effect(
         ([key, mcp]) =>
           Effect.gen(function* () {
             if (!isMcpConfigured(mcp)) {
-              log.error("Ignoring MCP config entry without type", { key })
+              yield* Effect.logError("Ignoring MCP config entry without type", { key })
               return
             }
 
@@ -970,7 +979,7 @@ export const layer = Layer.effect(
         { concurrency: "unbounded" },
       )
 
-      log.info("mcp servers reloaded successfully", { count: Object.keys(s.clients).length })
+      yield* Effect.logInfo("mcp servers reloaded successfully", { count: Object.keys(s.clients).length })
     })
     // testagent_change end
 

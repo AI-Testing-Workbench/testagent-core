@@ -13,9 +13,10 @@ import { Plugin } from "@/plugin"
 import { Config } from "@/config/config"
 import { NotFoundError } from "@/storage/storage"
 import { ModelID, ProviderID } from "@/provider/schema"
-import { Effect, Layer, Context, Schema } from "effect"
+import { Effect, Layer, Context, Metric, Schema } from "effect"
 import * as DateTime from "effect/DateTime"
 import { InstanceState } from "@/effect/instance-state"
+import { sessionCompacted } from "@opencode-ai/core/effect/observability"
 import { isOverflow as overflow, usable } from "./overflow"
 import { makeRuntime } from "@/effect/run-service"
 import { fn } from "@/util/fn"
@@ -574,6 +575,7 @@ export const layer: Layer.Layer<
           include: selected.tail_start_id,
         })
         yield* bus.publish(Event.Compacted, { sessionID: input.sessionID })
+        yield* Metric.update(Metric.withAttributes(sessionCompacted, { sessionID: input.sessionID }), 1)
       }
       return result
     })

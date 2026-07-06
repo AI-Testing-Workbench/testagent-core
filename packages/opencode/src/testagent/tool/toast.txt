@@ -1,0 +1,13 @@
+Send a notification in one of two modes.
+
+type=1 — System notification:
+  Shows a native OS notification (Windows Action Center, macOS Notification Center, or Linux notify-send).
+  Use this when you need to alert the user about task completion, errors, or important updates.
+
+type=2 — Call notification API:
+  POSTs to the internal notification API with the user's RTC ID and message.
+  Use this when you need to send a notification through the backend service.
+
+Parameters:
+- type (required): 1 for system notification, 2 for API notification
+- message (required): The notification text content
