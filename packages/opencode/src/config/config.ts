@@ -430,7 +430,9 @@ function globalConfigFile() {
 
 function patchJsonc(input: string, patch: unknown, path: string[] = []): string {
   if (!isRecord(patch)) {
-    const edits = modify(input, path, patch, {
+    // null means "delete this key" — jsonc-parser's modify with undefined
+    // removes the property instead of writing null to the file.
+    const edits = modify(input, path, patch === null ? undefined : patch, {
       formattingOptions: {
         insertSpaces: true,
         tabSize: 2,
@@ -983,8 +985,9 @@ export const layer = Layer.effect(
       }
       // testagent_change end
       const existing = yield* loadFile(file)
+      const merged = mergeDeep(writable(existing), writable(config))
       yield* fs
-        .writeFileString(file, JSON.stringify(mergeDeep(writable(existing), writable(config)), null, 2))
+        .writeFileString(file, JSON.stringify(stripNulls(merged), null, 2))
         .pipe(Effect.orDie)
     })
 
@@ -1004,7 +1007,7 @@ export const layer = Layer.effect(
       if (!file.endsWith(".jsonc")) {
         const existing = ConfigParse.effectSchema(Info, ConfigParse.jsonc(before, file), file)
         const merged = mergeDeep(writable(existing), patch)
-        const serialized = JSON.stringify(merged, null, 2)
+        const serialized = JSON.stringify(stripNulls(merged), null, 2)
         changed = serialized !== before
         if (changed) yield* fs.writeFileString(file, serialized).pipe(Effect.orDie)
         next = stripNulls(merged) as Info // testagent_change - strip null sentinels before returning
