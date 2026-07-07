@@ -966,10 +966,10 @@ export const layer = Layer.effect(
       const dir = yield* InstanceState.directory
       // testagent_change start - write to the correct project config file(s)
       // Previously wrote to {dir}/config.json which is never loaded by the config loader.
-      // Now detect existing project config files or default to .testagent/testagent.json.
+      // Now detect existing project config files or default to .testagent/testagent.jsonc.
       const candidates = [
-        path.join(dir, ".testagent", "testagent.json"),
         path.join(dir, ".testagent", "testagent.jsonc"),
+        path.join(dir, ".testagent", "testagent.json"),
         path.join(dir, ".opencode", "opencode.json"),
         path.join(dir, ".opencode", "opencode.jsonc"),
         path.join(dir, "testagent.json"),
@@ -979,8 +979,8 @@ export const layer = Layer.effect(
       ]
       let file = candidates.find((f) => existsSync(f))
       if (!file) {
-        // Default: create .testagent/testagent.json
-        file = path.join(dir, ".testagent", "testagent.json")
+        // Default: create .testagent/testagent.jsonc
+        file = path.join(dir, ".testagent", "testagent.jsonc")
         yield* fs.makeDirectory(path.join(dir, ".testagent")).pipe(Effect.ignore)
       }
       // testagent_change end

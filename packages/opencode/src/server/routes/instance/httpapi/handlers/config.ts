@@ -158,7 +158,9 @@ export const configHandlers = HttpApiBuilder.group(InstanceHttpApi, "config", (h
         yield* configSvc.update(jsonPatch)
       }
       if (Object.keys(mdPatch).length > 0 || Object.keys(jsonPatch).length > 0) {
-        yield* markInstanceForDisposal(yield* InstanceState.context)
+        yield* disposeAllInstancesAndEmitGlobalDisposed({ swallowErrors: true }).pipe(
+          Effect.catchCause(() => Effect.void),
+        )
       }
       return yield* configSvc.get()
     })
