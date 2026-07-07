@@ -217,6 +217,7 @@ export const MemoryPlugin = async (params) => {
     // 如果插件未启用，直接返回空插件
     if (!config().enable) {
         log.debug("[MemoryPlugin] plugin is disabled, skipping initialization");
+        params.log?.("error", "记忆插件未启用，跳过初始化", { service: "offical-memory" })
         return {};
     }
     // 初始化工作区记忆目录

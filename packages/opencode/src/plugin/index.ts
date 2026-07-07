@@ -207,16 +207,24 @@ export const layer = Layer.effect(
               Effect.gen(function* () {
                 switch (level) {
                   case "debug":
-                    yield* Effect.logDebug(message).pipe(Effect.annotateLogs({ ...data, "data_stream.dataset": "plugins" }))
+                    yield* Effect.logDebug(message).pipe(
+                      Effect.annotateLogs({ ...data, "data_stream.dataset": "plugins" }),
+                    )
                     break
                   case "info":
-                    yield* Effect.logInfo(message).pipe(Effect.annotateLogs({ ...data, "data_stream.dataset": "plugins" }))
+                    yield* Effect.logInfo(message).pipe(
+                      Effect.annotateLogs({ ...data, "data_stream.dataset": "plugins" }),
+                    )
                     break
                   case "warn":
-                    yield* Effect.logWarning(message).pipe(Effect.annotateLogs({ ...data, "data_stream.dataset": "plugins" }))
+                    yield* Effect.logWarning(message).pipe(
+                      Effect.annotateLogs({ ...data, "data_stream.dataset": "plugins" }),
+                    )
                     break
                   case "error":
-                    yield* Effect.logError(message).pipe(Effect.annotateLogs({ ...data, "data_stream.dataset": "plugins" }))
+                    yield* Effect.logError(message).pipe(
+                      Effect.annotateLogs({ ...data, "data_stream.dataset": "plugins" }),
+                    )
                     break
                 }
               }),
@@ -239,12 +247,19 @@ export const layer = Layer.effect(
               bridge.fork(Effect.logError("内置插件加载失败", { name: plugin.name, error: err }))
             },
           }).pipe(Effect.option)
-          if (init._tag === "Some") hooks.push(init.value)
+          if (init._tag === "Some") {
+            hooks.push(init.value)
+            yield* Effect.logInfo("内置插件加载成功", { name: plugin.name }) // testagent_change
+          }
         }
 
         const plugins = Flag.OPENCODE_PURE ? [] : (cfg.plugin_origins ?? [])
         if (Flag.OPENCODE_PURE && cfg.plugin_origins?.length) {
           yield* Effect.logInfo("纯模式跳过外部插件", { count: cfg.plugin_origins.length })
+        }
+
+        if (!Flag.OPENCODE_PURE && plugins.length === 0) {
+          yield* Effect.logInfo("没有外部插件需要加载")
         }
 
         // testagent_change start - track plugin loading results
@@ -260,7 +275,7 @@ export const layer = Layer.effect(
         if (plugins.length) {
           // testagent_change start - notify plugin installation start
           const message = `正在安装 ${plugins.length} 个插件...`
-            yield* Effect.logInfo(message)
+          yield* Effect.logInfo(message)
           // testagent_change end
           yield* config.waitForDependencies()
         }
@@ -302,7 +317,9 @@ export const layer = Layer.effect(
 
                 if (stage === "install") {
                   const parsed = parsePluginSpecifier(spec)
-                  bridge.fork(Effect.logError("插件安装失败", { pkg: parsed.pkg, version: parsed.version, error: message }))
+                  bridge.fork(
+                    Effect.logError("插件安装失败", { pkg: parsed.pkg, version: parsed.version, error: message }),
+                  )
                   publishPluginError(`Failed to install plugin ${parsed.pkg}@${parsed.version}: ${message}`)
                   return
                 }
@@ -355,10 +372,9 @@ export const layer = Layer.effect(
             const failedMsg =
               pluginResults.failed.length > 0 ? `❌ 失败: ${pluginResults.failed.map((f) => f.spec).join(", ")}` : ""
 
-            const message = ["插件加载完成:", successMsg, failedMsg].filter(Boolean).join("\n")     
+            const message = ["插件加载完成:", successMsg, failedMsg].filter(Boolean).join("\n")
             notifyVSCode("info", message)
             yield* Effect.logInfo(message)
-
           } else {
             yield* Effect.logDebug("跳过重复的插件通知", {
               directory: ctx.directory,
@@ -391,6 +407,8 @@ export const layer = Layer.effect(
             }),
           )
         }
+
+        yield* Effect.logInfo("外部插件应用完成", { count: loaded.filter(Boolean).length })
 
         // Notify plugins of current config
         for (const hook of hooks) {
@@ -446,6 +464,8 @@ export const layer = Layer.effect(
           Effect.forkScoped,
         )
         // testagent_change end
+
+        yield* Effect.logInfo("插件状态初始化完成", { hookCount: hooks.length })
 
         return { hooks }
       }),
