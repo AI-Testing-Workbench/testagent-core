@@ -344,12 +344,7 @@ export const Info = Schema.Struct({
       reserved: Schema.optional(NonNegativeInt).annotate({
         description: "Token buffer for compaction. Leaves enough window to avoid overflow during compaction.",
       }),
-      // testagent_change start - force compaction
-      force: Schema.optional(Schema.Boolean).annotate({
-        description:
-          "Force compaction when context is full even if auto compaction is disabled. Prevents overflow errors without user intervention.",
-      }),
-      // testagent_change end
+
     }),
   ),
   experimental: Schema.optional(
