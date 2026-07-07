@@ -575,7 +575,7 @@ export const layer: Layer.Layer<
           include: selected.tail_start_id,
         })
         yield* bus.publish(Event.Compacted, { sessionID: input.sessionID })
-        yield* Metric.update(Metric.withAttributes(sessionCompacted, { sessionID: input.sessionID }), 1)
+        yield* Metric.update(Metric.withAttributes(sessionCompacted, { sessionID: input.sessionID, modelID: model.id, providerID: model.providerID }), 1)
       }
       return result
     })

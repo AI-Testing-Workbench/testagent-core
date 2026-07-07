@@ -218,7 +218,7 @@ export const layer: Layer.Layer<
         } else if (error instanceof Question.RejectedError) {
           ctx.blocked = ctx.shouldBreak
         } else {
-          yield* Metric.update(Metric.withAttributes(failExecution, { sessionID: ctx.sessionID }), 1)
+          yield* Metric.update(Metric.withAttributes(failExecution, { sessionID: ctx.sessionID, modelID: input.model.id, providerID: input.model.providerID }), 1)
         }
         yield* settleToolCall(toolCallID)
         return true
@@ -301,7 +301,7 @@ export const layer: Layer.Layer<
               state: { status: "pending", input: {}, raw: "" },
               metadata: value.providerExecuted ? { providerExecuted: true } : undefined,
             } satisfies MessageV2.ToolPart)
-            yield* Metric.update(Metric.withAttributes(callTotal, { sessionID: ctx.sessionID }), 1) // testagent_change
+            yield* Metric.update(Metric.withAttributes(callTotal, { sessionID: ctx.sessionID, modelID: input.model.id, providerID: input.model.providerID }), 1) // testagent_change
             ctx.toolcalls[value.id] = {
               done: yield* Deferred.make<void>(),
               partID: part.id,

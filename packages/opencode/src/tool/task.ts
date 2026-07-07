@@ -69,7 +69,8 @@ export const TaskTool = Tool.define(
       ctx: Tool.Context,
     ) {
       const cfg = yield* config.get()
-      yield* Metric.update(Metric.withAttributes(taskCall, { sessionID: ctx.sessionID, subagent_type: params.subagent_type }), 1)
+      const sid = yield* sessions.get(ctx.sessionID)
+      yield* Metric.update(Metric.withAttributes(taskCall, { sessionID: ctx.sessionID, subagent_type: params.subagent_type, modelID: sid.model?.id ?? "", providerID: sid.model?.providerID ?? "" }), 1)
 
       if (!ctx.extra?.bypassAgentCheck) {
         yield* ctx.ask({
