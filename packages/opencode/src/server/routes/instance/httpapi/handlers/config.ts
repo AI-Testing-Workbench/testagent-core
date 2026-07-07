@@ -68,12 +68,18 @@ export const configHandlers = HttpApiBuilder.group(InstanceHttpApi, "config", (h
       const allDirs = [...dirs, ...tdirs]
       const wk = instance.worktree
       // Separate dirs into project and global for md detection
-      const projectDirs = allDirs.filter((d) => wk && wk !== "/" ? d.startsWith(wk) : d.startsWith(instance.directory))
-      const globalDirs = allDirs.filter((d) => !(wk && wk !== "/" ? d.startsWith(wk) : d.startsWith(instance.directory)))
+      const projectDirs = allDirs.filter((d) =>
+        wk && wk !== "/" ? d.startsWith(wk) : d.startsWith(instance.directory),
+      )
+      const globalDirs = allDirs.filter(
+        (d) => !(wk && wk !== "/" ? d.startsWith(wk) : d.startsWith(instance.directory)),
+      )
       const mdDirs = body.scope === "project" ? projectDirs : globalDirs
       const mdNames = new Set<string>()
       for (const d of mdDirs) {
-        const names = yield* Effect.promise(() => ConfigAgent.listMdAgentNames(d)).pipe(Effect.catch(() => Effect.succeed(new Set<string>())))
+        const names = yield* Effect.promise(() => ConfigAgent.listMdAgentNames(d)).pipe(
+          Effect.catch(() => Effect.succeed(new Set<string>())),
+        )
         for (const n of names) mdNames.add(n)
       }
 
@@ -98,7 +104,7 @@ export const configHandlers = HttpApiBuilder.group(InstanceHttpApi, "config", (h
         }
       }
 
-      // Write .md-based agents back to their .md files
+      // Write .md-based agents back to their .md files (or delete if nulled out)
       if (Object.keys(mdPatch).length > 0) {
         for (const [name, cfg] of Object.entries((mdPatch.agent ?? {}) as Record<string, unknown>)) {
           const mdFile = yield* Effect.promise(async () => {
@@ -109,12 +115,25 @@ export const configHandlers = HttpApiBuilder.group(InstanceHttpApi, "config", (h
             return undefined
           }).pipe(Effect.catch(() => Effect.succeed(undefined)))
           if (mdFile) {
-            yield* Effect.promise(() => ConfigAgent.saveToFile(mdFile, cfg as any)).pipe(
-              Effect.catch((err) => {
-                log.error("failed to save agent .md file", { name, error: String(err) })
-                return Effect.void
-              }),
-            )
+            // Entire agent config is null → delete the .md file
+            if (cfg === null) {
+              yield* Effect.promise(async () => {
+                const { default: fs } = await import("fs/promises")
+                await fs.unlink(mdFile)
+              }).pipe(
+                Effect.catch((err) => {
+                  log.error("failed to delete agent .md file", { name, error: String(err) })
+                  return Effect.void
+                }),
+              )
+            } else {
+              yield* Effect.promise(() => ConfigAgent.saveToFile(mdFile, cfg as any)).pipe(
+                Effect.catch((err) => {
+                  log.error("failed to save agent .md file", { name, error: String(err) })
+                  return Effect.void
+                }),
+              )
+            }
           } else {
             log.warn("no .md file found for agent", { name })
           }
@@ -153,6 +172,11 @@ export const configHandlers = HttpApiBuilder.group(InstanceHttpApi, "config", (h
       }
     })
 
-    return handlers.handle("get", get).handle("update", update).handle("overlay", overlay).handle("overlayUpdate", overlayUpdate).handle("providers", providers) // testagent_change
+    return handlers
+      .handle("get", get)
+      .handle("update", update)
+      .handle("overlay", overlay)
+      .handle("overlayUpdate", overlayUpdate)
+      .handle("providers", providers) // testagent_change
   }),
 )

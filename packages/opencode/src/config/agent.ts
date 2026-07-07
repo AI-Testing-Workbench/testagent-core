@@ -127,7 +127,14 @@ export async function load(dir: string) {
     })
     if (!md) continue
 
-    const patterns = ["/.opencode/agent/", "/.opencode/agents/", "/.testagent/agent/", "/.testagent/agents/", "/agent/", "/agents/"] // testagent_change
+    const patterns = [
+      "/.opencode/agent/",
+      "/.opencode/agents/",
+      "/.testagent/agent/",
+      "/.testagent/agents/",
+      "/agent/",
+      "/agents/",
+    ] // testagent_change
     const name = configEntryNameFromPath(item, patterns)
 
     const config = {
@@ -176,7 +183,14 @@ export async function loadMode(dir: string) {
 }
 
 // testagent_change start - save agent config back to .md file
-const AGENT_MD_PATTERNS = ["/.opencode/agent/", "/.opencode/agents/", "/.testagent/agent/", "/.testagent/agents/", "/agent/", "/agents/"]
+const AGENT_MD_PATTERNS = [
+  "/.opencode/agent/",
+  "/.opencode/agents/",
+  "/.testagent/agent/",
+  "/.testagent/agents/",
+  "/agent/",
+  "/agents/",
+]
 
 /** Get the set of agent names that originate from .md files in the project. */
 export async function listMdAgentNames(dir: string): Promise<Set<string>> {
@@ -257,5 +271,17 @@ export async function saveToFile(filePath: string, config: Info): Promise<void> 
   const content = matter.stringify(String(prompt ?? ""), frontmatter)
   const { default: fs } = await import("fs/promises")
   await fs.writeFile(filePath, content)
+}
+
+/**
+ * Delete an agent's .md file from the given directory.
+ * Returns true if the file was found and deleted, false otherwise.
+ */
+export async function removeMdFile(dir: string, name: string): Promise<boolean> {
+  const filePath = await findMdFile(dir, name)
+  if (!filePath) return false
+  const { default: fs } = await import("fs/promises")
+  await fs.unlink(filePath)
+  return true
 }
 // testagent_change end
