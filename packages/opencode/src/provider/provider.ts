@@ -1199,6 +1199,7 @@ const layer: Layer.Layer<
         }
 
         for (const hook of plugins) {
+          if (!hook) continue // testagent_change - 过滤插件返回的 undefined hook
           const p = hook.provider
           const models = p?.models
           if (!p || !models) continue

@@ -132,12 +132,20 @@ async function applyPlugin(load: PluginLoader.Loaded, input: PluginInput, hooks:
   const plugin = readV1Plugin(load.mod, load.spec, "server", "detect")
   if (plugin) {
     await resolvePluginId(load.source, load.spec, load.target, readPluginId(plugin.id, load.spec), load.pkg)
-    hooks.push(await (plugin as PluginModule).server(input, load.options))
+    const hook = await (plugin as PluginModule).server(input, load.options)
+    if (hook) {
+      ;(hook as any)._spec = load.spec // testagent_change - 标记插件来源
+      hooks.push(hook)
+    }
     return
   }
 
   for (const server of getLegacyPlugins(load.mod)) {
-    hooks.push(await server(input, load.options))
+    const hook = await server(input, load.options)
+    if (hook) {
+      ;(hook as any)._spec = load.spec // testagent_change - 标记插件来源
+      hooks.push(hook)
+    }
   }
 }
 
@@ -248,6 +256,7 @@ export const layer = Layer.effect(
             },
           }).pipe(Effect.option)
           if (init._tag === "Some") {
+            ;(init.value as any)._spec = plugin.name // testagent_change - 标记插件来源
             hooks.push(init.value)
             yield* Effect.logInfo("内置插件加载成功", { name: plugin.name }) // testagent_change
           }
@@ -373,7 +382,7 @@ export const layer = Layer.effect(
               pluginResults.failed.length > 0 ? `❌ 失败: ${pluginResults.failed.map((f) => f.spec).join(", ")}` : ""
 
             const message = ["插件加载完成:", successMsg, failedMsg].filter(Boolean).join("\n")
-            notifyVSCode("info", message)
+            // notifyVSCode("info", message)
             yield* Effect.logInfo(message)
           } else {
             yield* Effect.logDebug("跳过重复的插件通知", {
@@ -415,7 +424,7 @@ export const layer = Layer.effect(
           yield* Effect.tryPromise({
             try: () => Promise.resolve((hook as any).config?.(cfg)),
             catch: (err) => {
-              bridge.fork(Effect.logError("插件配置钩子执行失败", { error: err }))
+              bridge.fork(Effect.logError("插件配置钩子执行失败", { spec: (hook as any)._spec ?? "unknown", error: err })) // testagent_change
             },
           }).pipe(Effect.ignore)
         }
