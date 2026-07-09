@@ -520,7 +520,7 @@ export const layer: Layer.Layer<Service, never, Bus.Service | Storage.Service | 
       }
       log.info("created", result)
 
-      yield* Metric.update(Metric.withAttributes(sessionCreated, { sessionID: result.id, modelID: input.model?.id ?? "", providerID: input.model?.providerID ?? "" }), 1) // testagent_change
+      yield* Metric.update(Metric.withAttributes(sessionCreated, { sessionID: result.id }), 1) // testagent_change
       yield* sync.run(Event.Created, { sessionID: result.id, info: result })
 
       if (!Flag.OPENCODE_EXPERIMENTAL_WORKSPACES) {
