@@ -1,7 +1,7 @@
 import path from "path"
 import { pathToFileURL } from "url"
 import z from "zod"
-import { Effect, Layer, Context, Schema } from "effect"
+import { Effect, Layer, Context, Schema, Metric } from "effect"
 import { zod } from "@/util/effect-zod"
 import { withStatics } from "@/util/schema"
 import { NamedError } from "@opencode-ai/core/util/error"
@@ -16,6 +16,8 @@ import { Config } from "@/config/config"
 import { ConfigMarkdown } from "@/config/markdown"
 import { Glob } from "@opencode-ai/core/util/glob"
 import * as Log from "@opencode-ai/core/util/log"
+import { startupTime } from "@opencode-ai/core/effect/observability" // testagent_change
+import { Server } from "@/server/server" // testagent_change
 import { Discovery } from "./discovery"
 
 const log = Log.create({ service: "skill" })
@@ -217,7 +219,11 @@ const loadSkills = Effect.fnUntraced(function* (state: State, discovered: Discov
     discard: true,
   })
 
-  log.info("init", { count: Object.keys(state.skills).length })
+  // testagent_change start
+  const elapsed = performance.now() - Server.serverReadyAt
+  yield* Metric.update(startupTime, elapsed)
+  yield* Effect.logInfo("skill init", { count: Object.keys(state.skills).length })
+  // testagent_change end
 })
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/Skill") {}

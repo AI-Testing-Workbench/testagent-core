@@ -57,9 +57,11 @@ export async function openapi() {
 }
 
 export let url: URL
+export let serverReadyAt = 0 // testagent_change
 
 export async function listen(opts: ListenOptions): Promise<Listener> {
   log.info("server backend", { "opencode.server.runtime": HttpApiServer.name })
+  serverReadyAt = performance.now() // testagent_change
   const listenStart = performance.now()
 
   const buildLayer = (port: number) =>

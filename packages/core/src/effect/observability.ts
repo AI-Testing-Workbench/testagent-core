@@ -234,6 +234,9 @@ export const taskCall = Metric.counter("tool.task.call", {
 export const ttft = Metric.gauge("session.llm.ttft", {
   description: "Time to first token (ms)",
 })
+export const startupTime = Metric.gauge("server.startup.time", {
+  description: "Server startup duration from 'server listening' to all services initialized (ms)",
+})
 export const tokenInput = Metric.counter("session.token.input", {
   description: "Input tokens consumed",
 })
@@ -251,6 +254,9 @@ export const tokenCacheWrite = Metric.counter("session.token.cache_write", {
 })
 export const tokenTotal = Metric.counter("session.token.total", {
   description: "Total tokens consumed (input + output + reasoning + cache)",
+})
+export const userPrompt = Metric.counter("session.user.prompt", {
+  description: "User message submissions in sessions",
 })
 // testagent_change end
 

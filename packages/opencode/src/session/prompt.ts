@@ -24,6 +24,7 @@ import { ToolRegistry } from "@/tool/registry"
 import { MCP } from "../mcp"
 import { LSP } from "@/lsp/lsp"
 import { Flag } from "@opencode-ai/core/flag/flag"
+import { userPrompt } from "@opencode-ai/core/effect/observability"
 import { ulid } from "ulid"
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
@@ -45,7 +46,7 @@ import { AppFileSystem } from "@opencode-ai/core/filesystem"
 import { Truncate } from "@/tool/truncate"
 import { decodeDataUrl } from "@/util/data-url"
 import { Process } from "@/util/process"
-import { Cause, Effect, Exit, Latch, Layer, Option, Scope, Context, Schema, Types } from "effect"
+import { Cause, Effect, Exit, Latch, Layer, Metric, Option, Scope, Context, Schema, Types } from "effect"
 import { zod } from "@/util/effect-zod"
 import { withStatics } from "@/util/schema"
 // testagent_change start
@@ -1357,6 +1358,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         const session = yield* sessions.get(input.sessionID).pipe(Effect.orDie)
         yield* revert.cleanup(session)
         const message = yield* createUserMessage(input)
+        yield* Metric.update(Metric.withAttributes(userPrompt, { sessionID: input.sessionID, providerID: message.info.model.providerID, modelID: message.info.model.modelID }), 1)    //testagent_change
         yield* sessions.touch(input.sessionID)
 
         const permissions: Permission.Ruleset = []
