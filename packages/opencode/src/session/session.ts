@@ -836,11 +836,22 @@ function* listByProject(
       )
     }
   } 
-  // else if (input.scope !== "project" && !Flag.OPENCODE_EXPERIMENTAL_WORKSPACES) {
-  //   if (input.directory) {
-  //     conditions.push(eq(SessionTable.directory, input.directory))
-  //   }
-  // }
+  else if (input.scope !== "project" && !Flag.OPENCODE_EXPERIMENTAL_WORKSPACES) {
+    if (input.directory) {
+      // testagent_change start - 将盘符首字母改为大写以匹配数据库格式
+      // 数据库中存储的是：C:\Users\... (大写C)
+      // 请求来的是：c:\Users\... (小写c)
+      let normalizedDir = input.directory
+      
+      // 盘符首字母大写 (c: → C:, d: → D:)
+      if (normalizedDir.length >= 2 && normalizedDir[1] === ':') {
+        normalizedDir = normalizedDir[0].toUpperCase() + normalizedDir.slice(1)
+      }
+      
+      conditions.push(eq(SessionTable.directory, normalizedDir))
+      // testagent_change end
+    }
+  }
   if (input.roots) {
     conditions.push(isNull(SessionTable.parent_id))
   }
