@@ -187,5 +187,9 @@ export interface LLMClient {
          * (e.g. OpenCode uses this as the session agent name).
          */
         agentName?: string;
+        messageId?: string;
+        partId?: string;
+        eventSource?: string;
+        traceInput?: any;
     }): Promise<string | null>;
 }

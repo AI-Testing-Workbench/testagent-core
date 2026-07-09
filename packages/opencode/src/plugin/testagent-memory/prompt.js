@@ -181,7 +181,7 @@ export function buildMemorySystemPrompt(worktree, recalledMemoriesSection, isLoa
             "",
             `**Step 2** — 在 \`${ENTRYPOINT_NAME}\`中添加上一步文件的索引. \`${ENTRYPOINT_NAME}\` 是索引文件而非记忆 — 每个记忆文件在其中是一行记录，不超过150个字: \`- [标题](file.md) — 一行简短摘要\`. \`${ENTRYPOINT_NAME}\` 没有frontmatter. 不要直接将记忆写入 \`${ENTRYPOINT_NAME}\`.`,
             "",
-            `- \`${ENTRYPOINT_NAME}\` 始终加载到对话上下文中 — 超过${MAX_ENTRYPOINT_LINES}行的内容将被截断，因此请保持索引文件简洁`,
+            `- \`${ENTRYPOINT_NAME}\`超过${MAX_ENTRYPOINT_LINES}行的内容将被截断，因此请保持索引文件简洁`,
             "- 保持记忆文件中的 `name`、`description`、`type` 字段与内容同步更新",
             "- 按语义主题组织记忆，而非按时间顺序",
             "- 若记忆内容错误或过时，请及时更新或删除",
@@ -270,11 +270,7 @@ export function buildMemorySystemPrompt(worktree, recalledMemoriesSection, isLoa
             // 记忆索引文件      
             const indexContent = readIndex(worktree);
             if (indexContent.trim()) {
-                const { content: truncated } = truncateEntrypoint(indexContent);
-                lines.push(`## ${ENTRYPOINT_NAME}`, "", truncated);
-            }
-            else {
-                lines.push(`## ${ENTRYPOINT_NAME}`, "", `Your ${ENTRYPOINT_NAME} is currently empty. When you save new memories, they will appear here.`);
+                lines.push(`## ${ENTRYPOINT_NAME}`, "", `-当下方注入的相关记忆不足以回答用户问题时，可加载记忆索引文件${ENTRYPOINT_NAME} 查找相关记忆信息，文件位于位于 \`${memoryDir}\`路径下。`);
             }
         }
     }

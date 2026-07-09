@@ -1,6 +1,11 @@
 import { type RecalledMemory } from "./recall.js";
 export declare const DEFAULT_MIN_SCORE = 0.18;
 export declare function cosineSimilarity(vec1: number[], vec2: number[]): number;
+export declare function calcKeywordBonus(query: string, text: string, queryTokens: string[], textTokens: string[]): number;
+export declare function calcSubstringBonus(query: string, text: string, queryTokens: string[], textTokens: string[]): number;
+export declare function calcPrefixBonus(query: string, text: string, queryTokens: string[], textTokens: string[]): number;
+export declare function calcNgramBonus(query: string, text: string, queryTokens: string[], textTokens: string[]): number;
+export declare function calcTimeBonus(now: number, mtimeMs: number): number;
 export declare function vectorfilter(worktree: string, sessionID: string, query: string, alreadySurfaced: ReadonlySet<string> | undefined, topNum: number, minScore?: number): Promise<RecalledMemory[]>;
 export interface ClaudeProfileMatch {
     /** 章节名称，如"基本信息"、"偏好" */
