@@ -185,6 +185,11 @@ export const Info = Schema.Struct({
       ),
     ),
   ),
+  mcp_origins: Schema.optional(
+    Schema.Record(Schema.String, Schema.String).annotate({
+      description: "Runtime source file paths for each MCP server entry",
+    }),
+  ),
   plugin_status: Schema.optional(
     Schema.Struct({
       success: Schema.mutable(Schema.Array(Schema.String)),
@@ -364,7 +369,7 @@ export const Info = Schema.Struct({
         description: "Continue the agent loop when a tool call is denied",
       }),
       mcp_timeout: Schema.optional(PositiveInt).annotate({
-        description: "Timeout in milliseconds for model context protocol (MCP) requests",
+        description: "Timeout in seconds for model context protocol (MCP) requests",
       }),
     }),
   ),
@@ -603,8 +608,17 @@ export const layer = Layer.effect(
           result.plugin_origins = plugins
         })
 
+        const mergeMcpOrigins = (source: string, next: Info) => {
+          if (!next.mcp) return
+          if (!result.mcp_origins) result.mcp_origins = {}
+          for (const key of Object.keys(next.mcp)) {
+            result.mcp_origins[key] = source
+          }
+        }
+
         const merge = (source: string, next: Info, kind?: ConfigPlugin.Scope) => {
           result = mergeConfigConcatArrays(result, next)
+          mergeMcpOrigins(source, next)
           return mergePluginOrigins(source, next.plugin, kind)
         }
 

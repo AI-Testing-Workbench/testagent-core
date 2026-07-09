@@ -36,6 +36,8 @@ import { withStatics } from "@/util/schema"
 
 const log = Log.create({ service: "mcp" })
 const DEFAULT_TIMEOUT = 30_000
+const toTimeoutMs = (value: number) => value * 1000
+const mapTimeoutMs = (value: number | undefined) => (value == null ? undefined : toTimeoutMs(value))
 
 export const Resource = Schema.Struct({
   name: Schema.String,
@@ -332,7 +334,7 @@ export const layer = Layer.effect(
         },
       ]
 
-      const connectTimeout = mcp.timeout ?? DEFAULT_TIMEOUT
+      const connectTimeout = mcp.timeout != null ? toTimeoutMs(mcp.timeout) : DEFAULT_TIMEOUT
       let lastStatus: Status | undefined
 
       for (const { name, transport } of transports) {
@@ -418,7 +420,7 @@ export const layer = Layer.effect(
         log.info(`mcp stderr: ${chunk.toString()}`, { key })
       })
 
-      const connectTimeout = mcp.timeout ?? DEFAULT_TIMEOUT
+      const connectTimeout = mcp.timeout != null ? toTimeoutMs(mcp.timeout) : DEFAULT_TIMEOUT
       return yield* connectTransport(transport, connectTimeout).pipe(
         Effect.map((client): { client: MCPClient | undefined; status: Status } => ({
           client,
@@ -454,7 +456,7 @@ export const layer = Layer.effect(
         return { status } satisfies CreateResult
       }
 
-      const listed = yield* defs(key, mcpClient, mcp.timeout)
+      const listed = yield* defs(key, mcpClient, mapTimeoutMs(mcp.timeout))
       if (!listed) {
         yield* Effect.tryPromise(() => mcpClient.close()).pipe(Effect.ignore)
         return { status: { status: "failed", error: "Failed to get tools" } } satisfies CreateResult
@@ -535,7 +537,7 @@ export const layer = Layer.effect(
               if (result.mcpClient) {
                 s.clients[key] = result.mcpClient
                 s.defs[key] = result.defs!
-                watch(s, key, result.mcpClient, bridge, mcp.timeout)
+                watch(s, key, result.mcpClient, bridge, mapTimeoutMs(mcp.timeout))
               }
             }),
           { concurrency: "unbounded" },
@@ -622,7 +624,7 @@ export const layer = Layer.effect(
         return result.status
       }
 
-      return yield* storeClient(s, name, result.mcpClient, result.defs!, mcp.timeout)
+      return yield* storeClient(s, name, result.mcpClient, result.defs!, mapTimeoutMs(mcp.timeout))
     })
 
     const add = Effect.fn("MCP.add")(function* (name: string, mcp: ConfigMCP.Info) {
@@ -653,7 +655,7 @@ export const layer = Layer.effect(
 
       const cfg = yield* cfgSvc.get()
       const config = cfg.mcp ?? {}
-      const defaultTimeout = cfg.experimental?.mcp_timeout
+      const defaultTimeout = cfg.experimental?.mcp_timeout != null ? toTimeoutMs(cfg.experimental.mcp_timeout) : undefined
 
       const connectedClients = Object.entries(s.clients).filter(
         ([clientName]) => s.status[clientName]?.status === "connected",
@@ -983,7 +985,7 @@ export const layer = Layer.effect(
             if (result.mcpClient) {
               s.clients[key] = result.mcpClient
               s.defs[key] = result.defs!
-              watch(s, key, result.mcpClient, bridge, mcp.timeout)
+              watch(s, key, result.mcpClient, bridge, mapTimeoutMs(mcp.timeout))
             }
           }),
         { concurrency: "unbounded" },
