@@ -20,15 +20,15 @@ const WEIGHT_TYPE = 1.1;
 const WEIGHT_CONTENT = 1.0;
 // 时间衰减：21天内有加分
 const TIME_WINDOW_DAYS = 30;
-const TIME_BONUS_FACTOR = 0.15;
+const TIME_BONUS_FACTOR = 0.12;
 // 关键词精确匹配加分
-const KEYWORD_BONUS = 1.2;
+const KEYWORD_BONUS = 0.5;
 // 子串匹配加分
-const SUBSTRING_BONUS = 0.55;
+const SUBSTRING_BONUS = 0.15;
 // 前缀匹配加分
 const PREFIX_BONUS = 0.12;
 // n-gram 匹配加分
-const NGRAM_BONUS = 0.14;
+const NGRAM_BONUS = 0.11;
 // 最小匹配阈值
 export const DEFAULT_MIN_SCORE = 0.18;
 // 文本截断上限
@@ -135,7 +135,7 @@ function buildWeightedMemoryText(memory, content) {
 // 6. 多策略关键词匹配：精确词 + 子串 + 前缀 + n-gram
 // =====================================================================
 // 6.1 精确词匹配（使用 jieba 分词）
-function calcKeywordBonus(query, text, queryTokens, textTokens) {
+export function calcKeywordBonus(query, text, queryTokens, textTokens) {
     const textSet = new Set(textTokens);
     let matchCount = 0;
     for (const t of queryTokens) {
@@ -148,7 +148,7 @@ function calcKeywordBonus(query, text, queryTokens, textTokens) {
     return matchRate * KEYWORD_BONUS;
 }
 // 6.2 子串匹配
-function calcSubstringBonus(query, text, queryTokens, textTokens) {
+export function calcSubstringBonus(query, text, queryTokens, textTokens) {
     const textLower = text.toLowerCase();
     let matchCount = 0;
     for (const t of queryTokens) {
@@ -162,7 +162,7 @@ function calcSubstringBonus(query, text, queryTokens, textTokens) {
     return matchRate * SUBSTRING_BONUS;
 }
 // 6.3 前缀匹配
-function calcPrefixBonus(query, text, queryTokens, textTokens) {
+export function calcPrefixBonus(query, text, queryTokens, textTokens) {
     const textSet = new Set(textTokens);
     let matchCount = 0;
     for (const q of queryTokens) {
@@ -181,7 +181,7 @@ function calcPrefixBonus(query, text, queryTokens, textTokens) {
     return matchRate * PREFIX_BONUS;
 }
 // 6.4 n-gram 重叠匹配
-function calcNgramBonus(query, text, queryTokens, textTokens) {
+export function calcNgramBonus(query, text, queryTokens, textTokens) {
     const queryBigrams = new Set();
     const textBigrams = new Set();
     for (const t of queryTokens) {
@@ -211,7 +211,7 @@ function calcNgramBonus(query, text, queryTokens, textTokens) {
 // =====================================================================
 // 7. 平滑时间衰减加分：21天内有加分，使用平滑衰减曲线
 // =====================================================================
-function calcTimeBonus(now, mtimeMs) {
+export function calcTimeBonus(now, mtimeMs) {
     const dayMs = 86400000;
     const windowMs = TIME_WINDOW_DAYS * dayMs;
     const diff = now - mtimeMs;

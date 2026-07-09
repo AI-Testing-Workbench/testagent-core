@@ -82,6 +82,7 @@ export async function runAutoDream(input) {
         const responseText = await llm.promptForSubAgent(AUTO_TREAM_PROMPT, "", {
             model,
             agentName: "auto-dream",
+            eventSource: input.options?.eventSource,
         });
         if (responseText != null && responseText.length > 0) {
             log.info(`[autoDream] completed success`);

@@ -14,6 +14,7 @@ import { runAutoDream } from "./autoDream.js";
 import { runAutoPersonal } from "./autoPersonal.js";
 import { initMemCmd } from "./core/initCommand.js";
 import { load, config } from "./core/config.js";
+import { getDatabase } from "./core/db.js";
 function shouldIgnoreMemoryContext(query) {
     if (!query)
         return false;
@@ -65,7 +66,18 @@ function getLastUserQuery(messages) {
         const query = extractUserQuery(message);
         const sessionID = typeof message.info?.sessionID === "string" ? message.info.sessionID : undefined;
         const messageID = typeof message.info?.id === "string" ? message.info.id : undefined;
-        return { query, sessionID, messageID, messageIndex: i };
+        // 从 user message 的 parts 中获取 partId
+        let partId;
+        if (message.parts && Array.isArray(message.parts)) {
+            for (const part of message.parts) {
+                if (part && typeof part === "object" && "id" in part) {
+                    partId = part.id;
+                    if (partId)
+                        break;
+                }
+            }
+        }
+        return { query, sessionID, messageID, partId, messageIndex: i };
     }
     return {};
 }
@@ -124,7 +136,7 @@ function isUsefulRecallQuery(query) {
         return true;
     return trimmed.length >= 4;
 }
-async function startRecallPrefetch(llm, sessionID, turnID, worktree, query, alreadySurfaced, recentTools, model) {
+async function startRecallPrefetch(llm, sessionID, partId, messageId, turnID, worktree, query, alreadySurfaced, recentTools, model) {
     if (!llm || !isUsefulRecallQuery(query))
         return undefined;
     const handle = {
@@ -135,13 +147,13 @@ async function startRecallPrefetch(llm, sessionID, turnID, worktree, query, alre
     };
     try {
         // 异步获取混合检索结果
-        const hybridMemories = await searchHybrid(worktree, sessionID, query, alreadySurfaced, 10);
+        const hybridMemories = await searchHybrid(worktree, sessionID, partId, messageId, query, alreadySurfaced, 10);
         // LLM 召回逻辑 + 超时处理
         if (config()?.recall?.llmRecall && hybridMemories.length > 3) {
             let llmRecallFinish = false;
             const timeoutMs = config()?.recall?.llmRecallTimeout ?? 8000;
             // 启动 LLM 召回（后台执行，不阻塞返回）
-            const llmPromise = recallRelevantMemoriesByLLM(createOpenCodeRecallLLMClient(llm, sessionID || ''), sessionID, worktree, query, hybridMemories, model).then((llmResult) => {
+            const llmPromise = recallRelevantMemoriesByLLM(createOpenCodeRecallLLMClient(llm, sessionID || ''), sessionID, partId, messageId, worktree, query, hybridMemories, model).then((llmResult) => {
                 // LLM 召回完成，更新结果
                 handle.result = llmResult;
                 handle.settled = true;
@@ -199,25 +211,24 @@ function getState(projectPath) {
         distilling: false,
         lastExtraction: 0,
         turnsSinceCuration: 0,
+        distillingMap: new Map(),
     };
     states.set(projectPath, state);
     return state;
 }
 export const MemoryPlugin = async (params) => {
+    params.log?.("info", "MemoryPlugin initialized", { service: "offical-memory" });
     const worktreeOrigin = params.worktree || params;
     const directory = params.directory || params;
     const projectPath = directory || worktreeOrigin;
     const worktree = projectPath;
     log.info(`[prjPath]worktreeOrigin=${worktreeOrigin}, directory=${directory}`);
-    params.log?.("info", "MemoryPlugin initialized", { service: "offical-memory" })
-    params.metric?.("plugin.startup", 1, { service: "offical-memory" })
     // 等待配置加载完成
     await load(getOpencodeConfigHomeDir());
-    params.log?.("info", "memory config", { ...config(), service: "offical-memory" })
+    log.info(`记忆插件配置`, JSON.stringify(config()));
     // 如果插件未启用，直接返回空插件
     if (!config().enable) {
-        log.debug("[MemoryPlugin] plugin is disabled, skipping initialization");
-        params.log?.("error", "记忆插件未启用，跳过初始化", { service: "offical-memory" })
+        log.info("[MemoryPlugin] plugin is disabled, skipping initialization");
         return {};
     }
     // 初始化工作区记忆目录
@@ -231,6 +242,7 @@ export const MemoryPlugin = async (params) => {
     const turnContextBySession = state.turnContextBySession;
     const modelCache = state.modelCache;
     const seen = state.seen;
+    const distillingMap = state.distillingMap;
     async function shouldSkip(sessionID) {
         if (isWorkerSession(sessionID))
             return true;
@@ -253,21 +265,38 @@ export const MemoryPlugin = async (params) => {
         return false;
     }
     // Background distillation — debounced, non-blocking
-    async function autoExtraction(sessionID) {
-        if (state.distilling)
-            return;
-        state.distilling = true;
-        // 缓存满足判断
-        log.info(`[autoExtraction] buffer.size: ${buffer.size}`);
-        if (buffer.size < config().memory.autoExtractBufferSize) {
-            state.distilling = false;
+    async function autoExtraction(sessionID, eventSource) {
+        // 通过distillingMap 中run判断是否已经在提取中
+        log.info(`[autoExtraction] autoExtraction start, length: ${distillingMap.size}, distillingMap: ${JSON.stringify(distillingMap)}`);
+        if (distillingMap.has(sessionID)) {
+            const distillObj = distillingMap.get(sessionID);
+            if (distillObj?.run) {
+                return;
+            }
+        }
+        else {
+            distillingMap.set(sessionID, { run: false, lastExtraction: 0 });
+        }
+        const distillObj = distillingMap.get(sessionID);
+        if (!distillObj) {
+            log.error(`[autoExtraction] distillObj is null`);
             return;
         }
+        distillObj.run = true;
+        distillingMap.set(sessionID, distillObj);
+        //state.distilling = true;
+        // 缓存满足判断
+        // log.info(`[autoExtraction] buffer.size: ${buffer.size}`);
+        // if (buffer.size < config().memory.autoExtractBufferSize) {
+        //   state.distilling = false;
+        //   return;
+        // }
         // 自动提取触发时间间隔判断
-        const timeDiff = Date.now() - state.lastExtraction;
-        log.info(`[autoExtraction] last extract pass second: ${Math.floor(timeDiff / 1000)}`);
+        const timeDiff = Date.now() - distillObj.lastExtraction;
         if (timeDiff < CAPACITY.MIN_EXTRACT_INTERVAL_MS) {
-            state.distilling = false;
+            distillObj.run = false;
+            distillingMap.set(sessionID, distillObj);
+            log.info(`[autoExtraction] autoExtraction skip, timeDiff: ${timeDiff}`);
             return;
         }
         try {
@@ -278,14 +307,18 @@ export const MemoryPlugin = async (params) => {
                 buffer,
                 model: modelCache.get("currentModel"),
                 force: false,
+                options: {
+                    eventSource: eventSource,
+                }
             });
-            state.lastExtraction = Date.now();
+            distillObj.lastExtraction = Date.now();
         }
         catch (e) {
             log.error("distillation error:", e);
         }
         finally {
-            state.distilling = false;
+            distillObj.run = false;
+            distillingMap.set(sessionID, distillObj);
         }
     }
     // Track user turns for periodic curation
@@ -298,6 +331,9 @@ export const MemoryPlugin = async (params) => {
                 sessionID,
                 model: modelCache.get("currentModel"),
                 force: false,
+                options: {
+                    eventSource: "session.idle",
+                }
             });
         }
         catch (e) {
@@ -313,6 +349,9 @@ export const MemoryPlugin = async (params) => {
                 sessionID,
                 model: modelCache.get("currentModel"),
                 force: false,
+                options: {
+                    eventSource: "session.idle",
+                }
             });
         }
         catch (e) {
@@ -344,8 +383,28 @@ export const MemoryPlugin = async (params) => {
             if (full.data && full.data.info) {
                 role = full.data.info.role;
             }
-            buffer.push({ role, content: text, timestamp: Date.now() });
-            log.info(`[message.part.updated] buffer size is: ${buffer.size}`);
+            //buffer.push({ role, content: text, timestamp: Date.now() })
+            //log.info(`[message.part.updated] buffer size is: ${buffer.size}`);
+            // 记录提取历史到数据库
+            try {
+                const db = await getDatabase();
+                const now = Date.now();
+                const record = {
+                    part_id: part.id || "",
+                    session_id: part.sessionID || "",
+                    message_id: messageID,
+                    project_id: projectPath,
+                    content: text,
+                    role: role,
+                    status: 0,
+                    time_created: now,
+                    time_updated: now,
+                };
+                await db.upsertMemExtractHis(record);
+            }
+            catch (dbError) {
+                log.error("[appendBufferMessage] upsertMemExtractHis error: ", dbError);
+            }
         }
         catch (e) {
             log.error("[appendBufferMessage] error: ", e);
@@ -471,7 +530,7 @@ export const MemoryPlugin = async (params) => {
                     }
                     // 触发自动提取
                     if (config().memory.autoExtractEnable) {
-                        await autoExtraction(sessionID);
+                        await autoExtraction(sessionID, "session.idle");
                     }
                     // 触发记忆整理
                     if (state.turnsSinceCuration >= 3) {
@@ -485,9 +544,6 @@ export const MemoryPlugin = async (params) => {
                         }
                         state.turnsSinceCuration = 0;
                     }
-                    else {
-                        log.info(`[autoDream] skipped: ${state.turnsSinceCuration}/3 user turns since last auto dream`);
-                    }
                 }
             }
         },
@@ -500,12 +556,18 @@ export const MemoryPlugin = async (params) => {
             if (sessionID) {
                 // 压缩后消息已改变，重置该会话的上下文状态
                 turnContextBySession.delete(sessionID);
+                if (config().enable && config().memory.autoExtractEnable) {
+                    if (await shouldSkip(sessionID))
+                        return;
+                    log.info(`[experimental.session.compacting] autoExtraction trigger now, session id: ${sessionID}`);
+                    autoExtraction(sessionID, "experimental.session.compacting");
+                }
             }
         },
         "experimental.chat.messages.transform": async (_input, output) => {
             if (!config().enable)
                 return;
-            const { query, sessionID, messageID, messageIndex } = getLastUserQuery(output.messages);
+            const { query, sessionID, partId, messageID, messageIndex } = getLastUserQuery(output.messages);
             if (sessionID && isWorkerSession(sessionID))
                 return;
             const ctx = sessionID ? turnContextBySession.get(sessionID) : undefined;
@@ -549,11 +611,11 @@ export const MemoryPlugin = async (params) => {
                 if (config().recall.recallEnable && !shouldIgnoreMemoryContext(query) && query) {
                     recallPrefetch = ctx?.turnID === turnID
                         ? ctx.recallPrefetch
-                        : await startRecallPrefetch(params.client, sessionID, turnID, worktree, query, alreadySurfaced, recentTools, config()?.recall?.providerID ?
+                        : await startRecallPrefetch(params.client, sessionID, partId || '', messageID || '', turnID, worktree, query, alreadySurfaced, recentTools, config()?.recall?.providerID ?
                             { providerID: config()?.recall?.providerID?.trim(), modelID: config()?.recall?.modelID?.trim() }
                             : modelCache.get("currentModel"));
                 }
-                const newCtx = { query, alreadySurfaced, recentTools, prevMessageCount: output.messages.length, isLoadSystemPrompt, turnID, recallPrefetch };
+                const newCtx = { query, alreadySurfaced, recentTools, prevMessageCount: output.messages.length, isLoadSystemPrompt, turnID, recallPrefetch, partId, messageId: messageID };
                 turnContextBySession.set(sessionID, newCtx);
             }
             if (!config().recall.recallEnable || shouldIgnoreMemoryContext(query)) {
@@ -588,10 +650,36 @@ export const MemoryPlugin = async (params) => {
             const query = ctx?.query || '';
             const alreadySurfaced = ctx?.alreadySurfaced ?? new Set();
             const isLoadSystemPrompt = ctx?.isLoadSystemPrompt ?? false;
+            const partId = ctx?.partId;
+            const messageId = ctx?.messageId;
             //const isLoadSystemPrompt = false;
             const ignoreMemoryContext = !config().recall.recallEnable || shouldIgnoreMemoryContext(query);
             const recalled = ignoreMemoryContext ? [] : consumeRecallPrefetch(ctx);
             const recalledSection = formatRecalledMemories(recalled);
+            // 记录 recalled 数据埋点日志
+            if (recalled && recalled.length > 0) {
+                // sendTraceLog({
+                //   provider_id: modelCache.get("currentModel")?.providerID,
+                //   model_id: modelCache.get("currentModel")?.modelID,
+                //   session_id: sessionID || "",
+                //   message_id: messageId || "",
+                //   part_id: partId || "",
+                //   p_session_id: "",
+                //   user_query: query,
+                //   agent_name: "main_agent",
+                //   op_type: "recall_result",
+                //   op_flag: "S",
+                //   event_source: "system_prompt_build",
+                //   start_time: new Date(),
+                //   end_time: new Date(),
+                //   input_content: JSON.stringify({
+                //       query: query
+                //     }),
+                //   output_content: JSON.stringify(recalled),
+                //   config_param: JSON.stringify(config()?.recall),
+                // });
+                log.info(`[system_prompt_build]召回记忆成功 `, JSON.stringify({ user_query: query, recalledResult: recalled }));
+            }
             // for (const key of extractSurfacedMemoryKeys(recalledSection)) {
             //   alreadySurfaced.add(key)
             // }

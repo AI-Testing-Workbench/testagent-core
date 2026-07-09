@@ -9,4 +9,7 @@ export declare function runAutoDream(input: {
     };
     /** Skip minMessages threshold check — distill whatever is pending */
     force?: boolean;
+    options?: {
+        eventSource?: string;
+    };
 }): Promise<void>;

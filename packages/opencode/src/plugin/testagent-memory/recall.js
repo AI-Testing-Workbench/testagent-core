@@ -4,6 +4,9 @@ import { getMemoryDir } from "./paths.js";
 import { vectorfilter } from "./vectorSearch.js";
 import { buildFtsTokens } from "./tokenizer.js";
 import * as log from "./core/log.js";
+import { EmbeddingService } from "./embedding/service.js";
+// EmbeddingService 单例，避免每次调用 searchHybrid 都 new 新实例导致缓存失效
+const embeddingServiceInstance = new EmbeddingService();
 const MAX_RECALLED_MEMORIES = 5;
 const MAX_MEMORY_LINES = 200;
 const MAX_MEMORY_BYTES = 4096;
@@ -97,7 +100,7 @@ function isToolReferenceMemory(header, content, recentTools) {
     const toolHaystack = recentTools.map((t) => t.toLowerCase());
     return toolHaystack.some((tool) => haystack.includes(tool));
 }
-export function recallRelevantMemoriesKeyWord(worktree, sessionID, query, alreadySurfaced = new Set(), recentTools = [], maxResults = 5) {
+export async function recallRelevantMemoriesKeyWord(worktree, sessionID, partId, messageId, query, alreadySurfaced = new Set(), recentTools = [], maxResults = 5) {
     const memoryDir = getMemoryDir(worktree);
     const allMemories = scanMemoryFiles(memoryDir);
     if (!allMemories || allMemories.length === 0)
@@ -106,10 +109,32 @@ export function recallRelevantMemoriesKeyWord(worktree, sessionID, query, alread
     // 对query进行FTS预处理
     if (!query)
         return [];
+    log.info(`[Jieba分词 start]`, query);
     const queryTokens = buildFtsTokens(query, true);
     if (!queryTokens || queryTokens.length === 0)
         return [];
-    log.info(`[queryTokens 分词结果]：${JSON.stringify(queryTokens)}`);
+    log.info(`[Jieba分词 end]`, JSON.stringify(queryTokens));
+    // 发送 jieba 分词埋点日志
+    // sendTraceLog({
+    //   provider_id: "",
+    //   model_id: "",
+    //   session_id: sessionID,
+    //   message_id: messageId,
+    //   part_id: partId,
+    //   p_session_id: "",
+    //   user_query: query,
+    //   agent_name: "main_agent",
+    //   op_type: "jieba_tokenize",
+    //   op_flag: queryTokens.length > 1 ? "S" : "F",
+    //   event_source: "fts_tokenizer",
+    //   start_time: traceStartTime,
+    //   end_time: new Date(),
+    //   input_content: JSON.stringify({
+    //       query: query
+    //     }),
+    //   output_content: JSON.stringify(queryTokens),
+    //   config_param: JSON.stringify(config()?.recall),
+    // });
     // 这里不能只用 filter，必须用 map 来追加 content
     const filterMemories = memories.map((mem) => {
         // 读取并处理内容
@@ -179,7 +204,7 @@ export function formatRecalledMemories(memories) {
     ].join("\n");
 }
 let isFinding = false;
-export async function recallRelevantMemoriesByLLM(llm, sessionID, worktree, query, memories, model) {
+export async function recallRelevantMemoriesByLLM(llm, sessionID, partId, messageId, worktree, query, memories, model) {
     // 防重复执行锁
     if (isFinding)
         return [];
@@ -188,12 +213,15 @@ export async function recallRelevantMemoriesByLLM(llm, sessionID, worktree, quer
         if (memories.length === 0) {
             return [];
         }
+        log.info(`[LLM recall start]`, query);
         //模型召回
-        const result = await selectRelevantMemories(llm, query, memories, model);
-        log.info(`[LLM recalled] \n ${JSON.stringify(result)}`);
+        const result = await selectRelevantMemories(llm, sessionID, partId, messageId, query, memories, model);
+        log.info(`[LLM recall end]`, JSON.stringify(result));
         return result;
     }
     catch (e) {
+        // 记录异常信息
+        log.error(`[LLM recall 异常]`, e);
     }
     finally {
         // 释放锁
@@ -201,7 +229,10 @@ export async function recallRelevantMemoriesByLLM(llm, sessionID, worktree, quer
     }
     return [];
 }
-async function selectRelevantMemories(llm, query, memories, model) {
+async function selectRelevantMemories(llm, sessionID, partId, messageId, query, memories, model) {
+    let recallRes = [];
+    const traceStartTime = new Date();
+    let errorMsg = "";
     const matchList = memories.map((item, index) => ({
         index,
         filename: item.fileName,
@@ -237,18 +268,47 @@ async function selectRelevantMemories(llm, query, memories, model) {
             if (!Array.isArray(parsed))
                 return [];
             // 根据下标返回原对象
-            return parsed
+            recallRes = parsed
                 .filter((i) => i >= 0 && i < memories.length)
                 .slice(0, 5)
                 .map((i) => memories[i]);
         }
-        catch {
+        catch (e) {
+            errorMsg = e instanceof Error ? e.message : String(e);
             return [];
         }
     }
     catch (e) {
+        errorMsg = e instanceof Error ? e.message : String(e);
         return [];
     }
+    finally {
+        // const traceEndTime = new Date();
+        // sendTraceLog({
+        //   provider_id: model?.providerID || "",
+        //   model_id: model?.modelID || "",
+        //   session_id: sessionID || "",
+        //   message_id: messageId || "",
+        //   part_id: partId || "",
+        //   p_session_id: sessionID,
+        //   user_query: query,
+        //   agent_name: "memory-recall",
+        //   op_type: "llm_recall",
+        //   op_flag: errorMsg? "F" : "S",
+        //   event_source: "memory_recall",
+        //   start_time: traceStartTime,
+        //   end_time: traceEndTime,
+        //   input_content: JSON.stringify({
+        //       query: query,
+        //       input_length: SELECT_MEMORIES_SYSTEM_PROMPT.length
+        //     }),
+        //   output_content: JSON.stringify(recallRes),
+        //   other_content: errorMsg?JSON.stringify(errorMsg):"",
+        //   prompt: SELECT_MEMORIES_SYSTEM_PROMPT,
+        //   config_param: JSON.stringify(config()?.recall)
+        // });
+    }
+    return recallRes;
 }
 /**
  * 截取字符串中最后一对 [] 里的全部内容（包含 [ 和 ] 符号）
@@ -274,14 +334,14 @@ function getLastBracketContent(str) {
  * @param maxResults
  * @returns
  */
-export async function searchHybrid(worktree, sessionID, query, alreadySurfaced, maxResults = 5) {
+export async function searchHybrid(worktree, sessionID, partId, messageId, query, alreadySurfaced, maxResults = 5) {
     const candidateK = maxResults * 3;
     // 对query进行FTS预处理
     //const processedQuery = buildFtsQuery(query)
-    const [keywordHeaders, vectorHeaders] = await Promise.all([
+    const [keywordHeaders, embeddingResult] = await Promise.all([
         (async () => {
             try {
-                return recallRelevantMemoriesKeyWord(worktree, sessionID, query, alreadySurfaced, [], candidateK);
+                return recallRelevantMemoriesKeyWord(worktree, sessionID, partId, messageId, query, alreadySurfaced, [], candidateK);
             }
             catch {
                 return [];
@@ -295,6 +355,18 @@ export async function searchHybrid(worktree, sessionID, query, alreadySurfaced, 
                 return [];
             }
         })(),
+        // (async () => {
+        //   try {
+        //     return await embeddingServiceInstance.retrieveMemory(worktree, sessionID, query, alreadySurfaced, candidateK, 0.3)
+        //   } catch (e) {
+        //     log.error(`[行内向量模型调用异常]`, e);
+        //     try {
+        //       return await vectorfilter(worktree, sessionID, query, alreadySurfaced, candidateK, 0.3)
+        //     } catch {
+        //       return [] as RecalledMemory[]
+        //     }
+        //   }
+        // })(),
     ]);
     // RRF merge: k=60 is a standard constant from the RRF paper
     const RRF_K = 60;
@@ -314,8 +386,8 @@ export async function searchHybrid(worktree, sessionID, query, alreadySurfaced, 
         }
     }
     // Process embedding results
-    for (let rank = 0; rank < vectorHeaders.length; rank++) {
-        const r = vectorHeaders[rank];
+    for (let rank = 0; rank < embeddingResult.length; rank++) {
+        const r = embeddingResult[rank];
         const id = r.filePath;
         const rrfScore = 1 / (RRF_K + rank + 1);
         const existing = mergedMap.get(id);

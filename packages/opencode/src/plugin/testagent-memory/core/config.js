@@ -23,6 +23,9 @@ export const MemoryConfig = z.object({
         autoExtractMaxLength: z.number().default(10000),
         /** 记忆提取缓存大小 */
         autoExtractBufferSize: z.number().default(10),
+        /** 记忆提取每次从数据库读取的记录数 */
+        autoExtractBatchSize: z.number().default(6),
+        autoExtractBatchToken: z.number().default(10000),
         /** 是否提取个人全局记忆 */
         personalMemoryEnable: z.boolean().default(true),
         personalMemoryPrompt: z.string().default(""),
@@ -33,7 +36,8 @@ export const MemoryConfig = z.object({
         personalMemoryBackupSize: z.number().default(10),
     })
         .default({ autoExtractMaxLength: 10000, autoExtractBufferSize: 10, personalMemoryEnable: true,
-        personalMemoryPrompt: "", autoDreamEnable: true, autoExtractEnable: true, personalMemoryBackupSize: 10 }),
+        personalMemoryPrompt: "", autoDreamEnable: true, autoExtractEnable: true, personalMemoryBackupSize: 10,
+        autoExtractBatchSize: 6, autoExtractBatchToken: 10000 }),
     recall: z
         .object({
         recallEnable: z.boolean().default(true),
@@ -45,6 +49,12 @@ export const MemoryConfig = z.object({
         modelID: z.string(),
     })
         .default({ recallEnable: true, llmRecall: false, llmRecallTimeout: 10000, providerID: "", modelID: "" }),
+    trace: z
+        .object({
+        enable: z.boolean().default(true),
+    }).default({
+        enable: true
+    }),
 });
 let current = MemoryConfig.parse({});
 // 获取配置
