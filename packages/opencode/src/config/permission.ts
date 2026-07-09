@@ -8,12 +8,18 @@ export const Action = Schema.Literals(["ask", "allow", "deny"])
   .pipe(withStatics((s) => ({ zod: zod(s) })))
 export type Action = Schema.Schema.Type<typeof Action>
 
-export const Object = Schema.Record(Schema.String, Action)
+// Accept null as a delete sentinel so the config update API can signal key removal.
+// patchJsonc converts null → undefined (jsonc-parser delete), stripNulls removes it
+// at the UI/merge layer.
+const NullableAction = Schema.Union([Action, Schema.Null])
+export type NullableAction = Schema.Schema.Type<typeof NullableAction>
+
+export const Object = Schema.Record(Schema.String, NullableAction)
   .annotate({ identifier: "PermissionObjectConfig" })
   .pipe(withStatics((s) => ({ zod: zod(s) })))
 export type Object = Schema.Schema.Type<typeof Object>
 
-export const Rule = Schema.Union([Action, Object])
+export const Rule = Schema.Union([Action, Object, Schema.Null])
   .annotate({ identifier: "PermissionRuleConfig" })
   .pipe(withStatics((s) => ({ zod: zod(s) })))
 export type Rule = Schema.Schema.Type<typeof Rule>

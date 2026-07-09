@@ -424,13 +424,23 @@ function globalConfigFile() {
 
 function patchJsonc(input: string, patch: unknown, path: string[] = []): string {
   if (!isRecord(patch)) {
-    const edits = modify(input, path, patch, {
-      formattingOptions: {
-        insertSpaces: true,
-        tabSize: 2,
-      },
-    })
-    return applyEdits(input, edits)
+    // null is a delete sentinel: convert to undefined so jsonc-parser removes the key.
+    // jsonc-parser's setProperty throws "Can not delete in empty document" when value
+    // is undefined and the intermediate parent node doesn't exist (e.g. deleting a deeply
+    // nested key whose parent was never created). This is a no-op — there's nothing to
+    // delete — so catch and return the input unchanged.
+    const value = patch === null ? undefined : patch
+    try {
+      const edits = modify(input, path, value, {
+        formattingOptions: {
+          insertSpaces: true,
+          tabSize: 2,
+        },
+      })
+      return applyEdits(input, edits)
+    } catch {
+      return input
+    }
   }
 
   return Object.entries(patch).reduce((result, [key, value]) => patchJsonc(result, value, [...path, key]), input)
