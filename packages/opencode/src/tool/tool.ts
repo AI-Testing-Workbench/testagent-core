@@ -1,9 +1,10 @@
-import { Effect, Schema } from "effect"
+import { Effect, Metric, Schema } from "effect"
 import type { MessageV2 } from "../session/message-v2"
 import type { Permission } from "../permission"
 import type { SessionID, MessageID } from "../session/schema"
 import * as Truncate from "./truncate"
 import { Agent } from "@/agent/agent"
+import { failInvalidArgs } from "@opencode-ai/core/effect/observability" // testagent_change
 
 interface Metadata {
   [key: string]: any
@@ -105,6 +106,14 @@ function wrap<Parameters extends Schema.Decoder<unknown>, Result extends Metadat
                     { cause: error },
                   ),
             ),
+            Effect.tapError(() =>
+              Metric.update(
+                Metric.withAttributes(failInvalidArgs, {
+                  session_id: ctx.sessionID,
+                }),
+                1,
+              ),
+            ), // testagent_change
           )
           const result = yield* execute(decoded as Schema.Schema.Type<Parameters>, ctx)
           if (result.metadata.truncated !== undefined) {
