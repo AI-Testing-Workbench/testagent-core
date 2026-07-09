@@ -3,9 +3,23 @@ import { HttpApi, HttpApiEndpoint, HttpApiGroup, OpenApi } from "effect/unstable
 import { described } from "./metadata"
 
 export const TestagentUserPayload = Schema.Struct({
-  id: Schema.optional(Schema.String),
-  name: Schema.optional(Schema.String),
   token: Schema.optional(Schema.String),
+  userId: Schema.optional(Schema.String),
+  userName: Schema.optional(Schema.String),
+  employeeId: Schema.optional(Schema.String),
+  enterpriseId: Schema.optional(Schema.String),
+  enterpriseName: Schema.optional(Schema.String),
+  idToken: Schema.optional(Schema.String),
+  joinedEnterpriseIds: Schema.optional(Schema.String),
+  netEnv: Schema.optional(Schema.String),
+  openId: Schema.optional(Schema.String),
+  originPathId: Schema.optional(Schema.String),
+  pathId: Schema.optional(Schema.String),
+  pathName: Schema.optional(Schema.String),
+  refreshToken: Schema.optional(Schema.String),
+  rtcId: Schema.optional(Schema.String),
+  sapId: Schema.optional(Schema.String),
+  ystId: Schema.optional(Schema.String),
 })
 
 export const TestagentPaths = {

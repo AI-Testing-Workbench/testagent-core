@@ -16,8 +16,9 @@ export function usable(input: { cfg: Config.Info; model: Provider.Model }) {
     : Math.max(0, context - ProviderTransform.maxOutputTokens(input.model))
 
   // testagent_change start - threshold_percent support
+  // threshold_percent only applies when auto compaction is enabled
   const percent = input.cfg.compaction?.threshold_percent
-  if (typeof percent === "number") {
+  if (input.cfg.compaction?.auto !== false && typeof percent === "number") {
     const win = input.model.limit.input || context
     const cap = Math.floor(win * (percent / 100))
     return Math.min(base, cap)

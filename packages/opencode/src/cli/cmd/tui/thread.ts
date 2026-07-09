@@ -132,16 +132,40 @@ export const TuiThreadCommand = cmd({
       try {
         const envId = process.env.TESTAGENT_USER_ID
         const envName = process.env.TESTAGENT_USER_NAME
+        const envSapId = process.env.TESTAGENT_SAP_ID
+        const envOpenId = process.env.TESTAGENT_OPEN_ID
+        const envOriginPathId = process.env.TESTAGENT_ORIGIN_PATH_ID
+        const envPathName = process.env.TESTAGENT_PATH_NAME
         const user =
           envId && envName
-            ? { userId: envId, userName: envName, token: process.env.TESTAGENT_TOKEN ?? "" }
+            ? { 
+                userId: envId, 
+                userName: envName, 
+                sapId: envSapId, 
+                openId: envOpenId,
+                originPathId: envOriginPathId,
+                pathName: envPathName,
+                token: ''
+              }
             : await ExternalAuth.ensureAuthenticated()
         // Write user info to env so worker thread can read it at plugin init time
         process.env.TESTAGENT_USER_ID = user.userId ?? ""
         process.env.TESTAGENT_USER_NAME = user.userName ?? ""
+        process.env.TESTAGENT_SAP_ID = user.sapId ?? ""
+        process.env.TESTAGENT_OPEN_ID = user.openId ?? ""
+        process.env.TESTAGENT_ORIGIN_PATH_ID = user.originPathId ?? ""
+        process.env.TESTAGENT_PATH_NAME = user.pathName ?? ""
         // Also store in User module so other parts of the CLI can access it
         const { User } = await import("@/testagent/user")
-        User.set({ id: user.userId, name: user.userName, token: user.token })
+        User.set({ 
+          userId: user.userId, 
+          userName: user.userName, 
+          sapId: user.sapId,
+          openId: user.openId,
+          originPathId: user.originPathId,
+          pathName: user.pathName,
+          token: user.token,
+        })
       } catch (err) {
         UI.error(err instanceof Error ? err.message : String(err))
         process.exitCode = 1

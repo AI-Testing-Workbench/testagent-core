@@ -22,18 +22,18 @@ const Color = Schema.Union([
 
 const AgentSchema = Schema.StructWithRest(
   Schema.Struct({
-    model: Schema.optional(ConfigModelID),
-    variant: Schema.optional(Schema.String).annotate({
+    model: Schema.optional(Schema.NullOr(ConfigModelID)),
+    variant: Schema.optional(Schema.NullOr(Schema.String)).annotate({
       description: "Default model variant for this agent (applies only when using the agent's configured model).",
     }),
-    temperature: Schema.optional(Schema.Finite),
-    top_p: Schema.optional(Schema.Finite),
-    prompt: Schema.optional(Schema.String),
+    temperature: Schema.optional(Schema.NullOr(Schema.Finite)),
+    top_p: Schema.optional(Schema.NullOr(Schema.Finite)),
+    prompt: Schema.optional(Schema.NullOr(Schema.String)),
     tools: Schema.optional(Schema.Record(Schema.String, Schema.Boolean)).annotate({
       description: "@deprecated Use 'permission' field instead",
     }),
     disable: Schema.optional(Schema.Boolean),
-    description: Schema.optional(Schema.String).annotate({ description: "Description of when to use the agent" }),
+    description: Schema.optional(Schema.NullOr(Schema.String)).annotate({ description: "Description of when to use the agent" }),
     mode: Schema.optional(Schema.Literals(["subagent", "primary", "all"])),
     hidden: Schema.optional(Schema.Boolean).annotate({
       description: "Hide this subagent from the @ autocomplete menu (default: false, only applies to mode: subagent)",
@@ -42,7 +42,7 @@ const AgentSchema = Schema.StructWithRest(
     color: Schema.optional(Color).annotate({
       description: "Hex color code (e.g., #FF5733) or theme color (e.g., primary)",
     }),
-    steps: Schema.optional(PositiveInt).annotate({
+    steps: Schema.optional(Schema.NullOr(PositiveInt)).annotate({
       description: "Maximum number of agentic iterations before forcing text-only response",
     }),
     maxSteps: Schema.optional(PositiveInt).annotate({ description: "@deprecated Use 'steps' field instead." }),

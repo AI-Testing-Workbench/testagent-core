@@ -3,6 +3,7 @@ import { Effect } from "effect"
 import { HttpApiBuilder } from "effect/unstable/httpapi"
 import { RootHttpApi } from "../api"
 import { TestagentUserPayload } from "../groups/testagent"
+import type { StoredToken } from "@/external-auth"
 
 const log = Log.create({ service: "server" })
 
@@ -14,16 +15,16 @@ export const testagentHandlers = HttpApiBuilder.group(RootHttpApi, "testagent", 
       const { User } = yield* Effect.promise(() => import("@/testagent/user"))
       const { ExternalAuth } = yield* Effect.promise(() => import("@/external-auth"))
 
-      const { id, name, token } = ctx.payload
+      const { userId, userName, sapId, token, openId, originPathId, pathName } = ctx.payload
 
-      log.info("Setting testagent user info", { id, name, hasToken: !!token })
-      User.set({ id, name, token })
+      log.info("Setting testagent user info", { userId, userName, sapId, hasToken: !!token })
+      User.set({ userId, userName, sapId, openId, originPathId, pathName, token })
 
-      if (token && id && name) {
+      if (token && userId && userName && sapId) {
         const existingToken = yield* Effect.promise(() => ExternalAuth.getToken())
         if (!existingToken) {
           log.info("Saving testagent token to local file")
-          yield* Effect.promise(() => ExternalAuth.saveToken({ userId: id, userName: name, token }))
+          yield* Effect.promise(() => ExternalAuth.saveToken(ctx.payload as StoredToken))
         }
       }
 

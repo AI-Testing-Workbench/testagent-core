@@ -21,6 +21,20 @@ export type StoredToken = {
   userId: string
   userName: string
   token: string
+  employeeId: string
+  enterpriseId: string
+  enterpriseName: string
+  idToken: string
+  joinedEnterpriseIds: string
+  netEnv: string
+  openId: string
+  originPathId: string
+  pathId: string
+  pathName: string
+  refreshToken: string
+  rtcId: string
+  sapId: string
+  ystId: string
 }
 
 // Matches TokenResponse in tsCodeAuth/common/tsCodeAuth.ts
@@ -40,6 +54,7 @@ export namespace ExternalAuth {
       if (!(await f.exists())) return undefined
       const data = await f.json().catch(() => undefined)
       if (!data || typeof data.token !== "string") return undefined
+      if (!data.sapId) return undefined
       return data as StoredToken
     } else {
       // Node.js runtime
@@ -49,6 +64,7 @@ export namespace ExternalAuth {
       try {
         const data = JSON.parse(content)
         if (!data || typeof data.token !== "string") return undefined
+        if (!data.sapId) return undefined
         return data as StoredToken
       } catch {
         return undefined
@@ -162,6 +178,20 @@ export namespace ExternalAuth {
             userId: data.body.employeeId,
             userName: data.body.userName,
             token: data.body.token,
+            employeeId: data.body.employeeId,
+            enterpriseId: data.body.enterpriseId,
+            enterpriseName: data.body.enterpriseName,
+            idToken: data.body.idToken,
+            joinedEnterpriseIds: data.body.joinedEnterpriseIds,
+            netEnv: data.body.netEnv,
+            openId: data.body.openId,
+            originPathId: data.body.originPathId,
+            pathId: data.body.pathId,
+            pathName: data.body.pathName,
+            refreshToken: data.body.refreshToken,
+            rtcId: data.body.rtcId,
+            sapId: data.body.sapId,
+            ystId: data.body.ystId,
           }
           await saveToken(stored)
           spinner.stop(`登录成功，欢迎 ${stored.userName ?? stored.userId ?? ""}`)

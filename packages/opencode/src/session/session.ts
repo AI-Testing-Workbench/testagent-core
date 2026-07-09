@@ -5,6 +5,7 @@ import { Bus } from "@/bus"
 import { Decimal } from "decimal.js"
 import { type ProviderMetadata, type LanguageModelUsage } from "ai"
 import { Flag } from "@opencode-ai/core/flag/flag"
+import { sessionCreated } from "@opencode-ai/core/effect/observability" // testagent_change
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
 
 import { Database } from "@/storage/db"
@@ -36,7 +37,7 @@ import { ModelID, ProviderID } from "@/provider/schema"
 import type { Provider } from "@/provider/provider"
 import { Permission } from "@/permission"
 import { Global } from "@opencode-ai/core/global"
-import { Effect, Layer, Option, Context, Schema, Types } from "effect"
+import { Effect, Layer, Metric, Option, Context, Schema, Types } from "effect"
 import { zod } from "@/util/effect-zod"
 import { NonNegativeInt, optionalOmitUndefined, withStatics } from "@/util/schema"
 
@@ -519,6 +520,7 @@ export const layer: Layer.Layer<Service, never, Bus.Service | Storage.Service | 
       }
       log.info("created", result)
 
+      yield* Metric.update(Metric.withAttributes(sessionCreated, { sessionID: result.id }), 1) // testagent_change
       yield* sync.run(Event.Created, { sessionID: result.id, info: result })
 
       if (!Flag.OPENCODE_EXPERIMENTAL_WORKSPACES) {

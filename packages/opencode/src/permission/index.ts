@@ -346,12 +346,17 @@ function expand(pattern: string): string {
 export function fromConfig(permission: ConfigPermission.Info) {
   const ruleset: Ruleset = []
   for (const [key, value] of Object.entries(permission)) {
+    // null is a delete sentinel — skip it; it will be removed by patchJsonc
+    // (JSONC files) or stripNulls (JSON files) before the config is re-read.
+    if (value === null) continue
     if (typeof value === "string") {
       ruleset.push({ permission: key, action: value, pattern: "*" })
       continue
     }
     ruleset.push(
-      ...Object.entries(value).map(([pattern, action]) => ({ permission: key, pattern: expand(pattern), action })),
+      ...Object.entries(value)
+        .filter((entry): entry is [string, ConfigPermission.Action] => entry[1] !== null)
+        .map(([pattern, action]) => ({ permission: key, pattern: expand(pattern), action })),
     )
   }
   return ruleset

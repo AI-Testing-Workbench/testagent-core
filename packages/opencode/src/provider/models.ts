@@ -191,10 +191,10 @@ export const layer: Layer.Layer<Service, never, AppFileSystem.Service> = Layer.e
     const fetchTestLLMModels = Effect.fn("ModelsDev.fetchTestLLMModels")(function* () {
       const apiKey = process.env.TEST_LLM_API_KEY ?? "sk-WHMJMG6H36UGdq7FdVzODA"
       const baseURL = (process.env.TEST_LLM_BASE_URL ?? decodeURIComponent(atob("aHR0cCUzQSUyRiUyRnRlc3QtbGxtLnBsYXRmb3JtLmNtYmNoaW5hLmNuJTJGdjE="))).replace(/\/+$/, "")
-      const userId = User.get().id ?? ""
+      const userId = User.get().userId ?? ""
       const url = `${baseURL}/models?user_id=${encodeURIComponent(userId)}`
 
-      log.info("[testagent] fetchTestLLMModels:", { url, userId, baseURL })
+      yield* Effect.logInfo("fetchTestLLMModels:", { url, userId, baseURL })
       // testagent_change - use native fetch instead of Effect HttpClient
       const response = yield* Effect.tryPromise({
         try: () =>
@@ -248,10 +248,11 @@ export const layer: Layer.Layer<Service, never, AppFileSystem.Service> = Layer.e
         // Always check and inject test-llm if not present
         if (!providers["test-llm"]) {
           const models = yield* fetchTestLLMModels().pipe(
-            Effect.catch((error) => {
-              log.error("test-llm model fetch failed", { error })
-              return Effect.succeed({} as Record<string, Model>)
-            }),
+            Effect.catch((error) =>
+              Effect.logError("test-llm model fetch failed").pipe(
+                Effect.andThen(Effect.succeed({} as Record<string, Model>)),
+              ),
+            ),
           )
 
           const mutableProviders = { ...providers } as Record<string, Provider>

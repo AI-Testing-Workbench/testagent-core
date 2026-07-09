@@ -1169,7 +1169,7 @@ const layer: Layer.Layer<
           get: (key: string) => env.get(key),
         }
 
-        log.info("init")
+        yield* Effect.logInfo("init")
 
         function mergeProvider(providerID: ProviderID, provider: Partial<Info>) {
           const existing = providers[providerID]
@@ -1199,6 +1199,7 @@ const layer: Layer.Layer<
         }
 
         for (const hook of plugins) {
+          if (!hook) continue // testagent_change - 过滤插件返回的 undefined hook
           const p = hook.provider
           const models = p?.models
           if (!p || !models) continue
@@ -1458,7 +1459,7 @@ const layer: Layer.Layer<
             continue
           }
 
-          log.info("found", { providerID })
+          yield* Effect.logInfo("found", { providerID })
         }
 
         return {
@@ -1687,10 +1688,10 @@ const layer: Layer.Layer<
             try {
               const body = JSON.parse(opts.body as string)
               const u = User.get()
-              if (u.id) body.user = u.id
+              if (u.sapId) body.user = u.sapId
               body.tags = ["test-design"]
               opts.body = JSON.stringify(body)
-              log.info("userID", { user: u.id })
+              log.info("userID", { sapId: u.sapId })
             } catch {}
           }
 
@@ -1700,8 +1701,7 @@ const layer: Layer.Layer<
             url,
             method: opts.method || "GET",
             hasBody: !!opts.body,
-            bodySize: opts.body ? (typeof opts.body === "string" ? opts.body.length : "binary") : 0,
-            body: opts.body ? (typeof opts.body === "string" ? opts.body : JSON.stringify(opts.body)) : undefined,
+            bodySize: opts.body ? (typeof opts.body === "string" ? opts.body.length : "binary") : 0
           })
           const startTime = Date.now()
           // testagent_change end

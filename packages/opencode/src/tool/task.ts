@@ -6,8 +6,9 @@ import { MessageV2 } from "../session/message-v2"
 import { Agent } from "../agent/agent"
 import type { SessionPrompt } from "../session/prompt"
 import { Config } from "@/config/config"
-import { Effect, Exit, Schema } from "effect"
+import { Effect, Exit, Metric, Schema } from "effect"
 import { EffectBridge } from "@/effect/bridge"
+import { taskCall } from "@opencode-ai/core/effect/observability"
 
 export interface TaskPromptOps {
   cancel(sessionID: SessionID): Effect.Effect<void>
@@ -68,6 +69,8 @@ export const TaskTool = Tool.define(
       ctx: Tool.Context,
     ) {
       const cfg = yield* config.get()
+      const sid = yield* sessions.get(ctx.sessionID)
+      yield* Metric.update(Metric.withAttributes(taskCall, { sessionID: ctx.sessionID, subagent_type: params.subagent_type, modelID: sid.model?.id ?? "", providerID: sid.model?.providerID ?? "" }), 1)
 
       if (!ctx.extra?.bypassAgentCheck) {
         yield* ctx.ask({

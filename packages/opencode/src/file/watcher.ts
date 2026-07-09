@@ -77,18 +77,18 @@ export const layer = Layer.effect(
 
           const ctx = yield* InstanceState.context
 
-          log.info("init", { directory: ctx.directory })
+          yield* Effect.logInfo("init", { directory: ctx.directory })
 
           const backend = getBackend()
           if (!backend) {
-            log.error("watcher backend not supported", { directory: ctx.directory, platform: process.platform })
+            yield* Effect.logError("watcher backend not supported", { directory: ctx.directory, platform: process.platform })
             return
           }
 
           const w = watcher()
           if (!w) return
 
-          log.info("watcher backend", { directory: ctx.directory, platform: process.platform, backend })
+          yield* Effect.logInfo("watcher backend", { directory: ctx.directory, platform: process.platform, backend })
 
           const subs: ParcelWatcher.AsyncSubscription[] = []
           yield* Effect.addFinalizer(() =>

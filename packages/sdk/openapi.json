@@ -481,13 +481,55 @@
               "schema": {
                 "type": "object",
                 "properties": {
-                  "id": {
-                    "type": "string"
-                  },
-                  "name": {
-                    "type": "string"
-                  },
                   "token": {
+                    "type": "string"
+                  },
+                  "userId": {
+                    "type": "string"
+                  },
+                  "userName": {
+                    "type": "string"
+                  },
+                  "employeeId": {
+                    "type": "string"
+                  },
+                  "enterpriseId": {
+                    "type": "string"
+                  },
+                  "enterpriseName": {
+                    "type": "string"
+                  },
+                  "idToken": {
+                    "type": "string"
+                  },
+                  "joinedEnterpriseIds": {
+                    "type": "string"
+                  },
+                  "netEnv": {
+                    "type": "string"
+                  },
+                  "openId": {
+                    "type": "string"
+                  },
+                  "originPathId": {
+                    "type": "string"
+                  },
+                  "pathId": {
+                    "type": "string"
+                  },
+                  "pathName": {
+                    "type": "string"
+                  },
+                  "refreshToken": {
+                    "type": "string"
+                  },
+                  "rtcId": {
+                    "type": "string"
+                  },
+                  "sapId": {
+                    "type": "string"
+                  },
+                  "ystId": {
                     "type": "string"
                   }
                 },
@@ -10240,6 +10282,10 @@
               "type": {
                 "type": "string",
                 "enum": ["idle"]
+              },
+              "reason": {
+                "type": "string",
+                "enum": ["completed", "user_abort", "error"]
               }
             },
             "required": ["type"],
@@ -10674,6 +10720,25 @@
                   }
                 },
                 "required": ["read", "write"],
+                "additionalProperties": false
+              },
+              "breakdown": {
+                "type": "object",
+                "properties": {
+                  "system": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "messages": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "tools": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                },
+                "required": ["system", "messages", "tools"],
                 "additionalProperties": false
               }
             },
@@ -12719,6 +12784,9 @@
             "required": ["success", "failed"],
             "additionalProperties": false
           },
+          "langfuse": {
+            "type": "boolean"
+          },
           "share": {
             "type": "string",
             "enum": ["manual", "auto", "disabled"]
@@ -12755,6 +12823,18 @@
           },
           "small_model": {
             "type": "string"
+          },
+          "subagent_model": {
+            "type": "string"
+          },
+          "subagent_variant": {
+            "type": "string"
+          },
+          "subagent_variant_overrides": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
           },
           "default_agent": {
             "type": "string"
@@ -12978,6 +13058,30 @@
             "properties": {
               "auto": {
                 "type": "boolean"
+              },
+              "threshold_percent": {
+                "anyOf": [
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "string",
+                    "enum": ["NaN"]
+                  },
+                  {
+                    "type": "string",
+                    "enum": ["Infinity"]
+                  },
+                  {
+                    "type": "string",
+                    "enum": ["-Infinity"]
+                  },
+                  {
+                    "type": "string",
+                    "enum": ["Infinity", "-Infinity", "NaN"]
+                  }
+                ],
+                "description": "Percentage of the model input/context window that triggers automatic compaction. The reserved safety buffer still applies if it would compact sooner."
               },
               "prune": {
                 "type": "boolean"
@@ -16919,6 +17023,10 @@
             "properties": {
               "sessionID": {
                 "type": "string"
+              },
+              "reason": {
+                "type": "string",
+                "enum": ["completed", "user_abort", "error"]
               }
             },
             "required": ["sessionID"],
