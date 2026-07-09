@@ -190,6 +190,11 @@ export const Info = Schema.Struct({
       description: "Runtime source file paths for each MCP server entry",
     }),
   ),
+  mcp_scopes: Schema.optional(
+    Schema.Record(Schema.String, Schema.Literals(["local", "global"])).annotate({
+      description: "Scope (local/global) for each MCP server entry. local = project config, global = user config.",
+    }),
+  ),
   plugin_status: Schema.optional(
     Schema.Struct({
       success: Schema.mutable(Schema.Array(Schema.String)),
@@ -637,8 +642,17 @@ export const layer = Layer.effect(
         const mergeMcpOrigins = (source: string, next: Info) => {
           if (!next.mcp) return
           if (!result.mcp_origins) result.mcp_origins = {}
+          if (!result.mcp_scopes) result.mcp_scopes = {}
+          const scope = source.startsWith("http://") || source.startsWith("https://")
+            ? "global"
+            : source === "OPENCODE_CONFIG_CONTENT"
+              ? "local"
+              : containsPath(source, ctx)
+                ? "local"
+                : "global"
           for (const key of Object.keys(next.mcp)) {
             result.mcp_origins[key] = source
+            result.mcp_scopes[key] = scope
           }
         }
 
