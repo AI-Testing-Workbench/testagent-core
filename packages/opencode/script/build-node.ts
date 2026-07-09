@@ -53,6 +53,7 @@ await Bun.build({
   define: {
     OPENCODE_MIGRATIONS: JSON.stringify(migrations),
     OPENCODE_CHANNEL: `'${Script.channel}'`,
+    TESTAGENT_VERSION: '1.3.0', // testagent_change - match value from build.ts
   },
   files: {
     "opencode-web-ui.gen.ts": "",
