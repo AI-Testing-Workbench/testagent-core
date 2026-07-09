@@ -1,5 +1,5 @@
 import { Effect, Layer, Logger, Metric } from "effect"
-import { FetchHttpClient } from "effect/unstable/http"
+import { FetchHttpClient, HttpBody } from "effect/unstable/http"
 import { OtlpLogger, OtlpSerialization } from "effect/unstable/observability"
 import * as EffectLogger from "./logger"
 import { Flag } from "../flag/flag"
@@ -67,6 +67,45 @@ export function resource(): { serviceName: string; serviceVersion: string; attri
   }
 }
 
+// testagent_change start  flat logs multiple lines to a single line, human readable text
+function anyValueToText(body: Record<string, unknown> | undefined): string {
+  if (!body) return ""
+  if (typeof body.stringValue === "string") return body.stringValue
+  if (body.arrayValue && Array.isArray((body.arrayValue as any).values)) {
+    return (body.arrayValue as any).values
+      .map((v: any) => anyValueToText(v))
+      .filter(Boolean)
+      .join(" ")
+  }
+  if (body.intValue !== undefined) return String(body.intValue)
+  if (body.doubleValue !== undefined) return String(body.doubleValue)
+  if (body.boolValue !== undefined) return String(body.boolValue)
+  return JSON.stringify(body)
+}
+
+const layerTextBody = Layer.succeed(OtlpSerialization.OtlpSerialization, {
+  traces: (spans: any) => HttpBody.jsonUnsafe(spans),
+  metrics: (metrics: any) => HttpBody.jsonUnsafe(metrics),
+  logs: (logs: any) => {
+    const out = {
+      ...logs,
+      resourceLogs: logs.resourceLogs?.map((rl: any) => ({
+        ...rl,
+        scopeLogs: rl.scopeLogs?.map((sl: any) => ({
+          ...sl,
+          logRecords: sl.logRecords?.map((lr: any) => ({
+            ...lr,
+            attributes: [],
+            body: { stringValue: anyValueToText(lr.body) },
+          })),
+        })),
+      })),
+    }
+    return HttpBody.jsonUnsafe(out)
+  },
+})
+// testagent_change end
+
 function logs() {
   return Logger.layer(
     [
@@ -78,7 +117,7 @@ function logs() {
       }),
     ],
     { mergeWithExisting: false },
-  ).pipe(Layer.provide(OtlpSerialization.layerJson), Layer.provide(FetchHttpClient.layer))
+  ).pipe(Layer.provide(layerTextBody), Layer.provide(FetchHttpClient.layer))
 }
 
 // Global metrics singleton — created once, runs forever.

@@ -509,9 +509,9 @@ export const layer = Layer.effect(
         return {} as Info
       }
       // testagent_change start - log raw and parsed config
-      yield* Effect.logInfo("raw config", text)
+      yield* Effect.logInfo("原始配置内容：", text)
       const data = yield* loadConfig(text, { path: filepath })
-      yield* Effect.logInfo("success parsed", data)
+      yield* Effect.logInfo("配置解析成功")
       // testagent_change end
       return data
     })
@@ -879,7 +879,7 @@ export const layer = Layer.effect(
           result.compaction = { ...result.compaction, prune: false }
         }
 
-        yield* Effect.logInfo("final merged config loaded", { config: result }) // testagent_change
+        yield* Effect.logInfo("合并后的配置:", result) // testagent_change
         return {
           config: result,
           directories,
