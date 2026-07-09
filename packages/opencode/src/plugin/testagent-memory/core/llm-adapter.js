@@ -1,8 +1,6 @@
 // Re-export workerSessionIDs from core for session tracking
 import { workerSessionIDs } from "./worker.js";
 import * as log from "./log.js";
-import { sendTraceLog } from "./trace-log.js";
-import { config } from "./config.js";
 /**
  * Create an LLMClient backed by the OpenCode SDK.
  *
@@ -106,79 +104,27 @@ export function createOpenCodeLLMClient(client, parentID) {
             let subSessionId;
             const agentName = opts?.agentName ?? "auto-worker";
             const logPrefix = `[${agentName}]`;
-            const agent = opts?.agentName;
-            const model = opts?.model;
-            const messageId = opts?.messageId ?? "";
-            const partId = opts?.partId ?? "";
-            const eventSource = opts?.eventSource ?? "";
-            // 如果是input_content字符串,则默认字符串，否则json化
-            let input_content;
-            if (typeof opts?.traceInput === "string") {
-                input_content = opts?.traceInput;
-            }
-            else {
-                input_content = opts?.traceInput !== undefined ? JSON.stringify(opts.traceInput) : '';
-            }
-            const traceData = {
-                user_query: "",
-                provider_id: model?.providerID ?? "",
-                model_id: model?.modelID ?? "",
-                session_id: "",
-                p_session_id: parentID,
-                agent_name: agentName,
-                op_type: agentName,
-                op_flag: "F",
-                event_source: eventSource,
-                start_time: new Date(),
-                end_time: new Date(),
-                config_param: JSON.stringify(config()),
-                input_content: input_content,
-                output_content: "",
-                other_content: "",
-                prompt: "",
-                message_id: messageId,
-                part_id: partId,
-            };
-            const traceRsp = {
-                success: false,
-                message: "",
-                data: "",
-            };
             try {
                 const session = await client.session.create({
                     body: { parentID, title: `testAgent ${agentName}` },
                 });
                 if (!session.data) {
-                    const errorMsg = logPrefix + "failed to create worker session";
-                    log.warn(errorMsg);
-                    // 埋点日志
-                    traceRsp.message = errorMsg;
-                    traceData.output_content = JSON.stringify(traceRsp);
-                    traceData.end_time = new Date();
-                    sendTraceLog(traceData);
+                    log.warn(logPrefix + "failed to create worker session");
                     return null;
                 }
                 subSessionId = session.data.id;
                 workerSessionIDs.add(subSessionId);
                 log.info(logPrefix + `promptForSubAgent create session: ${subSessionId}`);
-                // 埋点日志
-                traceData.session_id = subSessionId;
             }
             catch (e) {
-                const errorMsg = logPrefix + "failed to create worker session";
-                log.warn(`${errorMsg}, parent session id: ${parentID} : `, e);
-                // 埋点日志
-                traceRsp.message = errorMsg;
-                traceData.output_content = JSON.stringify(traceRsp);
-                traceData.end_time = new Date();
-                sendTraceLog(traceData);
+                log.warn(logPrefix + "failed to create worker session:", e);
                 return null;
             }
-            const llmPrompt = `${system}${user ? "\n\n" : ""}${user ?? ""}`;
-            traceData.prompt = llmPrompt;
             const parts = [
-                { type: "text", text: llmPrompt },
+                { type: "text", text: `${system}${user ? "\n\n" : ""}${user ?? ""}` },
             ];
+            const agent = opts?.agentName;
+            const model = opts?.model;
             // First attempt — with agent
             let result;
             try {
@@ -191,10 +137,6 @@ export function createOpenCodeLLMClient(client, parentID) {
                         ...(model ? { model } : {}),
                     },
                 });
-                const partInfo = extractPartInfo(result);
-                // 埋点日志
-                traceData.message_id = partInfo.msgId;
-                traceData.part_id = partInfo.partId;
             }
             catch (e) {
                 result = { error: e };
@@ -202,25 +144,10 @@ export function createOpenCodeLLMClient(client, parentID) {
             const text = extractText(result);
             if (text !== null) {
                 log.info(logPrefix + `promptForSubAgent prompt finish, session id: ${subSessionId}`);
-                // 埋点日志
-                traceRsp.success = true;
-                traceRsp.data = text;
-                traceData.output_content = JSON.stringify(traceRsp);
-                traceData.op_flag = "S";
-                traceData.end_time = new Date();
-                sendTraceLog(traceData);
                 return text;
             }
-            const errorText = `${logPrefix}promptForSubAgent prompt failed, session id: ${subSessionId}`;
-            log.warn(`${errorText}, error: `, result.error);
-            log.warn(`${errorText}, result: ${JSON.stringify(result)}`);
-            // 埋点响应数据格式
-            traceRsp.data = result;
-            traceRsp.message = errorText;
-            // 埋点日志
-            traceData.output_content = JSON.stringify(traceRsp);
-            traceData.end_time = new Date();
-            sendTraceLog(traceData);
+            log.warn(logPrefix + `promptForSubAgent prompt failed, session id: ${subSessionId}, error: `, result.error);
+            log.warn(logPrefix + `promptForSubAgent prompt failed, session id: ${subSessionId}, result: ${JSON.stringify(result)}`);
             return null;
         },
     };
@@ -237,15 +164,6 @@ function extractText(result) {
         return null;
     const textPart = data.parts.find((p) => p.type === "text" && typeof p.text === "string");
     return textPart?.text ?? null;
-}
-function extractPartInfo(result) {
-    if (!result.data || typeof result.data !== "object")
-        return { msgId: "", partId: "" };
-    const data = result.data;
-    if (!data.parts || !Array.isArray(data.parts))
-        return { msgId: "", partId: "" };
-    const textPart = data.parts.find((p) => p.type === "text" && typeof p.text === "string");
-    return { msgId: textPart?.messageID ?? "", partId: textPart?.id ?? "" };
 }
 /** Safely stringify an error for regex matching. */
 function stringifyError(error) {

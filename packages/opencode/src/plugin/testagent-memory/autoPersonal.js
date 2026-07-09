@@ -57,7 +57,6 @@ export async function runAutoPersonal(input) {
         const responseText = await llm.promptForSubAgent(prompt, "", {
             model,
             agentName: "auto-personal-memory",
-            eventSource: input.options?.eventSource,
         });
         if (responseText != null && responseText.length > 0) {
             log.info(`[autoPersonal] completed success`);

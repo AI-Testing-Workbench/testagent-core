@@ -10,9 +10,9 @@ export type RecalledMemory = {
 };
 export declare function readMemoryContent(filePath: string): string;
 export declare function truncateMemoryContent(content: string): string;
-export declare function recallRelevantMemoriesKeyWord(worktree: string, sessionID: string, partId: string, messageId: string, query?: string, alreadySurfaced?: ReadonlySet<string>, recentTools?: readonly string[], maxResults?: number): Promise<RecalledMemory[]>;
+export declare function recallRelevantMemoriesKeyWord(worktree: string, sessionID: string, query?: string, alreadySurfaced?: ReadonlySet<string>, recentTools?: readonly string[], maxResults?: number): RecalledMemory[];
 export declare function formatRecalledMemories(memories: RecalledMemory[]): string;
-export declare function recallRelevantMemoriesByLLM(llm: LLMClient, sessionID: string, partId: string, messageId: string, worktree: string, query: string, memories: RecalledMemory[], model?: {
+export declare function recallRelevantMemoriesByLLM(llm: LLMClient, sessionID: string, worktree: string, query: string, memories: RecalledMemory[], model?: {
     providerID: string;
     modelID: string;
 }): Promise<RecalledMemory[]>;
@@ -25,4 +25,4 @@ export declare function recallRelevantMemoriesByLLM(llm: LLMClient, sessionID: s
  * @param maxResults
  * @returns
  */
-export declare function searchHybrid(worktree: string, sessionID: string, partId: string, messageId: string, query: string, alreadySurfaced: ReadonlySet<string>, maxResults?: number): Promise<RecalledMemory[]>;
+export declare function searchHybrid(worktree: string, sessionID: string, query: string, alreadySurfaced: ReadonlySet<string>, maxResults?: number): Promise<RecalledMemory[]>;

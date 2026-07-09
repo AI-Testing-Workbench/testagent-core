@@ -19,7 +19,6 @@ export function createOpenCodeRecallLLMClient(client, parentID, opts) {
             if (isPrompting)
                 return null;
             isPrompting = true;
-            log.info(`[RecallSubagent start]`, JSON.stringify({ prompt: system, model: opts?.model }));
             let workerID;
             let childSession = null;
             // First attempt — with agent
@@ -52,7 +51,7 @@ export function createOpenCodeRecallLLMClient(client, parentID, opts) {
                         });
                     }
                     catch (e) {
-                        log.error(`[RecallSubagent 异常，使用主agent重试]`, e);
+                        log.error("[llmRecall retry] error:", e);
                         // 2. 失败重试：第二次调用 — 无 agent
                         await client.session.delete({ path: { id: childSession.data.id } });
                         workerSessionIDs.delete(childSession.data.id);
@@ -88,12 +87,11 @@ export function createOpenCodeRecallLLMClient(client, parentID, opts) {
                 }
                 const retryText = extractText(llmResult);
                 if (retryText !== null) {
-                    log.info(`[RecallSubagent end]`, JSON.stringify({ result: retryText }));
                     return retryText;
                 }
             }
             catch (e) {
-                log.error("[RecallSubagent 异常]", e);
+                log.error("[llmRecall final] error:", e);
             }
             finally {
                 // ==================== 4：无论如何都释放锁 ====================

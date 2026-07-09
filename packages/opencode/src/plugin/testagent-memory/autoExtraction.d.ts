@@ -13,9 +13,6 @@ export declare function run(input: {
     };
     /** Skip minMessages threshold check — distill whatever is pending */
     force?: boolean;
-    options?: {
-        eventSource?: string;
-    };
 }): Promise<{
     rounds: number;
     distilled: number;
