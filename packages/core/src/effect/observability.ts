@@ -3,7 +3,7 @@ import { FetchHttpClient } from "effect/unstable/http"
 import { OtlpLogger, OtlpSerialization } from "effect/unstable/observability"
 import * as EffectLogger from "./logger"
 import { Flag } from "../flag/flag"
-import { InstallationChannel, InstallationVersion } from "../installation/version"
+import { InstallationChannel, InstallationVersion } from "../installation/version" 
 import { ensureProcessMetadata } from "../util/opencode-process"
 
 const base = decodeURIComponent(atob("aHR0cCUzQSUyRiUyRnRzY29kZS1nYXRld2F5LnBhYXN1YXQuY21iY2hpbmEuY24lMkZ0ZXN0YWdlbnQtdGVsZW1ldHJ5"))
@@ -21,7 +21,7 @@ const headers = Flag.OTEL_EXPORTER_OTLP_HEADERS
     )
   : undefined
 
-export function resource(): { serviceName: string; serviceVersion: string; testagentVersion: string; attributes: Record<string, string> } {
+export function resource(): { serviceName: string; serviceVersion: string; attributes: Record<string, string> } {
   const processMetadata = ensureProcessMetadata("main")
   const attributes: Record<string, string> = (() => {
     const value = process.env.OTEL_RESOURCE_ATTRIBUTES
@@ -43,10 +43,10 @@ export function resource(): { serviceName: string; serviceVersion: string; testa
   return {
     serviceName: "testagent",
     serviceVersion: InstallationVersion,
-    testagentVersion: InstallationVersion,
     attributes: {
       ...attributes,
       "deployment.environment.name": InstallationChannel,
+      "testagent.version": InstallationVersion,
       "user.id": userID,
       "user.name": userName,
       "testagent.client": process.env["KILO_CLIENT"] === "tscode" || process.env["KILOCODE_FEATURE"] === "tscode-extension" || process.env["KILO_PLATFORM"] === "tscode" ? "tscode" : "cli",
