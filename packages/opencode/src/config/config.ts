@@ -879,7 +879,7 @@ export const layer = Layer.effect(
           result.compaction = { ...result.compaction, prune: false }
         }
 
-        yield* Effect.logInfo("合并后的配置:", result) // testagent_change
+        yield* Effect.logInfo("testagent config: ", result) // testagent_change
         return {
           config: result,
           directories,

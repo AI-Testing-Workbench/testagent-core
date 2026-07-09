@@ -20,6 +20,8 @@ import { startupTime } from "@opencode-ai/core/effect/observability" // testagen
 import { Server } from "@/server/server" // testagent_change
 import { Discovery } from "./discovery"
 
+let startupRecorded = false // testagent_change
+
 const log = Log.create({ service: "skill" })
 const CLAUDE_EXTERNAL_DIR = ".claude"
 const AGENTS_EXTERNAL_DIR = ".agents"
@@ -220,8 +222,11 @@ const loadSkills = Effect.fnUntraced(function* (state: State, discovered: Discov
   })
 
   // testagent_change start
-  const elapsed = performance.now() - Server.serverReadyAt
-  yield* Metric.update(startupTime, elapsed)
+  if (!startupRecorded) {
+    startupRecorded = true
+    const elapsed = performance.now() - Server.serverReadyAt
+    yield* Metric.update(startupTime, elapsed)
+  }
   yield* Effect.logInfo("skill init", { count: Object.keys(state.skills).length })
   // testagent_change end
 })
