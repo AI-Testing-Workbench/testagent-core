@@ -25,7 +25,7 @@ export declare function hasExternalLog(): boolean;
 /**
  * 调用外部日志适配器
  */
-export declare function callExternalLogOriginal(level: 'debug' | 'info' | 'warn' | 'error', message: string, data?: Record<string, unknown>): void;
+export declare function callExternalLogOriginl(level: 'debug' | 'info' | 'warn' | 'error', message: string, data?: Record<string, unknown>): void;
 /** Log an informational status message. Suppressed unless LORE_DEBUG=1. */
 export declare function info(...args: unknown[]): void;
 /** Log a warning. Suppressed unless LORE_DEBUG=1. */

@@ -19,6 +19,7 @@ export function createOpenCodeRecallLLMClient(client, parentID, opts) {
             if (isPrompting)
                 return null;
             isPrompting = true;
+            let retryText = null;
             log.info(`[RecallSubagent start]`, JSON.stringify({ prompt: system, model: opts?.model }));
             let workerID;
             let childSession = null;
@@ -74,6 +75,14 @@ export function createOpenCodeRecallLLMClient(client, parentID, opts) {
                             },
                         });
                     }
+                    finally {
+                        log.info(`[RecallSubagent end]`, retryText);
+                        isPrompting = false;
+                        if (childSession && childSession.data && childSession.data.id) {
+                            await client.session.delete({ path: { id: childSession.data.id } });
+                            workerSessionIDs.delete(childSession.data.id);
+                        }
+                    }
                 }
                 else {
                     llmResult = await client.session.prompt({
@@ -86,9 +95,8 @@ export function createOpenCodeRecallLLMClient(client, parentID, opts) {
                         },
                     });
                 }
-                const retryText = extractText(llmResult);
+                retryText = extractText(llmResult);
                 if (retryText !== null) {
-                    log.info(`[RecallSubagent end]`, JSON.stringify({ result: retryText }));
                     return retryText;
                 }
             }
@@ -96,6 +104,7 @@ export function createOpenCodeRecallLLMClient(client, parentID, opts) {
                 log.error("[RecallSubagent 异常]", e);
             }
             finally {
+                log.info(`[RecallSubagent end]`, retryText);
                 // ==================== 4：无论如何都释放锁 ====================
                 isPrompting = false;
                 // ==================== 5：可选：主动关闭/销毁子会话（彻底杜绝循环） ====================

@@ -11,18 +11,10 @@ export async function sendTraceLog(traceData) {
         return { success: false, message: "追踪日志功能未启用" };
     }
     try {
-        log.callExternalLogOriginal("info", "trace-log-info", traceData);
+        log.callExternalLogOriginl("info", "trace-log-info", traceData);
         return { success: true, data: null };
     }
     catch (error) {
-        if (error instanceof Error) {
-            if (error.name === "AbortError") {
-                log.error("追踪日志请求超时");
-                return { success: false, message: "请求超时" };
-            }
-            log.error(`追踪日志请求异常: ${error.message}`);
-            return { success: false, message: error.message };
-        }
         log.error("追踪日志请求未知错误", error);
         return { success: false, message: "未知错误" };
     }

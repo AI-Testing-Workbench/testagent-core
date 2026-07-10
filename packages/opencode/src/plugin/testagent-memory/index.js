@@ -15,6 +15,7 @@ import { runAutoPersonal } from "./autoPersonal.js";
 import { initMemCmd } from "./core/initCommand.js";
 import { load, config } from "./core/config.js";
 import { getDatabase } from "./core/db.js";
+import { setExternalLog } from "./core/log.js";
 function shouldIgnoreMemoryContext(query) {
     if (!query)
         return false;
@@ -139,6 +140,7 @@ function isUsefulRecallQuery(query) {
 async function startRecallPrefetch(llm, sessionID, partId, messageId, turnID, worktree, query, alreadySurfaced, recentTools, model) {
     if (!llm || !isUsefulRecallQuery(query))
         return undefined;
+    log.info(`[MemoryRecall start]`, query);
     const handle = {
         turnID,
         settled: false,
@@ -147,12 +149,23 @@ async function startRecallPrefetch(llm, sessionID, partId, messageId, turnID, wo
     };
     try {
         // 异步获取混合检索结果
+        log.info(`[searchHybrid recall start]`, query);
         const hybridMemories = await searchHybrid(worktree, sessionID, partId, messageId, query, alreadySurfaced, 10);
+        log.info(`[searchHybrid recall end]`, JSON.stringify(hybridMemories));
         // LLM 召回逻辑 + 超时处理
-        if (config()?.recall?.llmRecall && hybridMemories.length > 3) {
+        if (config()?.recall?.llmRecall) {
             let llmRecallFinish = false;
             const timeoutMs = config()?.recall?.llmRecallTimeout ?? 8000;
             // 启动 LLM 召回（后台执行，不阻塞返回）
+            const timeoutPromise = new Promise((resolve) => {
+                setTimeout(() => {
+                    if (!llmRecallFinish) {
+                        handle.result = hybridMemories.slice(0, 5);
+                        handle.settled = true;
+                    }
+                    resolve();
+                }, timeoutMs);
+            });
             const llmPromise = recallRelevantMemoriesByLLM(createOpenCodeRecallLLMClient(llm, sessionID || ''), sessionID, partId, messageId, worktree, query, hybridMemories, model).then((llmResult) => {
                 // LLM 召回完成，更新结果
                 handle.result = llmResult;
@@ -162,15 +175,7 @@ async function startRecallPrefetch(llm, sessionID, partId, messageId, turnID, wo
                 // LLM 召回失败，保持默认结果
                 log.error(`[llmRecall] LLM召回失败:`, err);
             });
-            // 设置超时定时器：超时后将结果设为前5条混合检索结果
-            setTimeout(() => {
-                // 如果 LLM 还未完成，使用混合检索前5条结果
-                if (!llmRecallFinish) {
-                    log.info(`[llmRecall] 超时，使用混合检索前5条结果`);
-                    handle.result = hybridMemories.slice(0, 5);
-                    handle.settled = true;
-                }
-            }, timeoutMs);
+            await Promise.race([llmPromise, timeoutPromise]);
         }
         else {
             // 关闭 LLM → 直接前 5 条
@@ -181,9 +186,10 @@ async function startRecallPrefetch(llm, sessionID, partId, messageId, turnID, wo
     catch (err) {
         // 出错兜底：返回空结果
         handle.result = [];
-        console.error('[RecallPrefetch] 失败:', err);
+        log.error('[RecallPrefetch] 失败:', err);
         handle.settled = true;
     }
+    log.info(`[MemoryRecall end]`, JSON.stringify(handle.result));
     return handle;
 }
 function consumeRecallPrefetch(ctx) {
@@ -217,6 +223,8 @@ function getState(projectPath) {
     return state;
 }
 export const MemoryPlugin = async (params) => {
+    // 设置外部日志适配器，使 log.info/log.error 等自动转发到 params.log
+    setExternalLog(params.log);
     params.log?.("info", "MemoryPlugin initialized", { service: "offical-memory" });
     const worktreeOrigin = params.worktree || params;
     const directory = params.directory || params;
@@ -544,6 +552,9 @@ export const MemoryPlugin = async (params) => {
                         }
                         state.turnsSinceCuration = 0;
                     }
+                    else {
+                        log.info(`[autoDream] skipped: ${state.turnsSinceCuration}/3 user turns since last auto dream`);
+                    }
                 }
             }
         },
@@ -556,6 +567,7 @@ export const MemoryPlugin = async (params) => {
             if (sessionID) {
                 // 压缩后消息已改变，重置该会话的上下文状态
                 turnContextBySession.delete(sessionID);
+                // 压缩时触发自动提取
                 if (config().enable && config().memory.autoExtractEnable) {
                     if (await shouldSkip(sessionID))
                         return;
@@ -655,31 +667,31 @@ export const MemoryPlugin = async (params) => {
             //const isLoadSystemPrompt = false;
             const ignoreMemoryContext = !config().recall.recallEnable || shouldIgnoreMemoryContext(query);
             const recalled = ignoreMemoryContext ? [] : consumeRecallPrefetch(ctx);
+            log.info(`[RecalledMemory system_prompt_build] `, JSON.stringify({ user_query: query, recalledResult: recalled }));
             const recalledSection = formatRecalledMemories(recalled);
             // 记录 recalled 数据埋点日志
-            if (recalled && recalled.length > 0) {
-                // sendTraceLog({
-                //   provider_id: modelCache.get("currentModel")?.providerID,
-                //   model_id: modelCache.get("currentModel")?.modelID,
-                //   session_id: sessionID || "",
-                //   message_id: messageId || "",
-                //   part_id: partId || "",
-                //   p_session_id: "",
-                //   user_query: query,
-                //   agent_name: "main_agent",
-                //   op_type: "recall_result",
-                //   op_flag: "S",
-                //   event_source: "system_prompt_build",
-                //   start_time: new Date(),
-                //   end_time: new Date(),
-                //   input_content: JSON.stringify({
-                //       query: query
-                //     }),
-                //   output_content: JSON.stringify(recalled),
-                //   config_param: JSON.stringify(config()?.recall),
-                // });
-                log.info(`[system_prompt_build]召回记忆成功 `, JSON.stringify({ user_query: query, recalledResult: recalled }));
-            }
+            // if (recalled && recalled.length > 0) {
+            //   sendTraceLog({
+            //     provider_id: modelCache.get("currentModel")?.providerID,
+            //     model_id: modelCache.get("currentModel")?.modelID,
+            //     session_id: sessionID || "",
+            //     message_id: messageId || "",
+            //     part_id: partId || "",
+            //     p_session_id: "",
+            //     user_query: query,
+            //     agent_name: "main_agent",
+            //     op_type: "recall_result",
+            //     op_flag: "S",
+            //     event_source: "system_prompt_build",
+            //     start_time: new Date(),
+            //     end_time: new Date(),
+            //     input_content: JSON.stringify({
+            //         query: query
+            //       }),
+            //     output_content: JSON.stringify(recalled),
+            //     config_param: JSON.stringify(config()?.recall),
+            //   });
+            // }
             // for (const key of extractSurfacedMemoryKeys(recalledSection)) {
             //   alreadySurfaced.add(key)
             // }

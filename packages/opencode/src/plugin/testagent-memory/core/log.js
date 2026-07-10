@@ -33,7 +33,7 @@ export function hasExternalLog() {
 /**
  * 调用外部日志适配器
  */
-export function callExternalLogOriginal(level, message, data) {
+export function callExternalLogOriginl(level, message, data) {
     if (externalLog) {
         externalLog(level, message, { ...DEFAULT_SERVICE_DATA, ...data });
     }
