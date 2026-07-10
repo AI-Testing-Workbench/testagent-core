@@ -672,7 +672,7 @@ export const layer = Layer.effect(
               return
             }
 
-            const timeout = entry?.timeout ?? defaultTimeout
+            const timeout = entry?.timeout != null ? toTimeoutMs(entry.timeout) : defaultTimeout
             for (const mcpTool of listed) {
               result[sanitize(clientName) + "_" + sanitize(mcpTool.name)] = convertMcpTool(mcpTool, client, timeout)
             }
@@ -714,16 +714,28 @@ export const layer = Layer.effect(
       const s = yield* InstanceState.get(state)
       const client = s.clients[clientName]
       if (!client) {
-        log.warn(`client not found for ${label}`, { clientName })
+        yield* Effect.logInfo("mcp client not found", { clientName, label })
         return undefined
       }
-      return yield* Effect.tryPromise({
+      const start = Date.now()
+      yield* Effect.logInfo("mcp call", { clientName, label })
+      const timed = Effect.tryPromise({
         try: () => fn(client),
         catch: (e: any) => {
           log.error(`failed to ${label}`, { clientName, ...meta, error: e?.message })
           return e
         },
-      }).pipe(Effect.orElseSucceed(() => undefined))
+      }).pipe(
+        Effect.tap(() => {
+          const ms = Date.now() - start
+          return Effect.logInfo("mcp call ok", { clientName, label, durationMs: ms })
+        }),
+        Effect.tapError((e) => {
+          const ms = Date.now() - start
+          return Effect.logInfo("mcp call failed", { clientName, label, durationMs: ms, error: (e as any)?.message })
+        }),
+      )
+      return yield* Effect.orElseSucceed(timed, () => undefined)
     })
 
     const getPrompt = Effect.fn("MCP.getPrompt")(function* (
@@ -816,7 +828,8 @@ export const layer = Layer.effect(
           return { status: "failed", error: "MCP config not found after auth" } as Status
         }
 
-        const listed = client ? yield* defs(mcpName, client, mcpConfig.timeout) : undefined
+        const timeoutMs = mcpConfig.timeout != null ? toTimeoutMs(mcpConfig.timeout) : undefined
+        const listed = client ? yield* defs(mcpName, client, timeoutMs) : undefined
         if (!client || !listed) {
           yield* Effect.tryPromise(() => client?.close() ?? Promise.resolve()).pipe(Effect.ignore)
           return { status: "failed", error: "Failed to get tools" } as Status
@@ -824,7 +837,7 @@ export const layer = Layer.effect(
 
         const s = yield* InstanceState.get(state)
         yield* auth.clearOAuthState(mcpName)
-        return yield* storeClient(s, mcpName, client, listed, mcpConfig.timeout)
+        return yield* storeClient(s, mcpName, client, listed, timeoutMs)
       }
 
       yield* Effect.logInfo("opening browser for oauth", { mcpName, url: result.authorizationUrl, state: result.oauthState })
