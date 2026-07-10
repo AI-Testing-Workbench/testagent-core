@@ -23,6 +23,8 @@ const LANGFUSE_BASE_URL = decodeURIComponent(
   atob("aHR0cCUzQSUyRiUyRnRlc3RodWItYWdlbnQtdHJhY2UucGFhc3VhdC5jbWJjaGluYS5jbg=="),
 )
 const LANGFUSE_FINAL_BATCH_UPLOAD_PATH = "/api/trpc/batchTrace.save"
+const VERSION = "1.0.1"
+const LANGFUSE_FETCH_TIMEOUT_MS = 5000
 
 let baseMetadata: () => Record<string, string>
 
@@ -185,6 +187,11 @@ let failedIngestionQueueFile = join(homedir(), ".testagent", "langfuse-ingestion
 let failedIngestionQueueLoaded = false
 const MAX_FAILED_INGESTION_EVENTS = 5000
 let handlersInstalled = false // testagent_change
+const BACKGROUND_INGESTION_BATCH_SIZE = 50
+const MAX_BACKGROUND_INGESTION_EVENTS = 10000
+let backgroundIngestionEvents: any[] = []
+let backgroundIngestionDrainPromise: Promise<void> | null = null
+let backgroundIngestionDrainScheduled = false
 
 // 最终完整 trace 汇总上报到后端批处理接口，用于兼容 Kafka 消费完整数据的逻辑。
 const finalBatchUploads: any[] = []
@@ -192,6 +199,11 @@ let retryingFinalBatchUploads = false
 let finalBatchUploadQueueFile = join(homedir(), ".testagent", "langfuse-final-batch-upload-queue.json")
 let finalBatchUploadQueueLoaded = false
 const MAX_FINAL_BATCH_UPLOADS = 500
+const BACKGROUND_FINAL_BATCH_UPLOAD_SIZE = 100
+const MAX_BACKGROUND_FINAL_BATCH_UPLOADS = 1000
+let backgroundFinalBatchUploads: any[] = []
+let backgroundFinalBatchDrainPromise: Promise<void> | null = null
+let backgroundFinalBatchDrainScheduled = false
 
 function getActiveParentId(): string | undefined {
   const activeSkill = skillStack[skillStack.length - 1]
@@ -426,7 +438,7 @@ async function reparentSessionObservations(sessionId: string, traceId: string, a
     gen.parentObservationId = agentSpanId
     const generationUpdates: Partial<GenerationData> = { parentObservationId: agentSpanId }
     updateGenerationInBatch(traceId, gen.genId, generationUpdates)
-    await updateGenerationImmediately(traceId, gen.genId, generationUpdates)
+    updateGenerationImmediately(traceId, gen.genId, generationUpdates)
   }
 
   for (const spanId of sessionSpanIds.get(sessionId) ?? []) {
@@ -434,7 +446,7 @@ async function reparentSessionObservations(sessionId: string, traceId: string, a
     if (!span || span.id === agentSpanId || span.parentObservationId === agentSpanId) continue
     const spanUpdates: Partial<SpanData> = { parentObservationId: agentSpanId }
     updateSpanInBatch(traceId, spanId, spanUpdates)
-    await updateSpanImmediately(traceId, spanId, spanUpdates)
+    updateSpanImmediately(traceId, spanId, spanUpdates)
   }
 }
 
@@ -584,6 +596,17 @@ async function readResponseTextSafe(res: Response): Promise<string> {
   }
 }
 
+async function fetchWithTimeout(input: Parameters<typeof fetch>[0], init?: RequestInit): Promise<Response> {
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), LANGFUSE_FETCH_TIMEOUT_MS)
+
+  try {
+    return await fetch(input, { ...init, signal: controller.signal })
+  } finally {
+    clearTimeout(timeout)
+  }
+}
+
 function withEventBodyTags(event: any) {
   if (!event || typeof event !== "object" || !event.body) return event
   return {
@@ -602,7 +625,7 @@ async function uploadToIngestion(events: any[]) {
   const credentials = btoa(`${publicKey}:${secretKey}`)
   // console.log("credentials", credentials)
   try {
-    const res = await fetch(`${LANGFUSE_BASE_URL}/api/public/ingestion`, {
+    const res = await fetchWithTimeout(`${LANGFUSE_BASE_URL}/api/public/ingestion`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -630,7 +653,7 @@ async function uploadToIngestion(events: any[]) {
 async function postJsonWithAuth(path: string, payload: any) {
   const credentials = btoa(`${publicKey}:${secretKey}`)
   try {
-    const res = await fetch(`${LANGFUSE_BASE_URL}${path}`, {
+    const res = await fetchWithTimeout(`${LANGFUSE_BASE_URL}${path}`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -771,17 +794,9 @@ async function retryFinalBatchUploads() {
   }
 }
 
-async function uploadFinalTraceBatch(batch: TraceBatch) {
-  await retryFinalBatchUploads()
-
+function uploadFinalTraceBatch(batch: TraceBatch) {
   const items = buildFinalBatchUpload(batch)
-  enqueueFinalBatchUploads(items)
-
-  const failedItems = await uploadFinalBatchItems(items)
-  if (failedItems.length === 0) {
-    const uploadedIds = new Set(items.map((item) => item.id))
-    replaceFinalBatchUploads(finalBatchUploads.filter((queuedItem) => !uploadedIds.has(queuedItem.id)))
-  }
+  scheduleBackgroundFinalBatchUpload(items)
 }
 
 function withEventMetadataTags(body: any) {
@@ -946,6 +961,105 @@ async function ingestEvent(type: string, body: any, timestamp?: string) {
   return ingestEvents([buildIngestionEvent(type, body, timestamp)])
 }
 
+function scheduleBackgroundIngestion(events: any[]) {
+  if (events.length === 0) return
+
+  backgroundIngestionEvents.push(...events)
+  if (backgroundIngestionEvents.length > MAX_BACKGROUND_INGESTION_EVENTS) {
+    backgroundIngestionEvents.splice(0, backgroundIngestionEvents.length - MAX_BACKGROUND_INGESTION_EVENTS)
+  }
+
+  scheduleBackgroundIngestionDrain()
+}
+
+function scheduleBackgroundIngestionDrain() {
+  if (backgroundIngestionDrainPromise || backgroundIngestionDrainScheduled) return
+
+  backgroundIngestionDrainScheduled = true
+  setTimeout(() => {
+    backgroundIngestionDrainScheduled = false
+    void drainBackgroundIngestion()
+  }, 0)
+}
+
+async function drainBackgroundIngestion() {
+  if (backgroundIngestionDrainPromise) return backgroundIngestionDrainPromise
+
+  backgroundIngestionDrainPromise = (async () => {
+    try {
+      await retryFailedIngestionEvents()
+      while (backgroundIngestionEvents.length > 0) {
+        const events = backgroundIngestionEvents.splice(0, BACKGROUND_INGESTION_BATCH_SIZE)
+        await ingestEvents(events, { retryQueued: false })
+      }
+    } catch (e) {
+      console.error("[langfuse] Background ingestion failed", e)
+    } finally {
+      backgroundIngestionDrainPromise = null
+      if (backgroundIngestionEvents.length > 0) {
+        scheduleBackgroundIngestionDrain()
+      }
+    }
+  })()
+
+  return backgroundIngestionDrainPromise
+}
+
+function scheduleBackgroundFinalBatchUpload(items: any[]) {
+  if (items.length === 0) return
+
+  backgroundFinalBatchUploads.push(...items)
+  if (backgroundFinalBatchUploads.length > MAX_BACKGROUND_FINAL_BATCH_UPLOADS) {
+    backgroundFinalBatchUploads.splice(0, backgroundFinalBatchUploads.length - MAX_BACKGROUND_FINAL_BATCH_UPLOADS)
+  }
+
+  scheduleBackgroundFinalBatchDrain()
+}
+
+function scheduleBackgroundFinalBatchDrain() {
+  if (backgroundFinalBatchDrainPromise || backgroundFinalBatchDrainScheduled) return
+
+  backgroundFinalBatchDrainScheduled = true
+  setTimeout(() => {
+    backgroundFinalBatchDrainScheduled = false
+    void drainBackgroundFinalBatchUploads()
+  }, 0)
+}
+
+async function drainBackgroundFinalBatchUploads() {
+  if (backgroundFinalBatchDrainPromise) return backgroundFinalBatchDrainPromise
+
+  backgroundFinalBatchDrainPromise = (async () => {
+    try {
+      await retryFinalBatchUploads()
+      while (backgroundFinalBatchUploads.length > 0) {
+        const items = backgroundFinalBatchUploads.splice(0, BACKGROUND_FINAL_BATCH_UPLOAD_SIZE)
+        enqueueFinalBatchUploads(items)
+
+        const failedItems = await uploadFinalBatchItems(items)
+        if (failedItems.length === 0) {
+          const uploadedIds = new Set(items.map((item) => item.id))
+          replaceFinalBatchUploads(finalBatchUploads.filter((queuedItem) => !uploadedIds.has(queuedItem.id)))
+        }
+      }
+    } catch (e) {
+      console.error("[langfuse] Background final batch upload failed", e)
+    } finally {
+      backgroundFinalBatchDrainPromise = null
+      if (backgroundFinalBatchUploads.length > 0) {
+        scheduleBackgroundFinalBatchDrain()
+      }
+    }
+  })()
+
+  return backgroundFinalBatchDrainPromise
+}
+
+async function flushBackgroundUploads() {
+  await drainBackgroundIngestion()
+  await drainBackgroundFinalBatchUploads()
+}
+
 function traceEventBody(batch: TraceBatch) {
   return {
     id: batch.id,
@@ -956,12 +1070,13 @@ function traceEventBody(batch: TraceBatch) {
     tags: batch.tags,
     metadata: batch.metadata,
     userId: userIdMetadata,
+    version: VERSION,
   }
 }
 
-async function upsertTraceImmediately(batch: TraceBatch) {
+function upsertTraceImmediately(batch: TraceBatch) {
   const type = uploadedTraceIds.has(batch.id) ? "trace-update" : "trace-create"
-  await ingestEvent(type, traceEventBody(batch))
+  scheduleBackgroundIngestion([buildIngestionEvent(type, traceEventBody(batch))])
   uploadedTraceIds.add(batch.id)
 }
 
@@ -987,19 +1102,21 @@ function generationEventBody(gen: GenerationData) {
   }
 }
 
-async function createGenerationImmediately(gen: GenerationData) {
-  await ingestEvent("generation-create", generationEventBody(gen), gen.startTime)
+function createGenerationImmediately(gen: GenerationData) {
+  scheduleBackgroundIngestion([buildIngestionEvent("generation-create", generationEventBody(gen), gen.startTime)])
 }
 
-async function updateGenerationImmediately(traceId: string, genId: string, updates: Partial<GenerationData>) {
+function updateGenerationImmediately(traceId: string, genId: string, updates: Partial<GenerationData>) {
   const modelMetadata = updates.metadata?.model ?? {}
-  await ingestEvent("generation-update", {
-    id: genId,
-    traceId,
-    selectedModel: modelMetadata.selectedModel,
-    resolvedModel: modelMetadata.resolvedModel,
-    ...updates,
-  })
+  scheduleBackgroundIngestion([
+    buildIngestionEvent("generation-update", {
+      id: genId,
+      traceId,
+      selectedModel: modelMetadata.selectedModel,
+      resolvedModel: modelMetadata.resolvedModel,
+      ...updates,
+    }),
+  ])
 }
 
 function spanEventBody(span: SpanData) {
@@ -1018,12 +1135,12 @@ function spanEventBody(span: SpanData) {
   }
 }
 
-async function createSpanImmediately(span: SpanData) {
-  await ingestEvent("span-create", spanEventBody(span), span.startTime)
+function createSpanImmediately(span: SpanData) {
+  scheduleBackgroundIngestion([buildIngestionEvent("span-create", spanEventBody(span), span.startTime)])
 }
 
-async function updateSpanImmediately(traceId: string, spanId: string, updates: Partial<SpanData>) {
-  await ingestEvent("span-update", { id: spanId, traceId, ...updates })
+function updateSpanImmediately(traceId: string, spanId: string, updates: Partial<SpanData>) {
+  scheduleBackgroundIngestion([buildIngestionEvent("span-update", { id: spanId, traceId, ...updates })])
 }
 
 function hasOwn(obj: any, key: string) {
@@ -1127,7 +1244,7 @@ async function updateToolSpanOutput(
   }
 
   updateSpanInBatch(traceId, spanId, spanUpdates)
-  await updateSpanImmediately(traceId, spanId, spanUpdates)
+  updateSpanImmediately(traceId, spanId, spanUpdates)
 }
 
 async function captureToolResultsFromMessages(messages: any[]) {
@@ -1214,25 +1331,76 @@ async function updateToolSpanOutputFromSnapshot(
   return true
 }
 
-function normalizeUsage(tokens: any): { input: number; output: number; total: number } | undefined {
+function normalizeUsage(tokens: any):
+  | {
+      input: number
+      output: number
+      total: number
+      details?: {
+        input: number
+        cacheRead: number
+        cacheWrite: number
+        output: number
+        reasoning: number
+      }
+    }
+  | undefined {
   if (!tokens || typeof tokens !== "object") return undefined
 
   const input = tokens.input ?? tokens.inputTokens ?? tokens.promptTokens ?? tokens.prompt_tokens
   const output = tokens.output ?? tokens.outputTokens ?? tokens.completionTokens ?? tokens.completion_tokens
   const total = tokens.total ?? tokens.totalTokens ?? tokens.total_tokens
+  const reasoning = tokens.reasoning ?? tokens.reasoningTokens ?? tokens.reasoning_tokens
+  const cacheRead = tokens.cache?.read ?? tokens.cacheRead ?? tokens.cache_read
+  const cacheWrite = tokens.cache?.write ?? tokens.cacheWrite ?? tokens.cache_write
 
-  if (input === undefined && output === undefined && total === undefined) return undefined
+  if (
+    input === undefined &&
+    output === undefined &&
+    total === undefined &&
+    reasoning === undefined &&
+    cacheRead === undefined &&
+    cacheWrite === undefined
+  ) {
+    return undefined
+  }
 
-  const normalizedInput = Number(input ?? 0)
-  const normalizedOutput = Number(output ?? 0)
-  const normalizedTotal = Number(total ?? normalizedInput + normalizedOutput)
+  const uncachedInput = Number(input ?? 0)
+  const normalizedCacheRead = Number(cacheRead ?? 0)
+  const normalizedCacheWrite = Number(cacheWrite ?? 0)
+  const visibleOutput = Number(output ?? 0)
+  const normalizedReasoning = Number(reasoning ?? 0)
+  const normalizedInput = uncachedInput + normalizedCacheRead + normalizedCacheWrite
+  const normalizedOutput = visibleOutput + normalizedReasoning
+  const computedTotal = normalizedInput + normalizedOutput
+  const normalizedTotal = Number(total ?? computedTotal)
 
-  if (![normalizedInput, normalizedOutput, normalizedTotal].every(Number.isFinite)) return undefined
+  if (
+    ![
+      uncachedInput,
+      normalizedCacheRead,
+      normalizedCacheWrite,
+      visibleOutput,
+      normalizedReasoning,
+      normalizedInput,
+      normalizedOutput,
+      normalizedTotal,
+    ].every(Number.isFinite)
+  ) {
+    return undefined
+  }
 
   return {
     input: normalizedInput,
     output: normalizedOutput,
-    total: normalizedTotal,
+    total: Math.max(normalizedTotal, computedTotal),
+    details: {
+      input: uncachedInput,
+      cacheRead: normalizedCacheRead,
+      cacheWrite: normalizedCacheWrite,
+      output: visibleOutput,
+      reasoning: normalizedReasoning,
+    },
   }
 }
 
@@ -1358,7 +1526,10 @@ async function finalizeGeneration(
   }
 
   const fullText = buildGenerationText(g)
-  const usage = normalizeUsage(options?.tokens) ?? { input: 0, output: 0, total: 0 }
+  const normalizedUsage = normalizeUsage(options?.tokens)
+  const usage = normalizedUsage
+    ? { input: normalizedUsage.input, output: normalizedUsage.output, total: normalizedUsage.total }
+    : { input: 0, output: 0, total: 0 }
 
   const toolCallsOutput = g.toolCalls.map((tc) => ({
     type: "function",
@@ -1420,7 +1591,9 @@ async function finalizeGeneration(
       usage: {
         unit: "tokens",
         scope: "generation",
-        note: "Langfuse generation usage is per LLM call; trace-level totals should be computed by summing generations.",
+        note:
+          "Langfuse generation usage is per LLM call. Input includes uncached input plus cache read/write; output includes visible output plus reasoning.",
+        ...(normalizedUsage?.details ? { details: normalizedUsage.details } : {}),
         ...usage,
       },
       tags: OBSERVATION_TAGS,
@@ -1429,7 +1602,7 @@ async function finalizeGeneration(
   }
 
   updateGenerationInBatch(g.traceId, g.genId, generationUpdates)
-  await updateGenerationImmediately(g.traceId, g.genId, generationUpdates)
+  updateGenerationImmediately(g.traceId, g.genId, generationUpdates)
 
   g.finalOutput = structuredOutput
   g.hasUsage = true
@@ -1449,8 +1622,7 @@ async function flushTrace(traceId: string) {
   }
 
   try {
-    await upsertTraceImmediately(batch)
-    await retryFailedIngestionEvents()
+    upsertTraceImmediately(batch)
   } catch (e) {
     // console.error("[langfuse] Failed to flush trace", { traceId, error: e })
   }
@@ -1464,6 +1636,7 @@ async function flushAllTraces() {
   for (const traceId of traceBatches.keys()) {
     await flushTrace(traceId)
   }
+  await flushBackgroundUploads()
   await retryFailedIngestionEvents()
   await retryFinalBatchUploads()
 }
@@ -1969,17 +2142,19 @@ function parseFrontmatter(raw: string): { yaml: Record<string, any>; content: st
   return { yaml, content }
 }
 
-function loadSkillRaw(dir: string, name: string): { raw: string; yaml: Record<string, any>; content: string } | null {
-  const cacheKey = `${dir}::${name}`
-  if (skillCache.has(cacheKey)) return skillCache.get(cacheKey)!
-
-  let filePath: string | null = null
+function resolveSkillFilePath(dir: string): string | null {
   if (existsSync(`${dir}/SKILL.md`)) {
-    filePath = `${dir}/SKILL.md`
-  } else if (existsSync(`${dir}/skill.md`)) {
-    filePath = `${dir}/skill.md`
+    return `${dir}/SKILL.md`
   }
-  if (!filePath) return null
+  if (existsSync(`${dir}/skill.md`)) {
+    return `${dir}/skill.md`
+  }
+  return null
+}
+
+function loadSkillRaw(filePath: string): { raw: string; yaml: Record<string, any>; content: string } | null {
+  const cacheKey = `file::${filePath}`
+  if (skillCache.has(cacheKey)) return skillCache.get(cacheKey)!
 
   try {
     const raw = readFileSync(filePath, "utf-8")
@@ -1994,8 +2169,21 @@ function loadSkillRaw(dir: string, name: string): { raw: string; yaml: Record<st
 
 // ==================== Langfuse API 辅助函数 ====================
 
-async function signup_user(user_id: string, user_name: string, langfuse_host: string): Promise<void> {
-  const res = await fetch(`${langfuse_host}/api/auth/sign-up`, {
+async function signup_user(user_id: string, user_name: string, langfuse_host: string, pathName: string|null): Promise<void> {
+  let pathNames = null;
+  let center = null;
+  let teamPath = null;
+  let deptPath = null;
+  let organizePath = null;
+  if (pathName) {
+    pathNames = pathName.split("/");
+    center = pathNames.find(item => item.includes("中心")) || null;
+    teamPath = pathNames.find(item => item.includes("团队")) || null;
+    deptPath = pathNames.find(item => item.includes("室")) || null;
+    organizePath = pathNames.find(item => item.includes("组")) || null;
+  }
+  
+  const res = await fetchWithTimeout(`${langfuse_host}/api/auth/signup`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify([
@@ -2003,6 +2191,10 @@ async function signup_user(user_id: string, user_name: string, langfuse_host: st
         name: `${user_name}/${user_id}`,
         email: `${user_id}${decodeURIComponent(atob("JTQwY21iY2hpbmEuY29t"))}`,
         password: `${user_id}${decodeURIComponent(atob("JTQwY21iY2hpbmEuY29t"))}`,
+        center: center,
+        teamPath: teamPath,
+        deptPath: deptPath,
+        organizePath: organizePath,
       },
     ]),
   })
@@ -2018,7 +2210,7 @@ async function get_langfuse_login_token(langfuse_host: string, user_id: string):
   const password = `${user_id}${decodeURIComponent(atob("JTQwY21iY2hpbmEuY29t"))}`
   const email = password.toLowerCase()
 
-  const csrfRes = await fetch(`${langfuse_host}/api/auth/csrf`)
+  const csrfRes = await fetchWithTimeout(`${langfuse_host}/api/auth/csrf`)
   const csrfJson = await csrfRes.json()
   const csrf_token = csrfJson.csrfToken
 
@@ -2045,7 +2237,7 @@ async function get_langfuse_login_token(langfuse_host: string, user_id: string):
     json: "true",
   })
 
-  const credentialsRes = await fetch(`${langfuse_host}/api/auth/callback/credentials`, {
+  const credentialsRes = await fetchWithTimeout(`${langfuse_host}/api/auth/callback/credentials`, {
     method: "POST",
     headers: {
       "Content-Type": "application/x-www-form-urlencoded",
@@ -2073,7 +2265,7 @@ async function get_langfuse_login_token(langfuse_host: string, user_id: string):
 
 async function create_organization(session: string, langfuse_host: string): Promise<string | null> {
   try {
-    const res = await fetch(`${langfuse_host}/api/trpc/organizations.create`, {
+    const res = await fetchWithTimeout(`${langfuse_host}/api/trpc/organizations.create`, {
       method: "POST",
       headers: { Cookie: session, "Content-Type": "application/json" },
       body: JSON.stringify({ json: { name: "TestAgent", appId: "", channel: "testagent" } }),
@@ -2094,7 +2286,7 @@ async function create_project(
   langfuse_host: string,
 ): Promise<{ public_key: string; secret_key: string; project_id: string } | null> {
   try {
-    let res = await fetch(`${langfuse_host}/api/trpc/projects.create`, {
+    let res = await fetchWithTimeout(`${langfuse_host}/api/trpc/projects.create`, {
       method: "POST",
       headers: { Cookie: session, "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -2104,7 +2296,7 @@ async function create_project(
     let resJson = await res.json()
     const project_id = resJson.result.data.json.id
 
-    res = await fetch(`${langfuse_host}/api/trpc/projectApiKeys.create`, {
+    res = await fetchWithTimeout(`${langfuse_host}/api/trpc/projectApiKeys.create`, {
       method: "POST",
       headers: { Cookie: session, "Content-Type": "application/json" },
       body: JSON.stringify({ json: { projectId: project_id } }),
@@ -2125,7 +2317,7 @@ async function get_apikeys_by_user(
   langfuse_host: string,
 ): Promise<{ public_key: string; secret_key: string; project_id: string } | null> {
   try {
-    const res = await fetch(`${langfuse_host}/api/trpc/projectApiKeys.byUserInfo`, {
+    const res = await fetchWithTimeout(`${langfuse_host}/api/trpc/projectApiKeys.byUserInfo`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ json: { userInfo: `${user_name}/${user_id}` } }),
@@ -2145,12 +2337,13 @@ async function get_project_apikeys(
   user_id: string,
   user_name: string,
   langfuse_host: string,
+  path_name: string | null,
 ): Promise<{ public_key: string; secret_key: string; project_id: string } | null> {
   let result = await get_apikeys_by_user(user_id, user_name, langfuse_host)
   if (result?.public_key && result?.secret_key) {
     return result
   }
-
+  await signup_user(user_id, user_name, langfuse_host, path_name)
   const session = await get_langfuse_login_token(langfuse_host, user_id)
   const org_id = await create_organization(session, langfuse_host)
   if (org_id) {
@@ -2171,15 +2364,17 @@ export const LangfusePlugin: Plugin = async (ctx) => {
   secretKey = "sk-lf-773528e2-aa24-48d0-9791-b7f795cbfb9a"
   if (user.userId && user.userName) {
     userIdMetadata = `${user.userName}/${user.userId}`
-    try {
-      const apiKeys = await get_project_apikeys(user.userId, user.userName, LANGFUSE_BASE_URL)
-      if (apiKeys) {
-        project_id = apiKeys.project_id
-        ;((publicKey = apiKeys.public_key),
-          (secretKey = apiKeys.secret_key),
-          console.log("[langfuse] Client initialized with dynamic keys", { userId: user.userId }))
-      }
-    } catch (e) {}
+    void get_project_apikeys(user.userId, user.userName, LANGFUSE_BASE_URL, user.pathName)
+      .then((apiKeys) => {
+        if (apiKeys) {
+          project_id = apiKeys.project_id
+          publicKey = apiKeys.public_key
+          secretKey = apiKeys.secret_key
+          currentProjectId = apiKeys.project_id
+          console.log("[langfuse] Client initialized with dynamic keys", { userId: user.userId })
+        }
+      })
+      .catch(() => {})
   }
 
   baseMetadata = () => {
@@ -2194,8 +2389,8 @@ export const LangfusePlugin: Plugin = async (ctx) => {
 
   configureFailedIngestionQueue(publicKey)
   configureFinalBatchUploadQueue(publicKey)
-  await retryFailedIngestionEvents()
-  await retryFinalBatchUploads()
+  scheduleBackgroundIngestionDrain()
+  scheduleBackgroundFinalBatchDrain()
 
   installProcessHandlers() // testagent_change
 
@@ -2254,7 +2449,7 @@ export const LangfusePlugin: Plugin = async (ctx) => {
           },
         },
       })
-      await upsertTraceImmediately(batch)
+      upsertTraceImmediately(batch)
     },
 
     /**
@@ -2361,7 +2556,7 @@ export const LangfusePlugin: Plugin = async (ctx) => {
       }
 
       addGenerationToBatch(traceId, genData)
-      await createGenerationImmediately(genData)
+      createGenerationImmediately(genData)
 
       // 记录 GenInfo
       const genInfo: GenInfo = {
@@ -2434,7 +2629,7 @@ export const LangfusePlugin: Plugin = async (ctx) => {
 
       if (!traceBatches.has(traceId)) {
         const batch = createTraceBatch(rootSid, userInputs.get(rootSid) || "tool execution", ctx, traceId)
-        await upsertTraceImmediately(batch)
+        upsertTraceImmediately(batch)
       }
 
       const spanId = generateUUID()
@@ -2463,7 +2658,7 @@ export const LangfusePlugin: Plugin = async (ctx) => {
       }
 
       addSpanToBatch(traceId, spanData)
-      await createSpanImmediately(spanData)
+      createSpanImmediately(spanData)
       toolSpanIds.set(input.callID, spanId)
       toolCallInfos.set(input.callID, { spanId, traceId, sessionId, toolName: input.tool })
       recordSessionSpan(sessionId, spanId)
@@ -2497,7 +2692,7 @@ export const LangfusePlugin: Plugin = async (ctx) => {
         }
 
         addSpanToBatch(traceId, agentSpanData)
-        await createSpanImmediately(agentSpanData)
+        createSpanImmediately(agentSpanData)
         recordSessionSpan(sessionId, agentSpanId)
         await queuePendingSubagent(sessionId, { traceId, agentSpanId })
 
@@ -2559,12 +2754,22 @@ export const LangfusePlugin: Plugin = async (ctx) => {
       if (!traceId) return
 
       const isSkill = input.tool === "skill"
+      const isSkillRead =
+        input.tool === "read" &&
+        typeof input.args?.filePath === "string" &&
+        /(^|[/\\])SKILL\.md$/i.test(input.args.filePath)
 
       // 如果是 skill 工具，读取原始 SKILL.md
       let skillYamlInfo: Record<string, any> | undefined
+      let skillFilePath: string | null = null
       if (isSkill && output.metadata?.dir) {
-        const skillName = input.args?.name || output.metadata.name
-        const info = loadSkillRaw(output.metadata.dir, skillName)
+        skillFilePath = resolveSkillFilePath(output.metadata.dir)
+      } else if (isSkillRead) {
+        skillFilePath = input.args.filePath
+      }
+
+      if (skillFilePath) {
+        const info = loadSkillRaw(skillFilePath)
         if (info) {
           skillYamlInfo = info.yaml
         }
@@ -2620,7 +2825,7 @@ export const LangfusePlugin: Plugin = async (ctx) => {
       }
 
       updateSpanInBatch(traceId, spanId, spanUpdates)
-      await updateSpanImmediately(traceId, spanId, spanUpdates)
+      updateSpanImmediately(traceId, spanId, spanUpdates)
 
       if (!isSkill && effectiveOutput !== null && effectiveOutput !== undefined) {
         toolSpanIds.delete(input.callID)
@@ -2654,7 +2859,7 @@ export const LangfusePlugin: Plugin = async (ctx) => {
       }
 
       updateGenerationInBatch(g.traceId, g.genId, generationUpdates)
-      await updateGenerationImmediately(g.traceId, g.genId, generationUpdates)
+      updateGenerationImmediately(g.traceId, g.genId, generationUpdates)
     },
 
     /**
@@ -2726,7 +2931,7 @@ export const LangfusePlugin: Plugin = async (ctx) => {
               g.completionStartTime = new Date()
               const generationUpdates = { completionStartTime: g.completionStartTime.toISOString() }
               updateGenerationInBatch(g.traceId, g.genId, generationUpdates)
-              await updateGenerationImmediately(g.traceId, g.genId, generationUpdates)
+              updateGenerationImmediately(g.traceId, g.genId, generationUpdates)
             }
             g.parts.push(part.text)
           }
@@ -2735,7 +2940,7 @@ export const LangfusePlugin: Plugin = async (ctx) => {
               g.completionStartTime = new Date()
               const generationUpdates = { completionStartTime: g.completionStartTime.toISOString() }
               updateGenerationInBatch(g.traceId, g.genId, generationUpdates)
-              await updateGenerationImmediately(g.traceId, g.genId, generationUpdates)
+              updateGenerationImmediately(g.traceId, g.genId, generationUpdates)
             }
             g.parts.push(`Reasoning: ${part.text}`)
           }
@@ -2744,7 +2949,7 @@ export const LangfusePlugin: Plugin = async (ctx) => {
               g.completionStartTime = new Date()
               const generationUpdates = { completionStartTime: g.completionStartTime.toISOString() }
               updateGenerationInBatch(g.traceId, g.genId, generationUpdates)
-              await updateGenerationImmediately(g.traceId, g.genId, generationUpdates)
+              updateGenerationImmediately(g.traceId, g.genId, generationUpdates)
             }
             const toolName = part.tool
             const toolArgs = part.state?.input ?? {}
@@ -2829,7 +3034,7 @@ export const LangfusePlugin: Plugin = async (ctx) => {
               output: lastChildGeneration?.finalOutput?.text || userInputs.get(sessionId),
             }
             updateSpanInBatch(traceId, agentSpanId, spanUpdates)
-            await updateSpanImmediately(traceId, agentSpanId, spanUpdates)
+            updateSpanImmediately(traceId, agentSpanId, spanUpdates)
             sessionToAgentSpan.delete(sessionId)
           }
 
@@ -2857,17 +3062,17 @@ export const LangfusePlugin: Plugin = async (ctx) => {
           updateTraceBatch(traceId, { output: finalText })
           const batch = traceBatches.get(traceId)
           if (batch) {
-            await upsertTraceImmediately(batch)
+            upsertTraceImmediately(batch)
           }
         }
 
         const finalBatch = traceBatches.get(traceId)
         if (finalBatch) {
-          await uploadFinalTraceBatch(finalBatch)
+          uploadFinalTraceBatch(finalBatch)
         }
 
-        await retryFailedIngestionEvents()
-        await retryFinalBatchUploads()
+        scheduleBackgroundIngestionDrain()
+        scheduleBackgroundFinalBatchDrain()
 
         traceBatches.delete(traceId)
         gens.delete(traceId)
@@ -2910,9 +3115,9 @@ export const LangfusePlugin: Plugin = async (ctx) => {
             })
             const batch = traceBatches.get(traceId)
             if (batch) {
-              await upsertTraceImmediately(batch)
+              upsertTraceImmediately(batch)
             }
-            await retryFailedIngestionEvents()
+            scheduleBackgroundIngestionDrain()
           }
         }
       }
