@@ -52,6 +52,7 @@ export function resource(): { serviceName: string; serviceVersion: string; attri
       "testagent.client": process.env["KILO_CLIENT"] === "tscode" || process.env["KILOCODE_FEATURE"] === "tscode-extension" || process.env["KILO_PLATFORM"] === "tscode" ? "tscode" : "cli",
       "testagent.process_role": processMetadata.processRole,
       "testagent.run_id": processMetadata.runID,
+      "testagent.runtime": process.versions?.bun ? "bun" : "nodejs",
       "service.instance.id": processID,
       ...(pathPart.length > 0 ? {
         "user.path_name": userPathName,
