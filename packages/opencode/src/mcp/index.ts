@@ -14,6 +14,7 @@ import { ConfigMCP } from "../config/mcp"
 import * as Log from "@opencode-ai/core/util/log"
 import { NamedError } from "@opencode-ai/core/util/error"
 import z from "zod/v4"
+import {User} from "@/testagent/user"
 import { Installation } from "../installation"
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
 import { withTimeout } from "@/util/timeout"
@@ -35,6 +36,8 @@ import { withStatics } from "@/util/schema"
 
 const log = Log.create({ service: "mcp" })
 const DEFAULT_TIMEOUT = 30_000
+const toTimeoutMs = (value: number) => value * 1000
+const mapTimeoutMs = (value: number | undefined) => (value == null ? undefined : toTimeoutMs(value))
 
 export const Resource = Schema.Struct({
   name: Schema.String,
@@ -112,7 +115,8 @@ function isMcpConfigured(entry: McpEntry): entry is ConfigMCP.Info {
   return typeof entry === "object" && entry !== null && "type" in entry
 }
 
-const sanitize = (s: string) => s.replace(/[\s\x00-\x1f\x7f\\/<>:"|?*.`'$@#%^&\(\)\[\]\{\},;!=+]+/g, "_")
+const sanitize = (s: string) => s.replace(/\s+/g, "")
+// const sanitize = (s: string) => s.replace(/[^a-zA-Z0-9_-]/g, "_")
 
 function remoteURL(key: string, value: string) {
   if (URL.canParse(value)) return new URL(value)
@@ -137,7 +141,7 @@ function convertMcpTool(mcpTool: MCPToolDef, client: MCPClient, timeout?: number
     execute: async (args: unknown) => {
       return client.callTool(
         {
-          name: mcpTool.name,
+          name: sanitize(mcpTool.name),
           arguments: (args || {}) as Record<string, unknown>,
         },
         CallToolResultSchema,
@@ -307,24 +311,30 @@ export const layer = Layer.effect(
         )
       }
 
+      // testagent_change - inject userId from external-user.json into MCP request headers
+      const userData = User.get()
+      let uid = userData.sapId;
+      let token = userData.token;
+      const headers = { ...(uid && token ? { ...mcp.headers, "sap_id": uid, "yst_id_token": token } : mcp.headers), "User-Agent": "testagent" }
+
       const transports: Array<{ name: string; transport: TransportWithAuth }> = [
         {
           name: "StreamableHTTP",
           transport: new StreamableHTTPClientTransport(url, {
             authProvider,
-            requestInit: mcp.headers ? { headers: mcp.headers } : undefined,
+            requestInit: headers ? { headers } : undefined,
           }),
         },
         {
           name: "SSE",
           transport: new SSEClientTransport(url, {
             authProvider,
-            requestInit: mcp.headers ? { headers: mcp.headers } : undefined,
+            requestInit: headers ? { headers } : undefined,
           }),
         },
       ]
 
-      const connectTimeout = mcp.timeout ?? DEFAULT_TIMEOUT
+      const connectTimeout = mcp.timeout != null ? toTimeoutMs(mcp.timeout) : DEFAULT_TIMEOUT
       let lastStatus: Status | undefined
 
       for (const { name, transport } of transports) {
@@ -410,7 +420,7 @@ export const layer = Layer.effect(
         log.info(`mcp stderr: ${chunk.toString()}`, { key })
       })
 
-      const connectTimeout = mcp.timeout ?? DEFAULT_TIMEOUT
+      const connectTimeout = mcp.timeout != null ? toTimeoutMs(mcp.timeout) : DEFAULT_TIMEOUT
       return yield* connectTransport(transport, connectTimeout).pipe(
         Effect.map((client): { client: MCPClient | undefined; status: Status } => ({
           client,
@@ -444,7 +454,7 @@ export const layer = Layer.effect(
         return { status } satisfies CreateResult
       }
 
-      const listed = yield* defs(key, mcpClient, mcp.timeout)
+      const listed = yield* defs(key, mcpClient, mapTimeoutMs(mcp.timeout))
       if (!listed) {
         yield* Effect.tryPromise(() => mcpClient.close()).pipe(Effect.ignore)
         return { status: { status: "failed", error: "Failed to get tools" } } satisfies CreateResult
@@ -525,7 +535,7 @@ export const layer = Layer.effect(
               if (result.mcpClient) {
                 s.clients[key] = result.mcpClient
                 s.defs[key] = result.defs!
-                watch(s, key, result.mcpClient, bridge, mcp.timeout)
+                watch(s, key, result.mcpClient, bridge, mapTimeoutMs(mcp.timeout))
               }
             }),
           { concurrency: "unbounded" },
@@ -612,7 +622,7 @@ export const layer = Layer.effect(
         return result.status
       }
 
-      return yield* storeClient(s, name, result.mcpClient, result.defs!, mcp.timeout)
+      return yield* storeClient(s, name, result.mcpClient, result.defs!, mapTimeoutMs(mcp.timeout))
     })
 
     const add = Effect.fn("MCP.add")(function* (name: string, mcp: ConfigMCP.Info) {
@@ -643,7 +653,7 @@ export const layer = Layer.effect(
 
       const cfg = yield* cfgSvc.get()
       const config = cfg.mcp ?? {}
-      const defaultTimeout = cfg.experimental?.mcp_timeout
+      const defaultTimeout = cfg.experimental?.mcp_timeout != null ? toTimeoutMs(cfg.experimental.mcp_timeout) : undefined
 
       const connectedClients = Object.entries(s.clients).filter(
         ([clientName]) => s.status[clientName]?.status === "connected",
@@ -662,7 +672,7 @@ export const layer = Layer.effect(
               return
             }
 
-            const timeout = entry?.timeout ?? defaultTimeout
+            const timeout = entry?.timeout != null ? toTimeoutMs(entry.timeout) : defaultTimeout
             for (const mcpTool of listed) {
               result[sanitize(clientName) + "_" + sanitize(mcpTool.name)] = convertMcpTool(mcpTool, client, timeout)
             }
@@ -704,16 +714,28 @@ export const layer = Layer.effect(
       const s = yield* InstanceState.get(state)
       const client = s.clients[clientName]
       if (!client) {
-        log.warn(`client not found for ${label}`, { clientName })
+        yield* Effect.logInfo("mcp client not found", { clientName, label })
         return undefined
       }
-      return yield* Effect.tryPromise({
+      const start = Date.now()
+      yield* Effect.logInfo("mcp call", { clientName, label })
+      const timed = Effect.tryPromise({
         try: () => fn(client),
         catch: (e: any) => {
           log.error(`failed to ${label}`, { clientName, ...meta, error: e?.message })
           return e
         },
-      }).pipe(Effect.orElseSucceed(() => undefined))
+      }).pipe(
+        Effect.tap(() => {
+          const ms = Date.now() - start
+          return Effect.logInfo("mcp call ok", { clientName, label, durationMs: ms })
+        }),
+        Effect.tapError((e) => {
+          const ms = Date.now() - start
+          return Effect.logInfo("mcp call failed", { clientName, label, durationMs: ms, error: (e as any)?.message })
+        }),
+      )
+      return yield* Effect.orElseSucceed(timed, () => undefined)
     })
 
     const getPrompt = Effect.fn("MCP.getPrompt")(function* (
@@ -775,7 +797,7 @@ export const layer = Layer.effect(
         auth,
       )
 
-      const transport = new StreamableHTTPClientTransport(url, { authProvider })
+      const transport = new StreamableHTTPClientTransport(url, { authProvider, requestInit: { headers: { "User-Agent": "testagent" } } })
 
       return yield* Effect.tryPromise({
         try: () => {
@@ -806,7 +828,8 @@ export const layer = Layer.effect(
           return { status: "failed", error: "MCP config not found after auth" } as Status
         }
 
-        const listed = client ? yield* defs(mcpName, client, mcpConfig.timeout) : undefined
+        const timeoutMs = mcpConfig.timeout != null ? toTimeoutMs(mcpConfig.timeout) : undefined
+        const listed = client ? yield* defs(mcpName, client, timeoutMs) : undefined
         if (!client || !listed) {
           yield* Effect.tryPromise(() => client?.close() ?? Promise.resolve()).pipe(Effect.ignore)
           return { status: "failed", error: "Failed to get tools" } as Status
@@ -814,7 +837,7 @@ export const layer = Layer.effect(
 
         const s = yield* InstanceState.get(state)
         yield* auth.clearOAuthState(mcpName)
-        return yield* storeClient(s, mcpName, client, listed, mcpConfig.timeout)
+        return yield* storeClient(s, mcpName, client, listed, timeoutMs)
       }
 
       yield* Effect.logInfo("opening browser for oauth", { mcpName, url: result.authorizationUrl, state: result.oauthState })
@@ -908,12 +931,11 @@ export const layer = Layer.effect(
     const reload = Effect.fn("MCP.reload")(function* () {
       yield* Effect.logInfo("reloading mcp servers from config")
 
-      // 1. Invalidate config cache to force re-read from disk
-      // This clears both global and instance-level config caches
+      // 1. Invalidate config caches to force re-read from disk
       yield* cfgSvc.invalidate()
+      yield* cfgSvc.invalidateInstance()
 
       // 2. Re-read config directly (bypassing any InstanceState cache)
-      // Force a fresh read by calling get() after invalidate()
       const cfg = yield* cfgSvc.get()
       const config = cfg.mcp ?? {}
 
@@ -973,7 +995,7 @@ export const layer = Layer.effect(
             if (result.mcpClient) {
               s.clients[key] = result.mcpClient
               s.defs[key] = result.defs!
-              watch(s, key, result.mcpClient, bridge, mcp.timeout)
+              watch(s, key, result.mcpClient, bridge, mapTimeoutMs(mcp.timeout))
             }
           }),
         { concurrency: "unbounded" },

@@ -18,7 +18,7 @@ export const testagentHandlers = HttpApiBuilder.group(RootHttpApi, "testagent", 
       const { userId, userName, sapId, token, openId, originPathId, pathName } = ctx.payload
 
       log.info("Setting testagent user info", { userId, userName, sapId, hasToken: !!token })
-      User.set({ userId, userName, sapId, openId, originPathId, pathName })
+      User.set({ userId, userName, sapId, openId, originPathId, pathName, token })
 
       if (token && userId && userName && sapId) {
         const existingToken = yield* Effect.promise(() => ExternalAuth.getToken())

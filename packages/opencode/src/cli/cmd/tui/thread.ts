@@ -144,7 +144,8 @@ export const TuiThreadCommand = cmd({
                 sapId: envSapId, 
                 openId: envOpenId,
                 originPathId: envOriginPathId,
-                pathName: envPathName
+                pathName: envPathName,
+                token: ''
               }
             : await ExternalAuth.ensureAuthenticated()
         // Write user info to env so worker thread can read it at plugin init time
@@ -163,6 +164,7 @@ export const TuiThreadCommand = cmd({
           openId: user.openId,
           originPathId: user.originPathId,
           pathName: user.pathName,
+          token: user.token,
         })
       } catch (err) {
         UI.error(err instanceof Error ? err.message : String(err))

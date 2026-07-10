@@ -12,6 +12,7 @@ interface UserInfo {
   openId?: string
   originPathId?: string
   pathName?: string
+  token?: string
 }
 
 let override: UserInfo | undefined
@@ -34,6 +35,7 @@ export const User = {
       openId: process.env["TESTAGENT_OPEN_ID"],
       originPathId: process.env["TESTAGENT_ORIGIN_PATH_ID"],
       pathName: process.env["TESTAGENT_PATH_NAME"],
+      token: process.env["TESTAGENT_USER_TOKEN"],
     }
     if (fromEnv.userId) {
       log.debug("from env", { user: fromEnv })
@@ -64,6 +66,7 @@ export const User = {
               openId: data.openId,
               originPathId: data.originPathId,
               pathName: data.pathName,
+              token: data.token
             }
             log.debug("from file", { user: cachedFromFile })
           }
@@ -83,6 +86,7 @@ export const User = {
       openId: undefined,
       originPathId: undefined,
       pathName: undefined,
+      token: undefined
     }
     log.debug("final result", { user: result })
     return result

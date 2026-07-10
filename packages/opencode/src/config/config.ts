@@ -185,6 +185,16 @@ export const Info = Schema.Struct({
       ),
     ),
   ),
+  mcp_origins: Schema.optional(
+    Schema.Record(Schema.String, Schema.String).annotate({
+      description: "Runtime source file paths for each MCP server entry",
+    }),
+  ),
+  mcp_scopes: Schema.optional(
+    Schema.Record(Schema.String, Schema.Literals(["local", "global"])).annotate({
+      description: "Scope (local/global) for each MCP server entry. local = project config, global = user config.",
+    }),
+  ),
   plugin_status: Schema.optional(
     Schema.Struct({
       success: Schema.mutable(Schema.Array(Schema.String)),
@@ -285,6 +295,10 @@ export const Info = Schema.Struct({
         ConfigMCP.Info,
         // Matches the legacy `{ enabled: false }` form used to disable a server.
         Schema.Struct({ enabled: Schema.Boolean }),
+        // testagent_change: Accept null as a deletion sentinel.
+        // The webview sends { mcp: { name: null } } to signal removal.
+        // The handler strips null entries via withoutNulls() before writing.
+        Schema.Null,
       ]),
     ),
   ).annotate({ description: "MCP (Model Context Protocol) server configurations" }),
@@ -361,7 +375,7 @@ export const Info = Schema.Struct({
         description: "Continue the agent loop when a tool call is denied",
       }),
       mcp_timeout: Schema.optional(PositiveInt).annotate({
-        description: "Timeout in milliseconds for model context protocol (MCP) requests",
+        description: "Timeout in seconds for model context protocol (MCP) requests",
       }),
     }),
   ),
@@ -405,6 +419,7 @@ export interface Interface {
   readonly update: (config: Info) => Effect.Effect<void>
   readonly updateGlobal: (config: Info) => Effect.Effect<{ info: Info; changed: boolean }>
   readonly invalidate: () => Effect.Effect<void>
+  readonly invalidateInstance: () => Effect.Effect<void>
   readonly directories: () => Effect.Effect<string[]>
   readonly testagentDirectories: () => Effect.Effect<string[]> // testagent_change
   readonly waitForDependencies: () => Effect.Effect<void>
@@ -625,8 +640,26 @@ export const layer = Layer.effect(
           result.plugin_origins = plugins
         })
 
+        const mergeMcpOrigins = (source: string, next: Info) => {
+          if (!next.mcp) return
+          if (!result.mcp_origins) result.mcp_origins = {}
+          if (!result.mcp_scopes) result.mcp_scopes = {}
+          const scope = source.startsWith("http://") || source.startsWith("https://")
+            ? "global"
+            : source === "OPENCODE_CONFIG_CONTENT"
+              ? "local"
+              : containsPath(source, ctx)
+                ? "local"
+                : "global"
+          for (const key of Object.keys(next.mcp)) {
+            result.mcp_origins[key] = source
+            result.mcp_scopes[key] = scope
+          }
+        }
+
         const merge = (source: string, next: Info, kind?: ConfigPlugin.Scope) => {
           result = mergeConfigConcatArrays(result, next)
+          mergeMcpOrigins(source, next)
           return mergePluginOrigins(source, next.plugin, kind)
         }
 
@@ -945,6 +978,10 @@ export const layer = Layer.effect(
       yield* invalidateGlobal
     })
 
+    const invalidateInstance = Effect.fn("Config.invalidateInstance")(function* () {
+      yield* InstanceState.invalidate(state)
+    })
+
     const updateGlobal = Effect.fn("Config.updateGlobal")(function* (config: Info) {
       const file = globalConfigFile()
       const before = (yield* readConfigFile(file)) ?? "{}"
@@ -954,16 +991,36 @@ export const layer = Layer.effect(
       yield* Effect.logInfo("更新配置updating global config", { file, patch, force })
       let next: Info
       let changed: boolean
+      // testagent_change: Strip null values from merged config before writing.
+      // The webview uses null as a deletion sentinel (e.g. { mcp: { name: null } }),
+      // but writing null to the JSON file would fail schema validation on next read.
+      const withoutNulls = (o: Record<string, unknown>): Record<string, unknown> => {
+        const r: Record<string, unknown> = {}
+        for (const [k, v] of Object.entries(o)) {
+          if (v === null || v === undefined) continue
+          if (isRecord(v)) r[k] = withoutNulls(v)
+          else r[k] = v
+        }
+        return r
+      }
+
       if (!file.endsWith(".jsonc")) {
         const existing = ConfigParse.effectSchema(Info, ConfigParse.jsonc(before, file), file)
-        const merged = stripNulls(mergeDeep(writable(existing), patch) as Record<string, unknown>) as Info
-        const serialized = JSON.stringify(merged, null, 2)
+        const merged = mergeDeep(writable(existing), patch)
+        const cleaned = withoutNulls(merged)
+        const serialized = JSON.stringify(cleaned, null, 2)
         changed = serialized !== before
         if (changed) yield* fs.writeFileString(file, serialized).pipe(Effect.orDie)
-        next = merged
+        next = cleaned
       } else {
-        const updated = patchJsonc(before, patch)
-        next = ConfigParse.effectSchema(Info, ConfigParse.jsonc(updated, file), file)
+        // Apply the patch with null sentinels intact so patchJsonc can
+        // delete keys (modify sets null → property removal in JSONC).
+        // Strip nulls from the parsed result instead.
+        const updated = patchJsonc(before, patch as Info)
+        const parsed = ConfigParse.effectSchema(Info, ConfigParse.jsonc(updated, file), file)
+        // testagent_change: Apply withoutNulls after parsing to clean up
+        // deletion sentinels that patchJsonc wrote as null values.
+        next = withoutNulls(parsed)
         changed = updated !== before
         if (changed) yield* fs.writeFileString(file, updated).pipe(Effect.orDie)
       }
@@ -998,6 +1055,7 @@ export const layer = Layer.effect(
       update,
       updateGlobal,
       invalidate,
+      invalidateInstance,
       directories,
       testagentDirectories, // testagent_change
       waitForDependencies,
