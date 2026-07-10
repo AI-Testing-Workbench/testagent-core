@@ -134,6 +134,21 @@ export function getMemoryDir(worktree) {
     ensureDir(memoryDir);
     return memoryDir;
 }
+// 当前目录/.testagent/skills
+export function getSkillsDir(worktree) {
+    const skillsDir = join(worktree, ".testagent", "skills");
+    ensureDir(skillsDir);
+    return skillsDir;
+}
+/**
+ * 个人全局skill文件
+ * @returns
+ */
+export function getGlobalSkillsDir() {
+    const globalskillsDir = join(getOpencodeConfigHomeDir(), "skills");
+    ensureDir(globalskillsDir);
+    return globalskillsDir;
+}
 // 团队记忆目录
 export function getTeamMemoryDir(worktree) {
     const teamMemoryDir = join(getMemoryDir(worktree), "team");
@@ -189,4 +204,10 @@ export function getPersonalMemoryBackupDir() {
     const dir = join(getOpencodeConfigHomeDir(), "persona-back");
     ensureDir(dir);
     return dir;
+}
+// 当前目录/.testagent/commands
+export function getProjectCommandsDir(worktree) {
+    const cmdDir = join(worktree, ".testagent", "commands");
+    ensureDir(cmdDir);
+    return cmdDir;
 }

@@ -1,6 +1,7 @@
 import * as log from "./core/log.js";
 import { workerSessionIDs } from "./core/worker.js";
-import { AUTO_EXTRACTION_PROMPT } from "./prompt.js";
+import { buildAutoExtractionPrompt } from "./prompt.js";
+import { getSkillsDir, getGlobalSkillsDir } from "./paths.js";
 import { config } from "./core/config.js";
 import { getDatabase } from "./core/db.js";
 // Re-export for backwards compat — index.ts and others may still import from here.
@@ -46,7 +47,9 @@ export async function run(input) {
                 .join("\n\n")
                 .slice(0, config().memory.autoExtractMaxLength);
             const userContent = `## Recent conversation messages (batch ${i + 1}/${batches.length}, ${batchRecords.length} records)\n\n${batchContent}\n\nExtract memories from the messages above.`;
-            const responseText = await input.llm.promptForSubAgent(AUTO_EXTRACTION_PROMPT, userContent, { model, agentName: "auto-extraction", eventSource: input.options?.eventSource, traceInput: batchRecords });
+            const skillsDir = getSkillsDir(input.projectPath);
+            const globalskillsDir = getGlobalSkillsDir();
+            const responseText = await input.llm.promptForSubAgent(buildAutoExtractionPrompt(skillsDir, globalskillsDir), userContent, { model, agentName: "auto-extraction", eventSource: input.options?.eventSource, traceInput: batchRecords });
             // 如果提取成功，更新记录状态为1
             if (responseText !== null) {
                 const partIds = batchRecords.map(r => r.part_id);
@@ -67,7 +70,9 @@ export async function run(input) {
             .join("\n\n")
             .slice(0, config().memory.autoExtractMaxLength);
         const userContent = `## Recent conversation messages (last ~${records.length})\n\n${messageText}\n\nExtract memories from the messages above.`;
-        const responseText = await input.llm.promptForSubAgent(AUTO_EXTRACTION_PROMPT, userContent, { model, agentName: "auto-extraction", eventSource: input.options?.eventSource, traceInput: records });
+        const skillsDir = getSkillsDir(input.projectPath);
+        const globalskillsDir = getGlobalSkillsDir();
+        const responseText = await input.llm.promptForSubAgent(buildAutoExtractionPrompt(skillsDir, globalskillsDir), userContent, { model, agentName: "auto-extraction", eventSource: input.options?.eventSource, traceInput: records });
         // 如果提取成功，更新记录状态为1
         if (responseText !== null) {
             const partIds = records.map(r => r.part_id);

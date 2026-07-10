@@ -10,6 +10,12 @@ export declare function sanitizePath(name: string): string;
 export declare function findCanonicalGitRoot(startPath: string): string | null;
 export declare function getProjectDir(worktree: string): string;
 export declare function getMemoryDir(worktree: string): string;
+export declare function getSkillsDir(worktree: string): string;
+/**
+ * 个人全局skill文件
+ * @returns
+ */
+export declare function getGlobalSkillsDir(): string;
 export declare function getTeamMemoryDir(worktree: string): string;
 export declare function getTeamMemoryEntrypoint(worktree: string): string;
 export declare function getMemoryEntrypoint(worktree: string): string;
@@ -32,3 +38,4 @@ export declare function getPersonalMemoryFileBackup(): string;
  * @returns
  */
 export declare function getPersonalMemoryBackupDir(): string;
+export declare function getProjectCommandsDir(worktree: string): string;

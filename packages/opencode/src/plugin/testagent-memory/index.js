@@ -234,6 +234,8 @@ export const MemoryPlugin = async (params) => {
     // 等待配置加载完成
     await load(getOpencodeConfigHomeDir());
     log.info(`记忆插件配置`, JSON.stringify(config()));
+    // 初始化或删除命令
+    initMemCmd(projectPath);
     // 如果插件未启用，直接返回空插件
     if (!config().enable) {
         log.info("[MemoryPlugin] plugin is disabled, skipping initialization");
@@ -241,8 +243,6 @@ export const MemoryPlugin = async (params) => {
     }
     // 初始化工作区记忆目录
     getMemoryDir(worktree);
-    // 初始化或删除命令
-    initMemCmd();
     const state = getState(projectPath);
     const activeSessions = state.activeSessions;
     const skipSessions = state.skipSessions;
