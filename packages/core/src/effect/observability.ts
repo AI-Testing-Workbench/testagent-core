@@ -96,7 +96,6 @@ const layerTextBody = Layer.succeed(OtlpSerialization.OtlpSerialization, {
           ...sl,
           logRecords: sl.logRecords?.map((lr: any) => ({
             ...lr,
-            attributes: [],
             body: { stringValue: anyValueToText(lr.body) },
           })),
         })),
@@ -118,7 +117,7 @@ function logs() {
       }),
     ],
     { mergeWithExisting: false },
-  ).pipe(Layer.provide(OtlpSerialization.layerJson), Layer.provide(FetchHttpClient.layer))
+  ).pipe(Layer.provide(layerTextBody), Layer.provide(FetchHttpClient.layer))
 }
 
 // Global metrics singleton — created once, runs forever.
