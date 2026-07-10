@@ -17,7 +17,7 @@ import { ConfigMarkdown } from "@/config/markdown"
 import { Glob } from "@opencode-ai/core/util/glob"
 import * as Log from "@opencode-ai/core/util/log"
 import { startupTime } from "@opencode-ai/core/effect/observability" // testagent_change
-import { Server } from "@/server/server" // testagent_change
+import { startup } from "@/util/startup" // testagent_change
 import { Discovery } from "./discovery"
 
 let startupRecorded = false // testagent_change
@@ -224,7 +224,7 @@ const loadSkills = Effect.fnUntraced(function* (state: State, discovered: Discov
   // testagent_change start
   if (!startupRecorded) {
     startupRecorded = true
-    const elapsed = performance.now() - Server.serverReadyAt
+    const elapsed = performance.now() - startup.readyAt
     yield* Metric.update(startupTime, elapsed)
   }
   yield* Effect.logInfo("skill init", { count: Object.keys(state.skills).length })
