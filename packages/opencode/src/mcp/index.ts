@@ -918,12 +918,11 @@ export const layer = Layer.effect(
     const reload = Effect.fn("MCP.reload")(function* () {
       yield* Effect.logInfo("reloading mcp servers from config")
 
-      // 1. Invalidate config cache to force re-read from disk
-      // This clears both global and instance-level config caches
+      // 1. Invalidate config caches to force re-read from disk
       yield* cfgSvc.invalidate()
+      yield* cfgSvc.invalidateInstance()
 
       // 2. Re-read config directly (bypassing any InstanceState cache)
-      // Force a fresh read by calling get() after invalidate()
       const cfg = yield* cfgSvc.get()
       const config = cfg.mcp ?? {}
 
