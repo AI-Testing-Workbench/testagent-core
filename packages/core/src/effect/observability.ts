@@ -118,7 +118,7 @@ function logs() {
       }),
     ],
     { mergeWithExisting: false },
-  ).pipe(Layer.provide(layerTextBody), Layer.provide(FetchHttpClient.layer))
+  ).pipe(Layer.provide(OtlpSerialization.layerJson), Layer.provide(FetchHttpClient.layer))
 }
 
 // Global metrics singleton — created once, runs forever.
