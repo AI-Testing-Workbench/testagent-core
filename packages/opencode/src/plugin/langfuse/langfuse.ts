@@ -1347,12 +1347,112 @@ function normalizeUsage(tokens: any):
   | undefined {
   if (!tokens || typeof tokens !== "object") return undefined
 
-  const input = tokens.input ?? tokens.inputTokens ?? tokens.promptTokens ?? tokens.prompt_tokens
-  const output = tokens.output ?? tokens.outputTokens ?? tokens.completionTokens ?? tokens.completion_tokens
-  const total = tokens.total ?? tokens.totalTokens ?? tokens.total_tokens
-  const reasoning = tokens.reasoning ?? tokens.reasoningTokens ?? tokens.reasoning_tokens
-  const cacheRead = tokens.cache?.read ?? tokens.cacheRead ?? tokens.cache_read
-  const cacheWrite = tokens.cache?.write ?? tokens.cacheWrite ?? tokens.cache_write
+  const toTokenNumber = (...values: any[]) => {
+    for (const value of values) {
+      if (value === undefined || value === null || typeof value === "object") continue
+      const n = Number(value)
+      if (Number.isFinite(n)) return n
+    }
+    return undefined
+  }
+
+  const input = toTokenNumber(
+    tokens.input,
+    tokens.input?.total,
+    tokens.input?.tokens,
+    tokens.input?.count,
+    tokens.input?.uncached,
+    tokens.prompt?.total,
+    tokens.prompt?.tokens,
+    tokens.inputTokens,
+    tokens.promptTokens,
+    tokens.prompt_tokens,
+    tokens.input_tokens,
+    tokens.usage?.input,
+    tokens.usage?.inputTokens,
+    tokens.usage?.promptTokens,
+    tokens.usage?.prompt_tokens,
+    tokens.usage?.input_tokens,
+  )
+  const output = toTokenNumber(
+    tokens.output,
+    tokens.output?.total,
+    tokens.output?.tokens,
+    tokens.output?.count,
+    tokens.output?.visible,
+    tokens.completion?.total,
+    tokens.completion?.tokens,
+    tokens.outputTokens,
+    tokens.completionTokens,
+    tokens.completion_tokens,
+    tokens.output_tokens,
+    tokens.usage?.output,
+    tokens.usage?.outputTokens,
+    tokens.usage?.completionTokens,
+    tokens.usage?.completion_tokens,
+    tokens.usage?.output_tokens,
+  )
+  const total = toTokenNumber(
+    tokens.total,
+    tokens.totalTokens,
+    tokens.total_tokens,
+    tokens.usage?.total,
+    tokens.usage?.totalTokens,
+    tokens.usage?.total_tokens,
+  )
+  const reasoning = toTokenNumber(
+    tokens.reasoning,
+    tokens.reasoning?.total,
+    tokens.reasoning?.tokens,
+    tokens.output?.reasoning,
+    tokens.output?.reasoningTokens,
+    tokens.output?.reasoning_tokens,
+    tokens.reasoningTokens,
+    tokens.reasoning_tokens,
+    tokens.output_tokens_details?.reasoning_tokens,
+    tokens.usage?.reasoning,
+    tokens.usage?.reasoningTokens,
+    tokens.usage?.reasoning_tokens,
+    tokens.usage?.output_tokens_details?.reasoning_tokens,
+  )
+  const cacheRead = toTokenNumber(
+    tokens.cache?.read,
+    tokens.input?.cache?.read,
+    tokens.input?.cacheRead,
+    tokens.input?.cache_read,
+    tokens.input?.cacheReadTokens,
+    tokens.input?.cache_read_tokens,
+    tokens.cacheRead,
+    tokens.cache_read,
+    tokens.cacheReadTokens,
+    tokens.cache_read_tokens,
+    tokens.cache_read_input_tokens,
+    tokens.usage?.cache?.read,
+    tokens.usage?.cacheRead,
+    tokens.usage?.cache_read,
+    tokens.usage?.cacheReadTokens,
+    tokens.usage?.cache_read_tokens,
+    tokens.usage?.cache_read_input_tokens,
+  )
+  const cacheWrite = toTokenNumber(
+    tokens.cache?.write,
+    tokens.input?.cache?.write,
+    tokens.input?.cacheWrite,
+    tokens.input?.cache_write,
+    tokens.input?.cacheWriteTokens,
+    tokens.input?.cache_write_tokens,
+    tokens.cacheWrite,
+    tokens.cache_write,
+    tokens.cacheWriteTokens,
+    tokens.cache_write_tokens,
+    tokens.cache_creation_input_tokens,
+    tokens.usage?.cache?.write,
+    tokens.usage?.cacheWrite,
+    tokens.usage?.cache_write,
+    tokens.usage?.cacheWriteTokens,
+    tokens.usage?.cache_write_tokens,
+    tokens.usage?.cache_creation_input_tokens,
+  )
 
   if (
     input === undefined &&
@@ -1365,15 +1465,15 @@ function normalizeUsage(tokens: any):
     return undefined
   }
 
-  const uncachedInput = Number(input ?? 0)
-  const normalizedCacheRead = Number(cacheRead ?? 0)
-  const normalizedCacheWrite = Number(cacheWrite ?? 0)
-  const visibleOutput = Number(output ?? 0)
-  const normalizedReasoning = Number(reasoning ?? 0)
+  const uncachedInput = input ?? 0
+  const normalizedCacheRead = cacheRead ?? 0
+  const normalizedCacheWrite = cacheWrite ?? 0
+  const visibleOutput = output ?? 0
+  const normalizedReasoning = reasoning ?? 0
   const normalizedInput = uncachedInput + normalizedCacheRead + normalizedCacheWrite
   const normalizedOutput = visibleOutput + normalizedReasoning
   const computedTotal = normalizedInput + normalizedOutput
-  const normalizedTotal = Number(total ?? computedTotal)
+  const normalizedTotal = total ?? computedTotal
 
   if (
     ![
@@ -1529,7 +1629,7 @@ async function finalizeGeneration(
   const normalizedUsage = normalizeUsage(options?.tokens)
   const usage = normalizedUsage
     ? { input: normalizedUsage.input, output: normalizedUsage.output, total: normalizedUsage.total }
-    : { input: 0, output: 0, total: 0 }
+    : undefined
 
   const toolCallsOutput = g.toolCalls.map((tc) => ({
     type: "function",
@@ -1576,7 +1676,7 @@ async function finalizeGeneration(
   const generationUpdates: Partial<GenerationData> = {
     endTime: endTime.toISOString(),
     completionStartTime: g.completionStartTime?.toISOString(),
-    usage,
+    ...(usage ? { usage } : {}),
     output: JSON.stringify(structuredOutput, null, 2),
     modelParameters: {
       ...g.modelParameters,
@@ -1588,14 +1688,18 @@ async function finalizeGeneration(
       model: buildLLMModelMetadata(g),
       input: updatedInput,
       output: structuredOutput,
-      usage: {
-        unit: "tokens",
-        scope: "generation",
-        note:
-          "Langfuse generation usage is per LLM call. Input includes uncached input plus cache read/write; output includes visible output plus reasoning.",
-        ...(normalizedUsage?.details ? { details: normalizedUsage.details } : {}),
-        ...usage,
-      },
+      ...(usage
+        ? {
+            usage: {
+              unit: "tokens",
+              scope: "generation",
+              note:
+                "Langfuse generation usage is per LLM call. Input includes uncached input plus cache read/write; output includes visible output plus reasoning.",
+              ...(normalizedUsage?.details ? { details: normalizedUsage.details } : {}),
+              ...usage,
+            },
+          }
+        : {}),
       tags: OBSERVATION_TAGS,
       ...baseMetadata(),
     },
@@ -1605,7 +1709,7 @@ async function finalizeGeneration(
   updateGenerationImmediately(g.traceId, g.genId, generationUpdates)
 
   g.finalOutput = structuredOutput
-  g.hasUsage = true
+  g.hasUsage = !!usage
   if (options?.removeActive !== false) {
     deleteActiveGeneration(sessionId, g)
   }
