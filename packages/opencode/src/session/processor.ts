@@ -770,6 +770,7 @@ export const layer: Layer.Layer<
           }).pipe(
             Effect.onInterrupt(() =>
               Effect.gen(function* () {
+                yield* Effect.logInfo(`Session ${ctx.sessionID} 会话中断`, {error: ctx.assistantMessage.error})
                 aborted = true
                 if (!ctx.assistantMessage.error) {
                   yield* halt(new DOMException("Aborted", "AbortError"))
@@ -778,7 +779,12 @@ export const layer: Layer.Layer<
             ),
             Effect.catchCauseIf(
               (cause) => !Cause.hasInterruptsOnly(cause),
-              (cause) => Effect.fail(Cause.squash(cause)),
+              (cause) => {
+                return Effect.gen(function* () {
+                  yield* Effect.logInfo(`Session ${ctx.sessionID} 非中断错误`, { error: errorMessage(cause), stack: cause instanceof Error ? cause.stack : undefined })
+                  return yield* Effect.fail(Cause.squash(cause))
+                })
+              },
             ),
             Effect.retry(
               SessionRetry.policy({
@@ -795,12 +801,15 @@ export const layer: Layer.Layer<
                     },
                     timestamp: DateTime.makeUnsafe(Date.now()),
                   })
-                  return status.set(ctx.sessionID, {
-                    type: "retry",
-                    attempt: info.attempt,
-                    message: info.message,
-                    action: info.action,
-                    next: info.next,
+                  return Effect.gen(function* () {
+                    yield* Effect.logInfo(`Session ${ctx.sessionID} 失败重试，次数：${info.attempt}，错误信息：${info.message}`)
+                    return yield* status.set(ctx.sessionID, {
+                      type: "retry",
+                      attempt: info.attempt,
+                      message: info.message,
+                      action: info.action,
+                      next: info.next,
+                    })
                   })
                 },
               }),
