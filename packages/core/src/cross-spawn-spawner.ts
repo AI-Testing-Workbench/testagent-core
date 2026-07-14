@@ -265,7 +265,15 @@ export const make = Effect.gen(function* () {
   const spawn = (command: ChildProcess.StandardCommand, opts: NodeChildProcess.SpawnOptions) =>
     Effect.callback<readonly [NodeChildProcess.ChildProcess, ExitSignal], PlatformError.PlatformError>((resume) => {
       const signal = Deferred.makeUnsafe<readonly [code: number | null, signal: NodeJS.Signals | null]>()
-      const proc = launch(command.command, command.args, opts)
+      let proc: NodeChildProcess.ChildProcess
+      try {
+        proc = launch(command.command, command.args, opts)
+      } catch (err) {
+        // testagent_change - spawn can throw synchronously on Windows (spawn UNKNOWN);
+        // route it through the normal failure path so callers can degrade gracefully
+        resume(Effect.fail(toPlatformError("spawn", toError(err), command)))
+        return
+      }
       let end = false
       let exit: readonly [code: number | null, signal: NodeJS.Signals | null] | undefined
       proc.on("error", (err) => {
