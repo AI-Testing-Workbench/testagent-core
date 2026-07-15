@@ -608,7 +608,7 @@ export const ShellTool = Tool.define(
       
       if (pythonConfig) {
         yield* Effect.logInfo(`Python config loaded pythonPath="${pythonConfig.path}" envPath="${pythonConfig.envPath || 'none'}" envName="${pythonConfig.envName || 'none'}" version="${pythonConfig.version || 'unknown'}"`)
-        yield* Effect.logInfo(`Shell env before Python injection PATH="${baseEnv[pathKey] || 'none'}" VIRTUAL_ENV="${baseEnv["VIRTUAL_ENV"] || 'none'}" PYTHONPATH="${baseEnv["PYTHONPATH"] || 'none'}"`)
+        yield* Effect.logInfo(`Shell env before Python injection PATH="${baseEnv[pathKey] || 'none'}" VIRTUAL_ENV="${baseEnv["VIRTUAL_ENV"] || 'none'}"`)
         
         const pythonDir = path.dirname(pythonConfig.path)
         const currentPath = baseEnv[pathKey] || ""
@@ -627,9 +627,7 @@ export const ShellTool = Tool.define(
           yield* Effect.logInfo(`Python dir injected pythonDir="${pythonDir}" PATH="${newPath}"`)
         }
         
-        const prevPYTHONPATH = baseEnv["PYTHONPATH"]
-        baseEnv["PYTHONPATH"] = projectRoot + (prevPYTHONPATH ? path.delimiter + prevPYTHONPATH : "")
-        yield* Effect.logInfo(`PYTHONPATH updated prev="${prevPYTHONPATH || 'none'}" next="${baseEnv["PYTHONPATH"]}" projectRoot="${projectRoot}"`)
+
       }
       yield* Effect.logInfo(`baseEnv assembled baseEnv=${JSON.stringify(baseEnv)}`)
       
@@ -662,13 +660,12 @@ export const ShellTool = Tool.define(
       // Log Python-related environment variables if present
       const pythonEnvVars = {
         VIRTUAL_ENV: input.env.VIRTUAL_ENV,
-        PYTHONPATH: input.env.PYTHONPATH,
         PYTHONIOENCODING: input.env.PYTHONIOENCODING,
         PYTHONUTF8: input.env.PYTHONUTF8,
       }
       const hasPythonEnv = Object.values(pythonEnvVars).some(v => v !== undefined)
       if (hasPythonEnv) {
-        yield* Effect.logInfo(`run: Python environment variables VIRTUAL_ENV="${pythonEnvVars.VIRTUAL_ENV || 'none'}" PYTHONPATH="${pythonEnvVars.PYTHONPATH || 'none'}" PYTHONIOENCODING="${pythonEnvVars.PYTHONIOENCODING || 'none'}" PYTHONUTF8="${pythonEnvVars.PYTHONUTF8 || 'none'}"`)
+        yield* Effect.logInfo(`run: Python environment variables VIRTUAL_ENV="${pythonEnvVars.VIRTUAL_ENV || 'none'}" PYTHONIOENCODING="${pythonEnvVars.PYTHONIOENCODING || 'none'}" PYTHONUTF8="${pythonEnvVars.PYTHONUTF8 || 'none'}"`)
       }
       // testagent_change end
       
