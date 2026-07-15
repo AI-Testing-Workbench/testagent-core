@@ -5,16 +5,19 @@ import { SessionID, MessageID } from "../session/schema"
 import { MessageV2 } from "../session/message-v2"
 import { Agent } from "../agent/agent"
 import type { SessionPrompt } from "../session/prompt"
+import { IdleReason } from "@/session/status"
 import { Config } from "@/config/config"
 import { Effect, Exit, Metric, Schema } from "effect"
 import { EffectBridge } from "@/effect/bridge"
 import { taskCall } from "@opencode-ai/core/effect/observability"
 
+// testagent_change start - subagent 取消支持传入 idle reason
 export interface TaskPromptOps {
-  cancel(sessionID: SessionID): Effect.Effect<void>
+  cancel(sessionID: SessionID, reason?: IdleReason): Effect.Effect<void>
   resolvePromptParts(template: string): Effect.Effect<SessionPrompt.PromptInput["parts"]>
   prompt(input: SessionPrompt.PromptInput): Effect.Effect<MessageV2.WithParts>
 }
+// testagent_change end
 
 const id = "task"
 
@@ -153,7 +156,9 @@ export const TaskTool = Tool.define(
       const runCancel = yield* EffectBridge.make()
 
       const messageID = MessageID.ascending()
-      const cancel = ops.cancel(nextSession.id)
+      // testagent_change - 父 agent 被用户中止时会中断本 TaskTool,释放块据此取消
+      // subagent;这里把 reason 写为 user_abort,使被牵连取消的 subagent 也标记为 user_abort。
+      const cancel = ops.cancel(nextSession.id, "user_abort")
 
       function onAbort() {
         runCancel.fork(cancel)

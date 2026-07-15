@@ -236,10 +236,14 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       )
     })
 
-    const abort = Effect.fn("SessionHttpApi.abort")(function* (ctx: { params: { sessionID: SessionID } }) {
-      yield* promptSvc.cancel(ctx.params.sessionID)
-      return true
-    })
+    // testagent_change start - 接收前端传来的 idle reason
+    const abort = Effect.fn("SessionHttpApi.abort")(
+      function* (ctx: { params: { sessionID: SessionID }; payload: { reason?: "completed" | "user_abort" | "error" } }) {
+        yield* promptSvc.cancel(ctx.params.sessionID, ctx.payload.reason)
+        return true
+      },
+    )
+    // testagent_change end
 
     const init = Effect.fn("SessionHttpApi.init")(function* (ctx: {
       params: { sessionID: SessionID }

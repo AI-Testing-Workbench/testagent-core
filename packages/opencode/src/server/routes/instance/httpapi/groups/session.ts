@@ -55,6 +55,11 @@ export const InitPayload = Schema.Struct({
   providerID: ProviderID,
   messageID: MessageID,
 })
+// testagent_change start - abort 支持前端传入 idle reason
+export const AbortPayload = Schema.Struct({
+  reason: Schema.optional(SessionStatus.IdleReason),
+})
+// testagent_change end
 export const SummarizePayload = Schema.Struct({
   providerID: ProviderID,
   modelID: ModelID,
@@ -240,6 +245,7 @@ export const SessionApi = HttpApi.make("session")
         ),
         HttpApiEndpoint.post("abort", SessionPaths.abort, {
           params: { sessionID: SessionID },
+          payload: AbortPayload,
           success: described(Schema.Boolean, "Aborted session"),
           error: [HttpApiError.BadRequest, HttpApiError.NotFound],
         }).annotateMerge(
