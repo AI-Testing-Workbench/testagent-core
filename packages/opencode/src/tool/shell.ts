@@ -600,28 +600,38 @@ export const ShellTool = Tool.define(
         ...process.env,
         ...extra.env,
       }
+      const pathKey = process.platform === "win32" ? "Path" : "PATH"
+      yield* Effect.logInfo(`baseEnv keys count=${Object.keys(baseEnv).length} baseEnv=${JSON.stringify(baseEnv)}`)
       
       const projectRoot = yield* findProjectRoot(cwd)
       const pythonConfig = yield* readPythonInterpreterConfig(projectRoot)
       
       if (pythonConfig) {
-        yield* Effect.logInfo(`Adding Python to PATH pythonPath="${pythonConfig.path}" envPath="${pythonConfig.envPath || 'none'}"`)
+        yield* Effect.logInfo(`Python config loaded pythonPath="${pythonConfig.path}" envPath="${pythonConfig.envPath || 'none'}" envName="${pythonConfig.envName || 'none'}" version="${pythonConfig.version || 'unknown'}"`)
+        yield* Effect.logInfo(`Shell env before Python injection PATH="${baseEnv[pathKey] || 'none'}" VIRTUAL_ENV="${baseEnv["VIRTUAL_ENV"] || 'none'}" PYTHONPATH="${baseEnv["PYTHONPATH"] || 'none'}"`)
         
         const pythonDir = path.dirname(pythonConfig.path)
-        const currentPath = baseEnv["PATH"] || ""
+        const currentPath = baseEnv[pathKey] || ""
         
         if (pythonConfig.envPath) {
           const binDir = process.platform === "win32" 
             ? path.join(pythonConfig.envPath, "Scripts")
             : path.join(pythonConfig.envPath, "bin")
-          baseEnv["PATH"] = binDir + path.delimiter + pythonDir + path.delimiter + currentPath
+          const newPath = binDir + path.delimiter + pythonDir + path.delimiter + currentPath
+          baseEnv[pathKey] = newPath
           baseEnv["VIRTUAL_ENV"] = pythonConfig.envPath
+          yield* Effect.logInfo(`Python virtual env injected binDir="${binDir}" pythonDir="${pythonDir}" VIRTUAL_ENV="${pythonConfig.envPath}" PATH="${newPath}"`)
         } else {
-          baseEnv["PATH"] = pythonDir + path.delimiter + currentPath
+          const newPath = pythonDir + path.delimiter + currentPath
+          baseEnv[pathKey] = newPath
+          yield* Effect.logInfo(`Python dir injected pythonDir="${pythonDir}" PATH="${newPath}"`)
         }
         
-        baseEnv["PYTHONPATH"] = projectRoot + (baseEnv["PYTHONPATH"] ? path.delimiter + baseEnv["PYTHONPATH"] : "")
+        const prevPYTHONPATH = baseEnv["PYTHONPATH"]
+        baseEnv["PYTHONPATH"] = projectRoot + (prevPYTHONPATH ? path.delimiter + prevPYTHONPATH : "")
+        yield* Effect.logInfo(`PYTHONPATH updated prev="${prevPYTHONPATH || 'none'}" next="${baseEnv["PYTHONPATH"]}" projectRoot="${projectRoot}"`)
       }
+      yield* Effect.logInfo(`baseEnv assembled baseEnv=${JSON.stringify(baseEnv)}`)
       
       if (process.platform === "win32") {
         return {
