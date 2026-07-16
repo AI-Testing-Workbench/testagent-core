@@ -6066,6 +6066,41 @@ export type SessionSummarizeResponses = {
 
 export type SessionSummarizeResponse = SessionSummarizeResponses[keyof SessionSummarizeResponses]
 
+// testagent_change start - clearContext 类型
+export type SessionClearContextData = {
+  path: {
+    sessionID: string
+  }
+  query?: {
+    directory?: string
+    workspace?: string
+  }
+  url: "/session/{sessionID}/context-clear"
+}
+
+export type SessionClearContextErrors = {
+  /**
+   * Bad request
+   */
+  400: BadRequestError
+  /**
+   * NotFoundError
+   */
+  404: NotFoundError
+}
+
+export type SessionClearContextError = SessionClearContextErrors[keyof SessionClearContextErrors]
+
+export type SessionClearContextResponses = {
+  /**
+   * Context cleared
+   */
+  200: boolean
+}
+
+export type SessionClearContextResponse = SessionClearContextResponses[keyof SessionClearContextResponses]
+// testagent_change end
+
 export type SessionPromptAsyncData = {
   body?: {
     messageID?: string

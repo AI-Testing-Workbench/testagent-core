@@ -168,6 +168,8 @@ import type {
   SessionStatusResponses,
   SessionSummarizeErrors,
   SessionSummarizeResponses,
+  SessionClearContextErrors, // testagent_change
+  SessionClearContextResponses, // testagent_change
   SessionTodoErrors,
   SessionTodoResponses,
   SessionUnrevertErrors,
@@ -4007,6 +4009,40 @@ export class Session2 extends HeyApiClient {
       },
     })
   }
+
+  // testagent_change start - clearContext
+  /**
+   * Clear session context
+   *
+   * Clear all LLM context while preserving conversation history in the UI.
+   */
+  public clearContext<ThrowOnError extends boolean = false>(
+    parameters: {
+      sessionID: string
+      directory?: string
+      workspace?: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "path", key: "sessionID" },
+            { in: "query", key: "directory" },
+            { in: "query", key: "workspace" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).post<SessionClearContextResponses, SessionClearContextErrors, ThrowOnError>({
+      url: "/session/{sessionID}/context-clear",
+      ...options,
+      ...params,
+    })
+  }
+  // testagent_change end
 
   /**
    * Send async message

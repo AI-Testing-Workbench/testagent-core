@@ -206,6 +206,9 @@ export interface Interface {
     auto: boolean
     overflow?: boolean
   }) => Effect.Effect<void>
+  // testagent_change start - Clear all LLM context while preserving conversation history in the UI.
+  readonly clearContext: (input: { sessionID: SessionID }) => Effect.Effect<void>
+  // testagent_change end
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/SessionCompaction") {}
@@ -610,11 +613,62 @@ export const layer: Layer.Layer<
       })
     })
 
+    // testagent_change start - clearContext: drop all LLM context, keep UI history
+    const clearContext = Effect.fn("SessionCompaction.clearContext")(function* (input: {
+      sessionID: SessionID
+    }) {
+      // Create compaction marker — same shape as compaction.create but no LLM call
+      const userMsg = yield* session.updateMessage({
+        id: MessageID.ascending(),
+        role: "user",
+        sessionID: input.sessionID,
+        agent: "compaction" as any,
+        model: { providerID: "", modelID: "" } as any,
+        time: { created: Date.now() },
+      })
+      yield* session.updatePart({
+        id: PartID.ascending(),
+        messageID: userMsg.id,
+        sessionID: userMsg.sessionID,
+        type: "compaction",
+        auto: false,
+      })
+      // Stub assistant with summary:true + finish so filterCompacted treats it as completed
+      const stubAsst = yield* session.updateMessage({
+        id: MessageID.ascending(),
+        role: "assistant",
+        parentID: userMsg.id,
+        sessionID: input.sessionID,
+        mode: "compaction" as any,
+        agent: "compaction" as any,
+        summary: true,
+        finish: "stop",
+        path: { cwd: "", root: "" },
+        cost: 0,
+        tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+        modelID: ModelID.make(""),
+        providerID: ProviderID.make(""),
+        time: { created: Date.now() },
+      })
+      // Add a text part so toModelMessagesEffect doesn't skip the empty stub
+      yield* session.updatePart({
+        id: PartID.ascending(),
+        messageID: stubAsst.id,
+        sessionID: input.sessionID,
+        type: "text",
+        text: "SDT框架会话已清理，上下文已清空。之前的对话记录不再可见。",
+        synthetic: true,
+      })
+      yield* bus.publish(Event.Compacted, { sessionID: input.sessionID })
+    })
+    // testagent_change end
+
     return Service.of({
       isOverflow,
       prune,
       process: processCompaction,
       create,
+      clearContext, // testagent_change
     })
   }),
 )
