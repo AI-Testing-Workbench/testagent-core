@@ -4085,7 +4085,6 @@ export class Session2 extends HeyApiClient {
       model?: string
       arguments?: string
       command?: string
-      goal?: string
       variant?: string
       parts?: Array<{
         id?: string

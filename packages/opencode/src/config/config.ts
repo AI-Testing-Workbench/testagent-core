@@ -213,6 +213,17 @@ export const Info = Schema.Struct({
     description: "Enable or disable Langfuse tracing (default: true)",
   }),
   // testagent_change end
+  // testagent_change start - goal plugin toggle
+  goal: Schema.optional(
+    Schema.Struct({
+      enabled: Schema.optional(Schema.Boolean).annotate({
+        description: "Enable or disable the goal tracking plugin (default: false)",
+      }),
+    }),
+  ).annotate({
+    description: "Goal tracking plugin configuration",
+  }),
+  // testagent_change end
   share: Schema.optional(Schema.Literals(["manual", "auto", "disabled"])).annotate({
     description:
       "Control sharing behavior:'manual' allows manual sharing via commands, 'auto' enables automatic sharing, 'disabled' disables all sharing",

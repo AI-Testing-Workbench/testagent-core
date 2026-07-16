@@ -1815,7 +1815,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
 
       yield* plugin.trigger(
         "command.execute.before",
-        { command: input.command, sessionID: input.sessionID, arguments: input.arguments, goal: input.goal },
+        { command: input.command, sessionID: input.sessionID, arguments: input.arguments },
         { parts },
       )
 
@@ -1942,7 +1942,6 @@ export const CommandInput = Schema.Struct({
   model: Schema.optional(Schema.String),
   arguments: Schema.String,
   command: Schema.String,
-  goal: Schema.optional(Schema.String), // testagent_change
   variant: Schema.optional(Schema.String),
   // Inlined (no identifier annotation) to keep the original SDK output — the
   // PromptInput call site below references FilePartInput by ref via the
