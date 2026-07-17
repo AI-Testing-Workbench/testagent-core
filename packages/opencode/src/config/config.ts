@@ -913,6 +913,11 @@ export const layer = Layer.effect(
         }
 
         yield* Effect.logInfo("testagent config: ", result) // testagent_change
+
+        if (!result.small_model) {
+          result.small_model = "test-llm/Economy"
+        }
+
         return {
           config: result,
           directories,
