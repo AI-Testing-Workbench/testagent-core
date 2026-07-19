@@ -38,7 +38,7 @@ import { NamedError } from "@opencode-ai/core/util/error"
 import { SessionProcessor } from "./processor"
 import { Tool } from "@/tool/tool"
 import { Permission } from "@/permission"
-import { SessionStatus } from "./status"
+import { SessionStatus, type IdleReason } from "./status"
 import { LLM } from "./llm"
 import { Shell } from "@/shell/shell"
 import { ShellID } from "@/tool/shell/id"
@@ -83,7 +83,7 @@ const log = Log.create({ service: "session.prompt" })
 const elog = EffectLogger.create({ service: "session.prompt" })
 
 export interface Interface {
-  readonly cancel: (sessionID: SessionID) => Effect.Effect<void>
+  readonly cancel: (sessionID: SessionID, reason?: IdleReason) => Effect.Effect<void>
   readonly prompt: (input: PromptInput) => Effect.Effect<MessageV2.WithParts>
   readonly loop: (input: LoopInput) => Effect.Effect<MessageV2.WithParts>
   readonly shell: (input: ShellInput) => Effect.Effect<MessageV2.WithParts>
@@ -128,16 +128,19 @@ export const layer = Layer.effect(
     })
     const ops = Effect.fn("SessionPrompt.ops")(function* () {
       return {
-        cancel: (sessionID: SessionID) => cancel(sessionID),
+        // testagent_change - 透传 subagent 取消的 idle reason
+        cancel: (sessionID: SessionID, reason?: IdleReason) => cancel(sessionID, reason),
         resolvePromptParts: (template: string) => resolvePromptParts(template),
         prompt: (input: PromptInput) => prompt(input),
       } satisfies TaskPromptOps
     })
 
-    const cancel = Effect.fn("SessionPrompt.cancel")(function* (sessionID: SessionID) {
+    // testagent_change start - 透传前端传入的 idle reason
+    const cancel = Effect.fn("SessionPrompt.cancel")(function* (sessionID: SessionID, reason?: IdleReason) {
       yield* elog.info("cancel", { sessionID })
-      yield* state.cancel(sessionID)
+      yield* state.cancel(sessionID, reason)
     })
+    // testagent_change end
 
     const resolvePromptParts = Effect.fn("SessionPrompt.resolvePromptParts")(function* (template: string) {
       const ctx = yield* InstanceState.context
