@@ -16,7 +16,7 @@ import type { Plugin } from "@opencode-ai/plugin"
 import { Effect, Schema } from "effect"
 import { User } from "@/testagent/user"
 import { readFileSync, existsSync, writeFileSync, mkdirSync, renameSync } from "fs"
-import { dirname, join } from "path"
+import { dirname, join, resolve } from "path"
 import { homedir } from "os"
 
 const LANGFUSE_BASE_URL = decodeURIComponent(
@@ -493,8 +493,15 @@ const BASE_FILE_RE = /测试案例[/\\].+\.(yaml|yml)$/
 // bash: 匹配 command 字符串中被单引号或双引号包裹的路径片段
 const BASH_FILE_RE = /测试案例[/\\].+\.(yaml|yml)['"]/
 
+// 自动化测试目录下的 Python 文件
+const AUTO_TEST_PY_FILE_RE = /自动化测试[/\\].+\.py$/
+
 function isBaseFile(filePath: unknown): filePath is string {
   return typeof filePath === "string" && BASE_FILE_RE.test(filePath)
+}
+
+function isAutoTestPyFile(filePath: unknown): filePath is string {
+  return typeof filePath === "string" && AUTO_TEST_PY_FILE_RE.test(filePath)
 }
 
 // 每个 TESTCASE_ID 替换为独立 TCuuid
@@ -2822,22 +2829,11 @@ export const LangfusePlugin: Plugin = async (ctx) => {
     "tool.execute.after": async (input, output) => {
       // write/edit/bash 后：直接覆写磁盘文件，把 TESTCASE_ID 替换为 TCuuid
       let fileContent: string | undefined
-      if ((input.tool === "write" || input.tool === "edit") && isBaseFile(input.args?.filePath)) {
-        const filePath: string = input.args.filePath
-        try {
-          const raw = readFileSync(filePath, "utf-8")
-          if (raw.includes("TESTCASE_ID")) {
-            fileContent = injectTestcaseIds(raw)
-            writeFileSync(filePath, fileContent, "utf-8")
-          }
-        } catch (e) {
-          // 文件读写失败时静默忽略，不影响正常流程
-        }
-      }
-      if (input.tool === "bash" && typeof input.args?.command === "string" && BASH_FILE_RE.test(input.args.command)) {
-        const match = input.args.command.match(/["']([^"']*测试案例[/\\][^"']+\.(yaml|yml))["']/)
-        if (match) {
-          const filePath = match[1]
+      let autoTestContent: string | undefined
+      let autoTestFilePath: string | undefined
+      if ((input.tool === "write" || input.tool === "edit")) {
+        if (isBaseFile(input.args?.filePath)) {
+          const filePath: string = input.args.filePath
           try {
             const raw = readFileSync(filePath, "utf-8")
             if (raw.includes("TESTCASE_ID")) {
@@ -2845,7 +2841,45 @@ export const LangfusePlugin: Plugin = async (ctx) => {
               writeFileSync(filePath, fileContent, "utf-8")
             }
           } catch (e) {
-            // 文件读写失败时静默忽略
+            // 文件读写失败时静默忽略，不影响正常流程
+          }
+        } else if (isAutoTestPyFile(input.args?.filePath)) {
+          // 自动化测试目录下的 Python 文件：直接读取文件内容
+          const filePath: string = input.args.filePath
+          try {
+            autoTestFilePath = resolve(filePath)
+            autoTestContent = readFileSync(filePath, "utf-8")
+          } catch (e) {
+            // 文件读写失败时静默忽略，不影响正常流程
+          }
+        }
+      }
+      if (input.tool === "bash" && typeof input.args?.command === "string") {
+        if (BASH_FILE_RE.test(input.args.command)) {
+          const match = input.args.command.match(/["']([^"']*测试案例[/\\][^"']+\.(yaml|yml))["']/)
+          if (match) {
+            const filePath = match[1]
+            try {
+              const raw = readFileSync(filePath, "utf-8")
+              if (raw.includes("TESTCASE_ID")) {
+                fileContent = injectTestcaseIds(raw)
+                writeFileSync(filePath, fileContent, "utf-8")
+              }
+            } catch (e) {
+              // 文件读写失败时静默忽略
+            }
+          }
+        } else if (/自动化测试[/\\].+\.py['"]/.test(input.args.command)) {
+          // 检查 bash 命令中是否包含自动化测试目录下的 Python 文件
+          const pyMatch = input.args.command.match(/["']([^"']*自动化测试[/\\][^"']+\.py)["']/)
+          if (pyMatch) {
+            const filePath = pyMatch[1]
+            try {
+              autoTestFilePath = resolve(filePath)
+              autoTestContent = readFileSync(filePath, "utf-8")
+            } catch (e) {
+              // 文件读写失败时静默忽略
+            }
           }
         }
       }
@@ -2924,6 +2958,8 @@ export const LangfusePlugin: Plugin = async (ctx) => {
                 : undefined,
           },
           ...(fileContent && { fileContent }),
+          ...(autoTestContent && { autoTestContent }),
+          ...(autoTestFilePath && { autoTestFilePath }),
           ...baseMetadata(),
         },
       }
