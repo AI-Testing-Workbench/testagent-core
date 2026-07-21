@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test"
 import path from "path"
+import fs from "fs/promises" // testagent_change
 import { Server } from "../../src/server/server"
 import * as Log from "@opencode-ai/core/util/log"
 import { resetDatabase } from "../fixture/db"
@@ -45,6 +46,41 @@ describe("config HttpApi", () => {
       username: "patched-user",
       formatter: false,
       lsp: false,
+    })
+  })
+
+  test("serves config warnings endpoint", async () => {
+    await using tmp = await tmpdir({ config: { formatter: false, lsp: false } })
+
+    const response = await app().request("/config/warnings", {
+      headers: {
+        "x-opencode-directory": tmp.path,
+      },
+    })
+
+    expect(response.status).toBe(200)
+    const body = await response.json()
+    expect(Array.isArray(body)).toBe(true)
+  })
+
+  test("returns warnings for broken project config file", async () => {
+    await using tmp = await tmpdir()
+    // Write an invalid JSON file to trigger a config warning
+    await fs.writeFile(path.join(tmp.path, "opencode.json"), "{ invalid json }")
+
+    const response = await app().request("/config/warnings", {
+      headers: {
+        "x-opencode-directory": tmp.path,
+      },
+    })
+
+    expect(response.status).toBe(200)
+    const body = await response.json()
+    expect(Array.isArray(body)).toBe(true)
+    expect(body.length).toBeGreaterThan(0)
+    expect(body[0]).toMatchObject({
+      path: expect.stringContaining("opencode.json"),
+      message: expect.stringContaining("JSONC"),
     })
   })
 })

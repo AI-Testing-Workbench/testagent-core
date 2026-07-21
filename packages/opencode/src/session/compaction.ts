@@ -16,7 +16,7 @@ import { ModelID, ProviderID } from "@/provider/schema"
 import { Effect, Layer, Context, Metric, Schema } from "effect"
 import * as DateTime from "effect/DateTime"
 import { InstanceState } from "@/effect/instance-state"
-import { sessionCompacted } from "@opencode-ai/core/effect/observability"
+import { sessionCompacted, compactionTokensBefore, compactionTokensAfter } from "@opencode-ai/core/effect/observability"   //testagent_change
 import { isOverflow as overflow, usable } from "./overflow"
 import { makeRuntime } from "@/effect/run-service"
 import { fn } from "@/util/fn"
@@ -206,6 +206,9 @@ export interface Interface {
     auto: boolean
     overflow?: boolean
   }) => Effect.Effect<void>
+  // testagent_change start - Clear all LLM context while preserving conversation history in the UI.
+  readonly clearContext: (input: { sessionID: SessionID }) => Effect.Effect<void>
+  // testagent_change end
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/SessionCompaction") {}
@@ -411,6 +414,7 @@ export const layer: Layer.Layer<
         stripMedia: true,
         toolOutputMaxChars: TOOL_OUTPUT_MAX_CHARS,
       })
+      const beforeTokens = yield* estimate({ messages: input.messages, model })  //testagent_change - estimate tokens before compaction for metrics
       const ctx = yield* InstanceState.context
       const msg: MessageV2.Assistant = {
         id: MessageID.ascending(),
@@ -576,6 +580,17 @@ export const layer: Layer.Layer<
         })
         yield* bus.publish(Event.Compacted, { sessionID: input.sessionID })
         yield* Metric.update(Metric.withAttributes(sessionCompacted, { sessionID: input.sessionID, modelID: model.id, providerID: model.providerID }), 1)
+        // //testagent_change start
+        let afterTokens = 0
+        if (selected.tail_start_id) {
+          const tailIdx = input.messages.findIndex((m) => m.info.id === selected.tail_start_id)
+          if (tailIdx >= 0) afterTokens = yield* estimate({ messages: input.messages.slice(tailIdx), model })
+        }
+        if (summary) afterTokens += Token.estimate(summary)
+        const compAttrs = { sessionID: input.sessionID, compactionID: input.parentID, modelID: model.id, providerID: model.providerID }
+        yield* Metric.update(Metric.withAttributes(compactionTokensBefore, compAttrs), beforeTokens)
+        yield* Metric.update(Metric.withAttributes(compactionTokensAfter, compAttrs), afterTokens)
+        //testagent_change end
       }
       return result
     })
@@ -610,11 +625,62 @@ export const layer: Layer.Layer<
       })
     })
 
+    // testagent_change start - clearContext: drop all LLM context, keep UI history
+    const clearContext = Effect.fn("SessionCompaction.clearContext")(function* (input: {
+      sessionID: SessionID
+    }) {
+      // Create compaction marker — same shape as compaction.create but no LLM call
+      const userMsg = yield* session.updateMessage({
+        id: MessageID.ascending(),
+        role: "user",
+        sessionID: input.sessionID,
+        agent: "compaction" as any,
+        model: { providerID: "", modelID: "" } as any,
+        time: { created: Date.now() },
+      })
+      yield* session.updatePart({
+        id: PartID.ascending(),
+        messageID: userMsg.id,
+        sessionID: userMsg.sessionID,
+        type: "compaction",
+        auto: false,
+      })
+      // Stub assistant with summary:true + finish so filterCompacted treats it as completed
+      const stubAsst = yield* session.updateMessage({
+        id: MessageID.ascending(),
+        role: "assistant",
+        parentID: userMsg.id,
+        sessionID: input.sessionID,
+        mode: "compaction" as any,
+        agent: "compaction" as any,
+        summary: true,
+        finish: "stop",
+        path: { cwd: "", root: "" },
+        cost: 0,
+        tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+        modelID: ModelID.make(""),
+        providerID: ProviderID.make(""),
+        time: { created: Date.now() },
+      })
+      // Add a text part so toModelMessagesEffect doesn't skip the empty stub
+      yield* session.updatePart({
+        id: PartID.ascending(),
+        messageID: stubAsst.id,
+        sessionID: input.sessionID,
+        type: "text",
+        text: "SDT框架会话已清理，上下文已清空。之前的对话记录不再可见。",
+        synthetic: true,
+      })
+      yield* bus.publish(Event.Compacted, { sessionID: input.sessionID })
+    })
+    // testagent_change end
+
     return Service.of({
       isOverflow,
       prune,
       process: processCompaction,
       create,
+      clearContext, // testagent_change
     })
   }),
 )

@@ -174,13 +174,39 @@ const traces = async () => {
 
   await initMetrics()
 
+  // 自定义 SpanProcessor：在导出前修改 ai.request.headers.User-Agent 的值
+  class UserAgentProcessor {
+    constructor(private inner: any) {}
+
+    onStart(span: any, parentContext: any) {
+      this.inner.onStart(span, parentContext)
+    }
+
+    onEnd(span: any) {
+      if (span.attributes?.["ai.request.headers.User-Agent"] !== undefined) {
+        span.attributes["ai.request.headers.User-Agent"] = "testagent"
+      }
+      this.inner.onEnd(span)
+    }
+
+    async forceFlush() {
+      return this.inner.forceFlush()
+    }
+
+    async shutdown() {
+      return this.inner.shutdown()
+    }
+  }
+
   return NodeSdk.layer(() => ({
     resource: resource(),
-    spanProcessor: new SdkBase.BatchSpanProcessor(
-      new OTLP.OTLPTraceExporter({
-        url: `${base}/v1/traces`,
-        headers,
-      }),
+    spanProcessor: new UserAgentProcessor(
+      new SdkBase.BatchSpanProcessor(
+        new OTLP.OTLPTraceExporter({
+          url: `${base}/v1/traces`,
+          headers,
+        }),
+      ),
     ),
   }))
 }
@@ -224,6 +250,12 @@ export const llmRequest = Metric.counter("session.llm.request", {
 })
 export const sessionCompacted = Metric.counter("session.compacted", {
   description: "Total of sessions compacted",
+})
+export const compactionTokensBefore = Metric.gauge("session.compaction.tokens_before", {
+  description: "Estimated context tokens before compaction",
+})
+export const compactionTokensAfter = Metric.gauge("session.compaction.tokens_after", {
+  description: "Estimated context tokens after compaction",
 })
 export const questionAsk = Metric.counter("tool.question.ask", {
   description: "Total question tool calls",

@@ -2,6 +2,8 @@ import type { NamedError } from "@opencode-ai/core/util/error"
 import { Cause, Clock, Duration, Effect, Schedule } from "effect"
 import { MessageV2 } from "./message-v2"
 import { iife } from "@/util/iife"
+import * as Log from "@opencode-ai/core/util/log"
+const log = Log.create({ service: "retry" })
 
 export type Err = ReturnType<NamedError["toObject"]>
 
@@ -65,10 +67,11 @@ export function delay(attempt: number, error?: MessageV2.APIError) {
 
 export const LAI_DELAY = 20_000 // 20 seconds
 
-export function retryable(error: Err, provider: string) {
+export function retryable(error: Err, provider: string, auto?: boolean) {
   // context overflow errors should not be retried
   if (MessageV2.ContextOverflowError.isInstance(error)) return undefined
   if (MessageV2.APIError.isInstance(error)) {
+    log.info("retryable", { error })
     const status = error.data.statusCode
     // testagent_change start - LAI 极算错误，等待重新认证后重试
     const bodyJson = parseJSON(error.data.responseBody)
@@ -77,9 +80,27 @@ export function retryable(error: Err, provider: string) {
     if (body && typeof body === "object") {
       if (typeof body.returnCode === "string" && body.returnCode.startsWith("LAI")) {
         const errorMsg = typeof body.errorMsg === "string" ? body.errorMsg : error.data.message
+         if (errorMsg.includes("longer than") && auto === false) {
+          const notification = JSON.stringify({
+            type: "plugin-notification",
+            level: "info",
+            message: "当前上下文已满，且自动压缩未开启，是否自动开启？",
+            actions: [{ id: "enable-auto-compaction", label: "确定" }],
+          })
+          console.error(`[TESTAGENT_NOTIFICATION] ${notification}`)
+        }
         return { message: `【极算】${errorMsg}` }
       } else if (body.error && typeof body.error === "object") {
         const errorMsg = typeof body.error.message === "string" ? body.error.message : error.data.message
+        if (errorMsg.includes("ContextWindowExceededError") && auto === false) {
+          const notification = JSON.stringify({
+            type: "plugin-notification",
+            level: "info",
+            message: "当前上下文已满，且自动压缩未开启，是否自动开启？",
+            actions: [{ id: "enable-auto-compaction", label: "确定" }],
+          })
+          console.error(`[TESTAGENT_NOTIFICATION] ${notification}`)
+        }
         return { message: `【testllm】${errorMsg}` }
       }
     }
@@ -189,18 +210,21 @@ function parseJSON(value: unknown) {
 
 export function policy(opts: {
   provider: string
+  autoCompaction?: boolean
   parse: (error: unknown) => Err
   set: (input: { attempt: number; message: string; action?: Retryable["action"]; next: number }) => Effect.Effect<void>
 }) {
   return Schedule.fromStepWithMetadata(
     Effect.succeed((meta: Schedule.InputMetadata<unknown>) => {
       const error = opts.parse(meta.input)
-      const retry = retryable(error, opts.provider)
+      const retry = retryable(error, opts.provider, opts.autoCompaction)
       if (!retry) return Cause.done(meta.attempt)
       return Effect.gen(function* () {
         // testagent_change start - 固定等待 20s
         const isLailgw = retry.message.startsWith("【极算】") || retry.message.startsWith("【testllm】")
-        const wait = isLailgw ? LAI_DELAY : delay(meta.attempt, MessageV2.APIError.isInstance(error) ? error : undefined)
+        const wait = isLailgw
+          ? LAI_DELAY
+          : delay(meta.attempt, MessageV2.APIError.isInstance(error) ? error : undefined)
         // testagent_change end
         const now = yield* Clock.currentTimeMillis
         yield* opts.set({

@@ -55,6 +55,11 @@ export const InitPayload = Schema.Struct({
   providerID: ProviderID,
   messageID: MessageID,
 })
+// testagent_change start - abort 支持前端传入 idle reason
+export const AbortPayload = Schema.Struct({
+  reason: Schema.optional(SessionStatus.IdleReason),
+})
+// testagent_change end
 export const SummarizePayload = Schema.Struct({
   providerID: ProviderID,
   modelID: ModelID,
@@ -95,6 +100,7 @@ export const SessionPaths = {
   revert: `${root}/:sessionID/revert`,
   unrevert: `${root}/:sessionID/unrevert`,
   resume: `${root}/:sessionID/resume`, // testagent_change - 添加 resume 路径
+  clearContext: `${root}/:sessionID/context-clear`, // testagent_change - 清空上下文路径
   permissions: `${root}/:sessionID/permissions/:permissionID`,
   deleteMessage: `${root}/:sessionID/message/:messageID`,
   deletePart: `${root}/:sessionID/message/:messageID/part/:partID`,
@@ -240,6 +246,7 @@ export const SessionApi = HttpApi.make("session")
         ),
         HttpApiEndpoint.post("abort", SessionPaths.abort, {
           params: { sessionID: SessionID },
+          payload: AbortPayload,
           success: described(Schema.Boolean, "Aborted session"),
           error: [HttpApiError.BadRequest, HttpApiError.NotFound],
         }).annotateMerge(
@@ -380,6 +387,19 @@ export const SessionApi = HttpApi.make("session")
             identifier: "session.resume",
             summary: "Resume message generation",
             description: "Continue generating from an existing assistant message without creating a new message.",
+          }),
+        ),
+        // testagent_change end
+        // testagent_change start - 添加 clearContext 端点
+        HttpApiEndpoint.post("clearContext", SessionPaths.clearContext, {
+          params: { sessionID: SessionID },
+          success: described(Schema.Boolean, "Context cleared"),
+          error: [HttpApiError.BadRequest, ApiNotFoundError],
+        }).annotateMerge(
+          OpenApi.annotations({
+            identifier: "session.clearContext",
+            summary: "Clear session context",
+            description: "Clear all LLM context while preserving conversation history in the UI.",
           }),
         ),
         // testagent_change end

@@ -9,10 +9,19 @@ import * as Fence from "@/server/shared/fence"
 import { getWorkspaceRouteSessionID, isLocalWorkspaceRoute, workspaceProxyURL } from "@/server/shared/workspace-routing"
 import { NotFoundError } from "@/storage/storage"
 import { Flag } from "@opencode-ai/core/flag/flag"
-import { Context, Data, Effect, Layer } from "effect"
+import { Context, Data, Effect, Layer, Schema } from "effect" // testagent_change - add Schema
 import { HttpClient, HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/unstable/http"
 import { HttpApiMiddleware } from "effect/unstable/httpapi"
 import * as Socket from "effect/unstable/socket/Socket"
+
+// testagent_change start
+export const WorkspaceRoutingQueryFields = {
+  directory: Schema.optional(Schema.String),
+  workspace: Schema.optional(Schema.String),
+}
+
+export const WorkspaceRoutingQuery = Schema.Struct(WorkspaceRoutingQueryFields)
+// testagent_change end
 
 type RemoteTarget = Extract<Target, { type: "remote" }>
 

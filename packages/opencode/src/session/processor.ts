@@ -25,7 +25,17 @@ import { SessionEvent } from "@/v2/session-event"
 import { Modelv2 } from "@/v2/model"
 import * as DateTime from "effect/DateTime"
 
-import { failExecution, callTotal, ttft, tokenInput, tokenOutput, tokenReasoning, tokenCacheRead, tokenCacheWrite, tokenTotal } from "@opencode-ai/core/effect/observability" // testagent_change
+import {
+  failExecution,
+  callTotal,
+  ttft,
+  tokenInput,
+  tokenOutput,
+  tokenReasoning,
+  tokenCacheRead,
+  tokenCacheWrite,
+  tokenTotal,
+} from "@opencode-ai/core/effect/observability" // testagent_change
 
 const DOOM_LOOP_THRESHOLD = 3
 const log = Log.create({ service: "session.processor" })
@@ -218,7 +228,14 @@ export const layer: Layer.Layer<
         } else if (error instanceof Question.RejectedError) {
           ctx.blocked = ctx.shouldBreak
         } else {
-          yield* Metric.update(Metric.withAttributes(failExecution, { sessionID: ctx.sessionID, modelID: input.model.id, providerID: input.model.providerID }), 1)
+          yield* Metric.update(
+            Metric.withAttributes(failExecution, {
+              sessionID: ctx.sessionID,
+              modelID: input.model.id,
+              providerID: input.model.providerID,
+            }),
+            1,
+          )
         }
         yield* settleToolCall(toolCallID)
         return true
@@ -301,7 +318,14 @@ export const layer: Layer.Layer<
               state: { status: "pending", input: {}, raw: "" },
               metadata: value.providerExecuted ? { providerExecuted: true } : undefined,
             } satisfies MessageV2.ToolPart)
-            yield* Metric.update(Metric.withAttributes(callTotal, { sessionID: ctx.sessionID, modelID: input.model.id, providerID: input.model.providerID }), 1) // testagent_change
+            yield* Metric.update(
+              Metric.withAttributes(callTotal, {
+                sessionID: ctx.sessionID,
+                modelID: input.model.id,
+                providerID: input.model.providerID,
+              }),
+              1,
+            ) // testagent_change
             ctx.toolcalls[value.id] = {
               done: yield* Deferred.make<void>(),
               partID: part.id,
@@ -471,9 +495,9 @@ export const layer: Layer.Layer<
               const estTotal = est.system + est.messages + est.tools
               const scale = estTotal > 0 ? usage.tokens.input / estTotal : 1
               usage.tokens.breakdown = {
-                system:   Math.round(est.system   * scale),
+                system: Math.round(est.system * scale),
                 messages: Math.round(est.messages * scale),
-                tools:    Math.round(est.tools    * scale),
+                tools: Math.round(est.tools * scale),
               }
             }
             if (!ctx.assistantMessage.summary) {
@@ -496,7 +520,12 @@ export const layer: Layer.Layer<
             yield* Metric.update(Metric.withAttributes(tokenReasoning, attrs), usage.tokens.reasoning)
             yield* Metric.update(Metric.withAttributes(tokenCacheRead, attrs), usage.tokens.cache.read)
             yield* Metric.update(Metric.withAttributes(tokenCacheWrite, attrs), usage.tokens.cache.write)
-            const total = usage.tokens.input + usage.tokens.output + usage.tokens.reasoning + usage.tokens.cache.read + usage.tokens.cache.write
+            const total =
+              usage.tokens.input +
+              usage.tokens.output +
+              usage.tokens.reasoning +
+              usage.tokens.cache.read +
+              usage.tokens.cache.write
             yield* Metric.update(Metric.withAttributes(tokenTotal, attrs), total)
             yield* session.updatePart({
               id: PartID.ascending(),
@@ -694,7 +723,7 @@ export const layer: Layer.Layer<
           sessionID: ctx.assistantMessage.sessionID,
           error: ctx.assistantMessage.error,
         })
-        const idleReason = MessageV2.AbortedError.isInstance(error) ? "user_abort" as const : "error" as const
+        const idleReason = MessageV2.AbortedError.isInstance(error) ? ("user_abort" as const) : ("error" as const)
         yield* status.set(ctx.sessionID, { type: "idle", reason: idleReason })
       })
 
@@ -706,16 +735,16 @@ export const layer: Layer.Layer<
         // Estimate token breakdown for system / messages / tools before LLM call
         const estimate = (input: string) => Math.max(1, Math.round((input || "").length / 4))
         ctx.tokenEstimates = {
-          system:   estimate(JSON.stringify(streamInput.system)),
+          system: estimate(JSON.stringify(streamInput.system)),
           messages: estimate(JSON.stringify(streamInput.messages)),
-          tools:    estimate(JSON.stringify(streamInput.tools)),
+          tools: estimate(JSON.stringify(streamInput.tools)),
         }
 
         return yield* Effect.gen(function* () {
           yield* Effect.gen(function* () {
             ctx.currentText = undefined
             ctx.reasoningMap = {}
-            
+
             // testagent_change start - Add stream timing logs
             const streamStartTime = Date.now()
             let eventCount = 0
@@ -727,7 +756,7 @@ export const layer: Layer.Layer<
               providerID: streamInput.model.providerID,
             })
             // testagent_change end
-            
+
             const stream = llm.stream(streamInput)
 
             yield* stream.pipe(
@@ -749,13 +778,13 @@ export const layer: Layer.Layer<
                   })
                 }
                 // testagent_change end
-                
+
                 return handleEvent(event)
               }),
               Stream.takeUntil(() => ctx.needsCompaction),
               Stream.runDrain,
             )
-            
+
             // testagent_change start - Log stream completion
             const totalElapsed = Date.now() - streamStartTime
             slog.info("✅ Stream completed", {
@@ -764,13 +793,21 @@ export const layer: Layer.Layer<
               avgEventTime: eventCount > 0 ? `${(totalElapsed / eventCount).toFixed(2)}ms` : "N/A",
             })
             if (ttftValue != null) {
-              yield* Metric.update(Metric.withAttributes(ttft, { sessionID: ctx.sessionID, modelID: streamInput.model.id, providerID: streamInput.model.providerID }), ttftValue)
+              yield* Metric.update(
+                Metric.withAttributes(ttft, {
+                  sessionID: ctx.sessionID,
+                  modelID: streamInput.model.id,
+                  providerID: streamInput.model.providerID,
+                  messageID: ctx.assistantMessage.id,
+                }),
+                ttftValue,
+              )
             }
             // testagent_change end
           }).pipe(
             Effect.onInterrupt(() =>
               Effect.gen(function* () {
-                yield* Effect.logInfo(`Session ${ctx.sessionID} 会话中断`, {error: ctx.assistantMessage.error})
+                yield* Effect.logInfo(`Session ${ctx.sessionID} 会话中断`, { error: ctx.assistantMessage.error })
                 aborted = true
                 if (!ctx.assistantMessage.error) {
                   yield* halt(new DOMException("Aborted", "AbortError"))
@@ -781,7 +818,10 @@ export const layer: Layer.Layer<
               (cause) => !Cause.hasInterruptsOnly(cause),
               (cause) => {
                 return Effect.gen(function* () {
-                  yield* Effect.logInfo(`Session ${ctx.sessionID} 非中断错误`, { error: errorMessage(cause), stack: cause instanceof Error ? cause.stack : undefined })
+                  yield* Effect.logInfo(`Session ${ctx.sessionID} 非中断错误`, {
+                    error: errorMessage(cause),
+                    stack: cause instanceof Error ? cause.stack : undefined,
+                  })
                   return yield* Effect.fail(Cause.squash(cause))
                 })
               },
@@ -789,6 +829,7 @@ export const layer: Layer.Layer<
             Effect.retry(
               SessionRetry.policy({
                 provider: input.model.providerID,
+                autoCompaction: (yield* config.get()).compaction?.auto,
                 parse,
                 set: (info) => {
                   // TODO(v2): Temporary dual-write while migrating session messages to v2 events.
@@ -802,7 +843,9 @@ export const layer: Layer.Layer<
                     timestamp: DateTime.makeUnsafe(Date.now()),
                   })
                   return Effect.gen(function* () {
-                    yield* Effect.logInfo(`Session ${ctx.sessionID} 失败重试，次数：${info.attempt}，错误信息：${info.message}`)
+                    yield* Effect.logInfo(
+                      `Session ${ctx.sessionID} 失败重试，次数：${info.attempt}，错误信息：${info.message}`,
+                    )
                     return yield* status.set(ctx.sessionID, {
                       type: "retry",
                       attempt: info.attempt,

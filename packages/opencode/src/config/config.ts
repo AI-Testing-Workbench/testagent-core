@@ -7,6 +7,7 @@ import { mergeDeep } from "remeda"
 import { Global, opencodeConfig } from "@opencode-ai/core/global" // testagent_change
 import fsNode from "fs/promises"
 import { NamedError } from "@opencode-ai/core/util/error"
+import { ConfigError } from "./error" // testagent_change - for warning accumulation
 import { Flag } from "@opencode-ai/core/flag/flag"
 import { Auth } from "../auth"
 import { Env } from "../env"
@@ -420,10 +421,51 @@ export type Info = DeepMutable<Schema.Schema.Type<typeof Info>> & {
   // testagent_change end
 }
 
+// testagent_change start
+export interface Warning {
+  path: string
+  message: string
+  detail?: string
+}
+
+/** Convert known config-loading errors into a Warning. Returns undefined for unknown errors. */
+function toWarning(err: unknown): Warning | undefined {
+  if (ConfigError.JsonError.isInstance(err))
+    return {
+      path: err.data.path,
+      message: err.data.message ?? "Invalid JSON(C) in config file",
+    }
+  if (ConfigError.InvalidError.isInstance(err))
+    return {
+      path: err.data.path,
+      message: err.data.message ?? "Invalid config schema",
+      detail: err.data.issues?.map((i) => `${i.path.join(".")}: ${i.message}`).join("\n"),
+    }
+  if (err instanceof Error)
+    return {
+      path: "unknown",
+      message: err.message,
+    }
+  return undefined
+}
+
+/** Catch a config-loading error and push it as a warning. Unknown errors are re-thrown. */
+function caughtWarning(warnings: Warning[], source: string, err: unknown): void {
+  const w = toWarning(err)
+  if (w) {
+    warnings.push({ ...w, path: source })
+    return
+  }
+  // Re-throw unknown errors
+  throw err
+}
+// testagent_change end
+
 type State = {
   config: Info
   directories: string[]
   testagentDirs: string[] // testagent_change
+  warnings: Warning[] // testagent_change
   deps: Fiber.Fiber<void, never>[]
   consoleState: ConsoleState
 }
@@ -439,6 +481,7 @@ export interface Interface {
   readonly directories: () => Effect.Effect<string[]>
   readonly testagentDirectories: () => Effect.Effect<string[]> // testagent_change
   readonly waitForDependencies: () => Effect.Effect<void>
+  readonly warnings: () => Effect.Effect<Warning[]> // testagent_change
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/Config") {}
@@ -622,7 +665,27 @@ export const layer = Layer.effect(
 
     const loadInstanceState = Effect.fn("Config.loadInstanceState")(
       function* (ctx: InstanceContext) {
+        const warnings: Warning[] = [] // testagent_change - warning accumulator
         const auth = yield* authSvc.all().pipe(Effect.orDie)
+
+        // testagent_change start - wrap loadFile to capture errors as warnings
+        const loadFileCatching = (filepath: string) =>
+          loadFile(filepath).pipe(
+            Effect.catchDefect((err) => {
+              caughtWarning(warnings, filepath, err)
+              return Effect.succeed({} as Info)
+            }),
+          )
+
+        const loadConfigCatching = (text: string, opts: { path: string } | { dir: string; source: string }) =>
+          loadConfig(text, opts).pipe(
+            Effect.catchDefect((err) => {
+              const source = "path" in opts ? opts.path : opts.source
+              caughtWarning(warnings, source, err)
+              return Effect.succeed({} as Info)
+            }),
+          )
+        // testagent_change end
 
         let result: Info = {}
         const consoleManagedProviders = new Set<string>()
@@ -712,7 +775,7 @@ export const layer = Layer.effect(
             const remoteConfig = mergeConfig(wellknown.config ?? {}, fetchedConfig as Info)
             if (!remoteConfig.$schema) remoteConfig.$schema = "https://opencode.ai/config.json"
             const source = `${url}/.well-known/opencode`
-            const next = yield* loadConfig(JSON.stringify(remoteConfig), {
+            const next = yield* loadConfigCatching(JSON.stringify(remoteConfig), {
               dir: path.dirname(source),
               source,
             })
@@ -725,17 +788,17 @@ export const layer = Layer.effect(
         yield* merge(Global.Path.config, global, "global")
 
         if (Flag.OPENCODE_CONFIG) {
-          yield* merge(Flag.OPENCODE_CONFIG, yield* loadFile(Flag.OPENCODE_CONFIG))
+          yield* merge(Flag.OPENCODE_CONFIG, yield* loadFileCatching(Flag.OPENCODE_CONFIG))
           log.debug("loaded custom config", { path: Flag.OPENCODE_CONFIG })
         }
 
         if (!Flag.OPENCODE_DISABLE_PROJECT_CONFIG) {
           for (const file of yield* ConfigPaths.files("opencode", ctx.directory, ctx.worktree).pipe(Effect.orDie)) {
-            yield* merge(file, yield* loadFile(file), "local")
+            yield* merge(file, yield* loadFileCatching(file), "local")
           }
           // testagent_change start
           for (const file of yield* ConfigPaths.files("testagent", ctx.directory, ctx.worktree).pipe(Effect.orDie)) {
-            yield* merge(file, yield* loadFile(file), "local")
+            yield* merge(file, yield* loadFileCatching(file), "local")
           }
           // testagent_change end
         }
@@ -761,7 +824,7 @@ export const layer = Layer.effect(
             for (const file of ["opencode.json", "opencode.jsonc"]) {
               const source = path.join(dir, file)
               log.debug(`loading config from ${source}`)
-              yield* merge(source, yield* loadFile(source))
+              yield* merge(source, yield* loadFileCatching(source))
               result.agent ??= {}
               result.mode ??= {}
               result.plugin ??= []
@@ -772,7 +835,7 @@ export const layer = Layer.effect(
             for (const file of ["testagent.json", "testagent.jsonc"]) {
               const source = path.join(dir, file)
               log.debug(`loading config from ${source}`)
-              yield* merge(source, yield* loadFile(source))
+              yield* merge(source, yield* loadFileCatching(source))
               result.agent ??= {}
               result.mode ??= {}
               result.plugin ??= []
@@ -805,18 +868,39 @@ export const layer = Layer.effect(
             )
           deps.push(dep)
 
-          result.command = mergeDeep(result.command ?? {}, yield* Effect.promise(() => ConfigCommand.load(dir)))
-          result.agent = mergeDeep(result.agent ?? {}, yield* Effect.promise(() => ConfigAgent.load(dir)))
-          result.agent = mergeDeep(result.agent ?? {}, yield* Effect.promise(() => ConfigAgent.loadMode(dir)))
+          // testagent_change start - capture command/agent/plugin load errors as warnings
+          result.command = mergeDeep(result.command ?? {}, yield* Effect.promise(() => ConfigCommand.load(dir)).pipe(
+            Effect.catchDefect((err) => {
+              caughtWarning(warnings, path.join(dir, "commands"), err)
+              return Effect.succeed({} as Record<string, unknown>)
+            }),
+          ))
+          result.agent = mergeDeep(result.agent ?? {}, yield* Effect.promise(() => ConfigAgent.load(dir)).pipe(
+            Effect.catchDefect((err) => {
+              caughtWarning(warnings, path.join(dir, "agents"), err)
+              return Effect.succeed({} as Record<string, unknown>)
+            }),
+          ))
+          result.agent = mergeDeep(result.agent ?? {}, yield* Effect.promise(() => ConfigAgent.loadMode(dir)).pipe(
+            Effect.catchDefect((err) => {
+              caughtWarning(warnings, path.join(dir, "modes"), err)
+              return Effect.succeed({} as Record<string, unknown>)
+            }),
+          ))
           // Auto-discovered plugins under `.opencode/plugin(s)` are already local files, so ConfigPlugin.load
           // returns normalized Specs and we only need to attach origin metadata here.
-          const list = yield* Effect.promise(() => ConfigPlugin.load(dir))
+          const list = yield* Effect.promise(() => ConfigPlugin.load(dir)).pipe(
+            Effect.catchDefect((err) => {
+              caughtWarning(warnings, path.join(dir, "plugins"), err)
+              return Effect.succeed([] as ConfigPlugin.Spec[])
+            }),
+          )
           yield* mergePluginOrigins(dir, list)
         }
 
         if (process.env.OPENCODE_CONFIG_CONTENT) {
           const source = "OPENCODE_CONFIG_CONTENT"
-          const next = yield* loadConfig(process.env.OPENCODE_CONFIG_CONTENT, {
+          const next = yield* loadConfigCatching(process.env.OPENCODE_CONFIG_CONTENT, {
             dir: ctx.directory,
             source,
           })
@@ -843,7 +927,7 @@ export const layer = Layer.effect(
 
             if (Option.isSome(configOpt)) {
               const source = `${url}/api/config`
-              const next = yield* loadConfig(JSON.stringify(configOpt.value), {
+              const next = yield* loadConfigCatching(JSON.stringify(configOpt.value), {
                 dir: path.dirname(source),
                 source,
               })
@@ -867,12 +951,12 @@ export const layer = Layer.effect(
         if (existsSync(managedDir)) {
           for (const file of ["opencode.json", "opencode.jsonc"]) {
             const source = path.join(managedDir, file)
-            yield* merge(source, yield* loadFile(source), "global")
+            yield* merge(source, yield* loadFileCatching(source), "global")
           }
           // testagent_change start
           for (const file of ["testagent.json", "testagent.jsonc"]) {
             const source = path.join(managedDir, file)
-            yield* merge(source, yield* loadFile(source), "global")
+            yield* merge(source, yield* loadFileCatching(source), "global")
           }
           // testagent_change end
         }
@@ -882,7 +966,7 @@ export const layer = Layer.effect(
         if (managed) {
           result = mergeConfigConcatArrays(
             result,
-            yield* loadConfig(managed.text, {
+            yield* loadConfigCatching(managed.text, {
               dir: path.dirname(managed.source),
               source: managed.source,
             }),
@@ -929,10 +1013,16 @@ export const layer = Layer.effect(
         }
 
         yield* Effect.logInfo("testagent config: ", result) // testagent_change
+
+        if (!result.small_model) {
+          result.small_model = "test-llm/Economy"
+        }
+
         return {
           config: result,
           directories,
           testagentDirs, // testagent_change
+          warnings, // testagent_change
           deps,
           consoleState: {
             consoleManagedProviders: Array.from(consoleManagedProviders),
@@ -997,6 +1087,12 @@ export const layer = Layer.effect(
     const invalidateInstance = Effect.fn("Config.invalidateInstance")(function* () {
       yield* InstanceState.invalidate(state)
     })
+
+    // testagent_change start
+    const warnings = Effect.fn("Config.warnings")(function* () {
+      return yield* InstanceState.use(state, (s) => s.warnings)
+    })
+    // testagent_change end
 
     const updateGlobal = Effect.fn("Config.updateGlobal")(function* (config: Info) {
       const file = globalConfigFile()
@@ -1075,6 +1171,7 @@ export const layer = Layer.effect(
       directories,
       testagentDirectories, // testagent_change
       waitForDependencies,
+      warnings, // testagent_change
     })
   }),
 )

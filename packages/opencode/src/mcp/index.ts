@@ -141,7 +141,7 @@ function convertMcpTool(mcpTool: MCPToolDef, client: MCPClient, timeout?: number
     execute: async (args: unknown) => {
       return client.callTool(
         {
-          name: sanitize(mcpTool.name),
+          name: mcpTool.name,
           arguments: (args || {}) as Record<string, unknown>,
         },
         CallToolResultSchema,
