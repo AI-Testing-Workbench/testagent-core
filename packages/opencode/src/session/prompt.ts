@@ -196,6 +196,18 @@ export const layer = Layer.effect(
       if (!firstUser || firstUser.info.role !== "user") return
       const firstInfo = firstUser.info
 
+      const textParts = firstUser.parts
+        .filter((p) => p.type === "text" && !("synthetic" in p))
+        .map((p) => ("text" in p ? p.text : ""))
+        .filter(Boolean)
+
+      if (textParts.length > 0) {
+        const t = textParts.join("\n").trim().substring(0, 50)
+        yield* sessions
+          .setTitle({ sessionID: input.session.id, title: t })
+          .pipe(Effect.catchCause((cause) => elog.error("failed to generate title", { error: Cause.squash(cause) })))
+      }
+
       const subtasks = firstUser.parts.filter((p): p is MessageV2.SubtaskPart => p.type === "subtask")
       const onlySubtasks = subtasks.length > 0 && firstUser.parts.every((p) => p.type === "subtask")
 
