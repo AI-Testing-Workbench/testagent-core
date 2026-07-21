@@ -15,7 +15,7 @@
 import type { Plugin, PluginInput } from "@opencode-ai/plugin"
 import { Effect, Schema } from "effect"
 import { User } from "@/testagent/user"
-import { readFileSync, existsSync, writeFileSync, mkdirSync, renameSync } from "fs"
+import { readFileSync, existsSync, writeFileSync, mkdirSync, renameSync, chmodSync } from "fs"
 import { dirname, join, resolve } from "path"
 import { homedir } from "os"
 
@@ -27,6 +27,8 @@ const LANGFUSE_BASE_URL = decodeURIComponent(
 const LANGFUSE_FINAL_BATCH_UPLOAD_PATH = "/api/trpc/batchTrace.save"
 const VERSION = "1.0.2"
 const LANGFUSE_FETCH_TIMEOUT_MS = 5000
+const LANGFUSE_KEY_LOOKUP_TIMEOUT_MS = 15000
+const LANGFUSE_KEY_CACHE_FILE = join(homedir(), ".local", "share", "testagent", "langfuse-project-keys.json")
 
 let baseMetadata: () => Record<string, string>
 
@@ -480,7 +482,7 @@ const messageCounter = new Map<string, number>()
 // Langfuse credentials (will be updated from project keys)
 let publicKey: string
 let secretKey: string
-let currentProjectId = "unknown_project"
+let currentBatchProjectId = "fallback_project"
 let userIdMetadata: string | null = null
 
 // ==================== 常量 ====================
@@ -605,9 +607,13 @@ async function readResponseTextSafe(res: Response): Promise<string> {
   }
 }
 
-async function fetchWithTimeout(input: Parameters<typeof fetch>[0], init?: RequestInit): Promise<Response> {
+async function fetchWithTimeout(
+  input: Parameters<typeof fetch>[0],
+  init?: RequestInit,
+  timeoutMs = LANGFUSE_FETCH_TIMEOUT_MS,
+): Promise<Response> {
   const controller = new AbortController()
-  const timeout = setTimeout(() => controller.abort(), LANGFUSE_FETCH_TIMEOUT_MS)
+  const timeout = setTimeout(() => controller.abort(), timeoutMs)
 
   try {
     return await fetch(input, { ...init, signal: controller.signal })
@@ -853,7 +859,7 @@ async function uploadFinalBatchItems(items: any[]) {
   if (items.length === 0) return []
 
   const taggedItems = items.map(withEventBodyTags)
-  const result = await postJsonWithAuth(LANGFUSE_FINAL_BATCH_UPLOAD_PATH, { json: { [currentProjectId]: taggedItems } })
+  const result = await postJsonWithAuth(LANGFUSE_FINAL_BATCH_UPLOAD_PATH, { json: { [currentBatchProjectId]: taggedItems } })
   if(result.ok) {
     trackEvent("log", {
       level: "info",
@@ -2602,8 +2608,21 @@ async function create_project(
       body: JSON.stringify({ json: { projectId: project_id } }),
     })
     resJson = await res.json()
-    const public_key = resJson?.result?.data?.json?.publicKey
-    const secret_key = resJson?.result?.data?.json?.secretKey
+    const apiKeyJson = resJson?.result?.data?.json
+    const public_key = apiKeyJson?.publicKey
+    const secret_key = apiKeyJson?.secretKey
+    const createApiKeyStatus = apiKeyJson?.status
+    if (createApiKeyStatus === "create apiKey failed") {
+      trackEvent("both", {
+        level: "error",
+        message: "[langfuse] /api/trpc/projectApiKeys.create 返回 create apiKey failed，将使用兜底密钥",
+        data: { projectId: project_id, response: JSON.stringify(resJson) },
+        metricName: "plugin.langfuse.api.error",
+        metricValue: 1,
+        tags: { api: "projectApiKeys.create", reason: "create_api_key_failed" },
+      })
+      return null
+    }
     if (!public_key || !secret_key) {
       trackEvent("both", {
         level: "error",
@@ -2634,45 +2653,196 @@ async function create_project(
   }
 }
 
-async function get_apikeys_by_user(
-  user_id: string,
-  user_name: string,
-  langfuse_host: string,
-): Promise<{ public_key: string; secret_key: string; project_id: string } | null> {
-  try {
-    const res = await fetchWithTimeout(`${langfuse_host}/api/trpc/projectApiKeys.byUserInfo`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ json: { userInfo: `${user_name}/${user_id}` } }),
+type ProjectApiKeys = { public_key: string; secret_key: string; project_id: string }
+type LangfuseKeyCache = {
+  host: string
+  userId: string
+  userInfo: string
+  projectId: string
+  publicKey: string
+  secretKey: string
+  updatedAt: string
+}
+type ApiKeyLookupResult =
+  | { status: "found"; apiKeys: ProjectApiKeys }
+  | { status: "not_found" }
+  | { status: "create_api_key_failed" }
+  | { status: "error"; error: string }
+
+function getUserInfoKey(user_id: string, user_name: string) {
+  return `${user_name}/${user_id}`
+}
+
+function cachedProjectKeysFromJson(cache: any, user_id: string, user_name: string, langfuse_host: string): ProjectApiKeys | null {
+  const userInfo = getUserInfoKey(user_id, user_name)
+  if (
+    !cache ||
+    typeof cache !== "object" ||
+    cache.host !== langfuse_host ||
+    cache.userId !== user_id ||
+    cache.userInfo !== userInfo ||
+    typeof cache.projectId !== "string" ||
+    typeof cache.publicKey !== "string" ||
+    typeof cache.secretKey !== "string"
+  ) {
+    return null
+  }
+  return { public_key: cache.publicKey, secret_key: cache.secretKey, project_id: cache.projectId }
+}
+
+function readCachedProjectKeys(user_id: string, user_name: string, langfuse_host: string): ProjectApiKeys | null {
+  if (!existsSync(LANGFUSE_KEY_CACHE_FILE)) {
+    trackEvent("log", {
+      level: "info",
+      message: "[langfuse] 本地项目API密钥缓存不存在，将查询服务端",
+      data: { userId: user_id, userName: user_name, file: LANGFUSE_KEY_CACHE_FILE },
     })
-    const resJson = await res.json()
-    const public_key = resJson?.result?.data?.json?.publicKey
-    const secret_key = resJson?.result?.data?.json?.secretKey
-    const project_id = resJson?.result?.data?.json?.projectId
-    if (public_key && secret_key && project_id) {
+    return null
+  }
+  try {
+    const cache = JSON.parse(readFileSync(LANGFUSE_KEY_CACHE_FILE, "utf-8"))
+    const apiKeys = cachedProjectKeysFromJson(cache, user_id, user_name, langfuse_host)
+    if (apiKeys) {
       trackEvent("log", {
         level: "info",
-        message: "[langfuse] 获取密钥信息成功",
-        data: { userId: user_id, userName: user_name, projectId: project_id },
+        message: "[langfuse] 命中本地项目API密钥缓存",
+        data: { userId: user_id, userName: user_name, projectId: apiKeys.project_id, file: LANGFUSE_KEY_CACHE_FILE },
       })
-      return { public_key, secret_key, project_id }
+      return apiKeys
     }
-    trackEvent("both", {
-      level: "error",
-      message: "[langfuse] 获取密钥信息失败，返回数据为空",
-      data: { userId: user_id, userName: user_name, response: JSON.stringify(resJson) },
+    trackEvent("log", {
+      level: "warn",
+      message: "[langfuse] 本地项目API密钥缓存不匹配，将重新查询",
+      data: { userId: user_id, userName: user_name, file: LANGFUSE_KEY_CACHE_FILE },
     })
     return null
   } catch (e) {
     trackEvent("both", {
       level: "error",
-      message: "[langfuse] 获取密钥信息异常",
+      message: "[langfuse] 读取本地项目API密钥缓存异常",
+      data: { error: String(e), file: LANGFUSE_KEY_CACHE_FILE },
+      metricName: "plugin.langfuse.cache.error",
+      metricValue: 1,
+      tags: { type: "langfuseKeyCache", action: "read" },
+    })
+    return null
+  }
+}
+
+function writeCachedProjectKeys(user_id: string, user_name: string, langfuse_host: string, apiKeys: ProjectApiKeys) {
+  const cache: LangfuseKeyCache = {
+    host: langfuse_host,
+    userId: user_id,
+    userInfo: getUserInfoKey(user_id, user_name),
+    projectId: apiKeys.project_id,
+    publicKey: apiKeys.public_key,
+    secretKey: apiKeys.secret_key,
+    updatedAt: new Date().toISOString(),
+  }
+  try {
+    mkdirSync(dirname(LANGFUSE_KEY_CACHE_FILE), { recursive: true })
+    const tmpFile = `${LANGFUSE_KEY_CACHE_FILE}.tmp`
+    writeFileSync(tmpFile, JSON.stringify(cache, null, 2), "utf-8")
+    try {
+      chmodSync(tmpFile, 0o600)
+    } catch {}
+    renameSync(tmpFile, LANGFUSE_KEY_CACHE_FILE)
+    try {
+      chmodSync(LANGFUSE_KEY_CACHE_FILE, 0o600)
+    } catch {}
+    trackEvent("log", {
+      level: "info",
+      message: "[langfuse] 写入本地项目API密钥缓存成功",
+      data: { userId: user_id, userName: user_name, projectId: apiKeys.project_id, file: LANGFUSE_KEY_CACHE_FILE },
+    })
+  } catch (e) {
+    trackEvent("both", {
+      level: "error",
+      message: "[langfuse] 写入本地项目API密钥缓存异常",
+      data: { error: String(e), file: LANGFUSE_KEY_CACHE_FILE },
+      metricName: "plugin.langfuse.cache.error",
+      metricValue: 1,
+      tags: { type: "langfuseKeyCache", action: "write" },
+    })
+  }
+}
+
+async function get_apikeys_by_user(
+  user_id: string,
+  user_name: string,
+  langfuse_host: string,
+): Promise<ApiKeyLookupResult> {
+  try {
+    const res = await fetchWithTimeout(`${langfuse_host}/api/trpc/projectApiKeys.byUserInfo`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ json: { userInfo: `${user_name}/${user_id}` } }),
+    }, LANGFUSE_KEY_LOOKUP_TIMEOUT_MS)
+    if (!res.ok) {
+      const text = await readResponseTextSafe(res)
+      trackEvent("both", {
+        level: "error",
+        message: "[langfuse] 获取密钥信息失败，接口返回非2xx",
+        data: { userId: user_id, userName: user_name, status: res.status, response: text.slice(0, 500) },
+        metricName: "plugin.langfuse.api.error",
+        metricValue: 1,
+        tags: { api: "get_apikeys_by_user", reason: "http_error", status: String(res.status) },
+      })
+      return { status: "error", error: `http_status_${res.status}` }
+    }
+    const resJson = await res.json()
+    const json = resJson?.result?.data?.json
+    const lookupStatus = json?.status
+    const public_key = json?.publicKey
+    const secret_key = json?.secretKey
+    const project_id = json?.projectId
+    if (lookupStatus === "found project" && public_key && secret_key && project_id) {
+      trackEvent("log", {
+        level: "info",
+        message: "[langfuse] 获取密钥信息成功",
+        data: { userId: user_id, userName: user_name, projectId: project_id },
+      })
+      return { status: "found", apiKeys: { public_key, secret_key, project_id } }
+    }
+    if (lookupStatus === "not found project") {
+      trackEvent("log", {
+        level: "warn",
+        message: "[langfuse] 未查询到用户project",
+        data: { userId: user_id, userName: user_name },
+      })
+      return { status: "not_found" }
+    }
+    if (lookupStatus === "create apiKey failed") {
+      trackEvent("both", {
+        level: "error",
+        message: "[langfuse] 查询密钥时服务端创建API Key失败，将使用兜底密钥",
+        data: { userId: user_id, userName: user_name, response: JSON.stringify(resJson) },
+        metricName: "plugin.langfuse.api.error",
+        metricValue: 1,
+        tags: { api: "get_apikeys_by_user", reason: "create_api_key_failed" },
+      })
+      return { status: "create_api_key_failed" }
+    }
+    trackEvent("both", {
+      level: "error",
+      message: "[langfuse] 获取密钥信息失败，返回状态或数据异常",
+      data: { userId: user_id, userName: user_name, lookupStatus, response: JSON.stringify(resJson) },
+      metricName: "plugin.langfuse.api.error",
+      metricValue: 1,
+      tags: { api: "get_apikeys_by_user", reason: "invalid_response" },
+    })
+    return { status: "error", error: "invalid_response" }
+  } catch (e) {
+    const isTimeout = e instanceof Error && e.name === "AbortError"
+    trackEvent("both", {
+      level: "error",
+      message: isTimeout ? "[langfuse] 获取密钥信息超时，将使用兜底密钥" : "[langfuse] 获取密钥信息异常",
       data: { error: String(e), userId: user_id, userName: user_name },
       metricName: "plugin.langfuse.api.error",
       metricValue: 1,
-      tags: { api: "get_apikeys_by_user", reason: "exception" },
+      tags: { api: "get_apikeys_by_user", reason: isTimeout ? "timeout" : "exception" },
     })
-    return null
+    return { status: "error", error: isTimeout ? "timeout" : String(e) }
   }
 }
 
@@ -2681,21 +2851,38 @@ async function get_project_apikeys(
   user_name: string,
   langfuse_host: string,
   path_name: string | null,
-): Promise<{ public_key: string; secret_key: string; project_id: string } | null> {
-  let result = await get_apikeys_by_user(user_id, user_name, langfuse_host)
-  if (result?.public_key && result?.secret_key) {
-    return result
+  options?: { allowCreateOnNotFound?: boolean },
+): Promise<ProjectApiKeys | null> {
+  const lookup = await get_apikeys_by_user(user_id, user_name, langfuse_host)
+  if (lookup.status === "found") {
+    return lookup.apiKeys
+  }
+  if (lookup.status !== "not_found") {
+    trackEvent("log", {
+      level: "warn",
+      message: "[langfuse] 获取项目API密钥未成功，将使用兜底密钥",
+      data: { userId: user_id, userName: user_name, status: lookup.status },
+    })
+    return null
+  }
+  if (options?.allowCreateOnNotFound === false) {
+    trackEvent("log", {
+      level: "warn",
+      message: "[langfuse] 服务端返回未查询到project，但已有本地缓存，本次不创建新project",
+      data: { userId: user_id, userName: user_name },
+    })
+    return null
   }
   trackEvent("log", {
     level: "warn",
-    message: "[langfuse] get_project_apikeys 返回null，将尝试注册新用户",
+    message: "[langfuse] 确认未查询到project，将尝试注册新用户并创建project",
     data: { userId: user_id, userName: user_name },
   })
   await signup_user(user_id, user_name, langfuse_host, path_name)
   const session = await get_langfuse_login_token(langfuse_host, user_id)
   const org_id = await create_organization(session, langfuse_host)
   if (org_id) {
-    result = await create_project(user_id, user_name, org_id, session, langfuse_host)
+    const result = await create_project(user_id, user_name, org_id, session, langfuse_host)
     if (result?.public_key && result?.secret_key) {
       return result
     }
@@ -2778,66 +2965,73 @@ export const LangfusePlugin: Plugin = async (ctx) => {
   pluginLog = extendedCtx.log
   pluginMetric = extendedCtx.metric
 
-  // let project_id: string | null = null
-  // publicKey = "pk-lf-d89067e9-5eb3-42cc-b947-2d82a1a9e181"
-  // secretKey = "sk-lf-773528e2-aa24-48d0-9791-b7f795cbfb9a"
-
-  // userIdMetadata = `${"张丹"}/${"80295981"}`
-  // try {
-  //     const apiKeys = await get_project_apikeys("80295981", "张丹", LANGFUSE_BASE_URL, "总行/信息技术部/测试中心/测试技术团队/测试技术一室(成都)/测试技术二组")
-  //     if (apiKeys) {
-  //       project_id = apiKeys.project_id
-  //       publicKey = apiKeys.public_key,
-  //       secretKey = apiKeys.secret_key,
-  //       trackEvent("log", {
-  //         level: "info",
-  //         message: "[langfuse] Client initialized with dynamic keys",
-  //         data: { userId: "80295981", projectId: project_id },
-  //       })
-  //     }
-  //   } catch (e) {
-  //     trackEvent("log", {
-  //       level: "error",
-  //       message: "[langfuse] Failed to initialize client with dynamic keys",
-  //       data: { error: String(e) },
-  //     })
-  //   }
   const user = User.get()
   let project_id: string | null = null
-  publicKey = "pk-lf-d89067e9-5eb3-42a9-b181-9e181"
-  secretKey = "sk-lf-773528e2-5eb3-42cc-b947-528e2bfb9a"
+  publicKey = "pk-lf-d89067e9-5eb3-42cc-b947-2d82a1a9e181"
+  secretKey = "sk-lf-773528e2-aa24-48d0-9791-b7f795cbfb9a"
   if (user.userId && user.userName) {
     userIdMetadata = `${user.userName}/${user.userId}`
-    void get_project_apikeys(user.userId, user.userName, LANGFUSE_BASE_URL, user.pathName)
-      .then((apiKeys) => {
-        if (apiKeys) {
-          project_id = apiKeys.project_id
-          publicKey = apiKeys.public_key
-          secretKey = apiKeys.secret_key
-          currentProjectId = apiKeys.project_id
-          trackEvent("log", {
-            level: "info",
-            message: "[langfuse] Client initialized with dynamic keys",
-            data: { userId: user.userId, projectId: project_id },
-          })
-        } else {
-          trackEvent("log", {
-            level: "warn",
-            message: "[langfuse] 获取项目API密钥失败，返回为null",
-            data: { userId: user.userId, userName: user.userName },
-          })
-        }
+    const applyProjectApiKeys = (apiKeys: ProjectApiKeys, source: "cache" | "server") => {
+      project_id = apiKeys.project_id
+      publicKey = apiKeys.public_key
+      secretKey = apiKeys.secret_key
+      currentBatchProjectId = apiKeys.project_id
+      trackEvent("log", {
+        level: "info",
+        message: source === "cache" ? "[langfuse] Client initialized with cached keys" : "[langfuse] Client initialized with dynamic keys",
+        data: { userId: user.userId, projectId: project_id },
       })
-      .catch((e) => {
+    }
+    const refreshProjectApiKeys = async (allowCreateOnNotFound: boolean) => {
+      const apiKeys = await get_project_apikeys(
+        user.userId,
+        user.userName,
+        LANGFUSE_BASE_URL,
+        user.pathName ?? null,
+        { allowCreateOnNotFound },
+      )
+      if (apiKeys) {
+        applyProjectApiKeys(apiKeys, "server")
+        writeCachedProjectKeys(user.userId, user.userName, LANGFUSE_BASE_URL, apiKeys)
+        return true
+      }
+      trackEvent("log", {
+        level: "warn",
+        message: "[langfuse] 获取项目API密钥失败，将使用当前密钥",
+        data: { userId: user.userId, userName: user.userName },
+      })
+      return false
+    }
+    const cachedApiKeys = readCachedProjectKeys(user.userId, user.userName, LANGFUSE_BASE_URL)
+    if (cachedApiKeys) {
+      applyProjectApiKeys(cachedApiKeys, "cache")
+    } else {
+      try {
+        await refreshProjectApiKeys(true)
+      } catch (e) {
         trackEvent("both", {
           level: "error",
-          message: "[langfuse] 初始化动态密钥异常",
+          message: "[langfuse] 初始化动态密钥异常，将使用兜底密钥",
           data: { error: String(e), userId: user.userId },
           metricName: "plugin.langfuse.api.error",
           metricValue: 1,
           tags: { api: "get_project_apikeys" },
         })
+      }
+      if (!project_id) {
+        trackEvent("log", {
+          level: "warn",
+          message: "[langfuse] 未获取到项目API密钥，将使用兜底密钥",
+          data: { userId: user.userId, userName: user.userName },
+        })
+      } else {
+      trackEvent("log", {
+        level: "info",
+        message: "[langfuse] 首次获取项目API密钥成功",
+        data: { userId: user.userId, userName: user.userName, projectId: project_id },
       })
+      }
+    }
   } else {
     trackEvent("both", {
       level: "error",
@@ -2858,7 +3052,7 @@ export const LangfusePlugin: Plugin = async (ctx) => {
     m.source = "testagent"
     return m
   }
-  currentProjectId = project_id || "unknown_project"
+  currentBatchProjectId = project_id || "fallback_project"
 
   configureFailedIngestionQueue(publicKey)
   configureFinalBatchUploadQueue(publicKey)
