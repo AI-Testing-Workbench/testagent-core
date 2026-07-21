@@ -44,7 +44,9 @@ const DEFAULT_CONTINUE_INTERVAL_SECONDS = 3
 const DEFAULT_MAX_PROMPT_FAILURES = 3
 const DEFAULT_COMMAND_NAME = "goal"
 const GOAL_SYSTEM_MARKER = "OpenCode goal mode"
+const GOAL_TOOL_IDS = ["get_goal", "create_goal", "set_goal", "update_goal", "update_goal_status", "clear_goal"]
 const activeContinuations = new Set<string>()
+const commandSessions = new Set<string>()
 
 function goalCommandTemplate(commandName: string) {
   return `OpenCode goal mode command "/${commandName}" was invoked.
@@ -80,7 +82,7 @@ function registerDesktopCommand(config: Config, commandName: string) {
   config.command[commandName] = {
     description: "Set or view the long-running session goal",
     template: goalCommandTemplate(commandName),
-    subtask: true,
+    subtask: false,
   }
 }
 
@@ -173,6 +175,17 @@ function mergeSystemReminder(output: { system: string[] }, reminder: string) {
     return
   }
   output.system[0] = `${output.system[0]}\n\n${reminder}`
+}
+
+function disableGoalTools(message: { info: { role?: string; tools?: Record<string, boolean> } }) {
+  if (message.info.role !== "user") return
+  const disabled = Object.fromEntries(
+    GOAL_TOOL_IDS.filter((id) => message.info.tools?.[id] !== true).map((id) => [id, false]),
+  )
+  message.info.tools = {
+    ...(message.info.tools ?? {}),
+    ...disabled,
+  }
 }
 
 export const GoalPlugin: Plugin = async ({ client }, options?: Options) => {
@@ -272,6 +285,11 @@ export const GoalPlugin: Plugin = async ({ client }, options?: Options) => {
         },
       },
     },
+    async "command.execute.before"(input, _output) {
+      if (input.command === commandName) {
+        commandSessions.add(input.sessionID)
+      }
+    },
     async "experimental.chat.messages.transform"(input, output) {
       const sessionID =
         "sessionID" in input && typeof input.sessionID === "string"
@@ -279,6 +297,11 @@ export const GoalPlugin: Plugin = async ({ client }, options?: Options) => {
           : output.messages.find((message) => typeof message.info.sessionID === "string")?.info.sessionID
       if (!sessionID) return
       await accountUsage(sessionID, tokensFromMessages(output.messages))
+      const goal = await getGoal(sessionID)
+      const enabled = commandSessions.delete(sessionID) || goal?.status === "active"
+      if (enabled) return
+      const message = output.messages.findLast((message) => message.info.role === "user")
+      if (message) disableGoalTools(message)
     },
     async "experimental.chat.system.transform"(input, output) {
       if (typeof input.sessionID !== "string") return
