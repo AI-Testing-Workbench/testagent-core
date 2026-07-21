@@ -251,6 +251,12 @@ export const llmRequest = Metric.counter("session.llm.request", {
 export const sessionCompacted = Metric.counter("session.compacted", {
   description: "Total of sessions compacted",
 })
+export const compactionTokensBefore = Metric.gauge("session.compaction.tokens_before", {
+  description: "Estimated context tokens before compaction",
+})
+export const compactionTokensAfter = Metric.gauge("session.compaction.tokens_after", {
+  description: "Estimated context tokens after compaction",
+})
 export const questionAsk = Metric.counter("tool.question.ask", {
   description: "Total question tool calls",
 })

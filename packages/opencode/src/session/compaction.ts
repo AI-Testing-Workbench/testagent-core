@@ -16,7 +16,7 @@ import { ModelID, ProviderID } from "@/provider/schema"
 import { Effect, Layer, Context, Metric, Schema } from "effect"
 import * as DateTime from "effect/DateTime"
 import { InstanceState } from "@/effect/instance-state"
-import { sessionCompacted } from "@opencode-ai/core/effect/observability"
+import { sessionCompacted, compactionTokensBefore, compactionTokensAfter } from "@opencode-ai/core/effect/observability"   //testagent_change
 import { isOverflow as overflow, usable } from "./overflow"
 import { makeRuntime } from "@/effect/run-service"
 import { fn } from "@/util/fn"
@@ -414,6 +414,7 @@ export const layer: Layer.Layer<
         stripMedia: true,
         toolOutputMaxChars: TOOL_OUTPUT_MAX_CHARS,
       })
+      const beforeTokens = yield* estimate({ messages: input.messages, model })  //testagent_change - estimate tokens before compaction for metrics
       const ctx = yield* InstanceState.context
       const msg: MessageV2.Assistant = {
         id: MessageID.ascending(),
@@ -579,6 +580,17 @@ export const layer: Layer.Layer<
         })
         yield* bus.publish(Event.Compacted, { sessionID: input.sessionID })
         yield* Metric.update(Metric.withAttributes(sessionCompacted, { sessionID: input.sessionID, modelID: model.id, providerID: model.providerID }), 1)
+        // //testagent_change start
+        let afterTokens = 0
+        if (selected.tail_start_id) {
+          const tailIdx = input.messages.findIndex((m) => m.info.id === selected.tail_start_id)
+          if (tailIdx >= 0) afterTokens = yield* estimate({ messages: input.messages.slice(tailIdx), model })
+        }
+        if (summary) afterTokens += Token.estimate(summary)
+        const compAttrs = { sessionID: input.sessionID, compactionID: input.parentID, modelID: model.id, providerID: model.providerID }
+        yield* Metric.update(Metric.withAttributes(compactionTokensBefore, compAttrs), beforeTokens)
+        yield* Metric.update(Metric.withAttributes(compactionTokensAfter, compAttrs), afterTokens)
+        //testagent_change end
       }
       return result
     })

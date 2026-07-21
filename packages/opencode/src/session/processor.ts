@@ -798,6 +798,7 @@ export const layer: Layer.Layer<
                   sessionID: ctx.sessionID,
                   modelID: streamInput.model.id,
                   providerID: streamInput.model.providerID,
+                  messageID: ctx.assistantMessage.id,
                 }),
                 ttftValue,
               )
