@@ -388,6 +388,11 @@ export const Info = Schema.Struct({
       mcp_timeout: Schema.optional(PositiveInt).annotate({
         description: "Timeout in seconds for model context protocol (MCP) requests",
       }),
+      // testagent_change start - Agent Manager toggle
+      agent_manager: Schema.optional(Schema.Boolean).annotate({
+        description: "Enable the Agent Manager feature for multi-session orchestration with git worktree isolation",
+      }),
+      // testagent_change end
     }),
   ),
 })

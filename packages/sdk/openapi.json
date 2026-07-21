@@ -6799,9 +6799,6 @@
                   "command": {
                     "type": "string"
                   },
-                  "goal": {
-                    "type": "string"
-                  },
                   "variant": {
                     "type": "string"
                   },
@@ -12787,6 +12784,15 @@
           "langfuse": {
             "type": "boolean"
           },
+          "goal": {
+            "type": "object",
+            "properties": {
+              "enabled": {
+                "type": "boolean"
+              }
+            },
+            "additionalProperties": false
+          },
           "share": {
             "type": "string",
             "enum": ["manual", "auto", "disabled"]
@@ -13125,6 +13131,9 @@
               "mcp_timeout": {
                 "type": "integer",
                 "exclusiveMinimum": 0
+              },
+              "agent_manager": {
+                "type": "boolean"
               }
             },
             "additionalProperties": false
