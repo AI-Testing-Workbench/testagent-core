@@ -6219,6 +6219,22 @@
         },
         "description": "Abort an active session and stop any ongoing AI processing or command execution.",
         "summary": "Abort session",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "reason": {
+                    "type": "string",
+                    "enum": ["completed", "user_abort", "error"]
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        },
         "x-codeSamples": [
           {
             "lang": "js",
@@ -12754,6 +12770,21 @@
               "required": ["spec", "source", "scope"],
               "additionalProperties": false
             }
+          },
+          "mcp_origins": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Runtime source file paths for each MCP server entry"
+          },
+          "mcp_scopes": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string",
+              "enum": ["local", "global"]
+            },
+            "description": "Scope (local/global) for each MCP server entry. local = project config, global = user config."
           },
           "plugin_status": {
             "type": "object",

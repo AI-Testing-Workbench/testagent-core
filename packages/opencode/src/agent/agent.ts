@@ -13,6 +13,7 @@ import PROMPT_EXPLORE from "./prompt/explore.txt"
 import PROMPT_SCOUT from "./prompt/scout.txt"
 import PROMPT_SUMMARY from "./prompt/summary.txt"
 import PROMPT_TITLE from "./prompt/title.txt"
+import PROMPT_SDT from "./prompt/sdt.txt" // testagent_change
 import { Permission } from "@/permission"
 import { mergeDeep, pipe, sortBy, values } from "remeda"
 import { Global } from "@opencode-ai/core/global"
@@ -175,6 +176,24 @@ export const layer = Layer.effect(
             mode: "subagent",
             native: true,
           },
+          // testagent_change start
+          sdt: {
+            name: "sdt",
+            description: "SDT test framework subagent for executing structured multi-phase test tasks. Use this when the SDT framework schedules test execution.",
+            permission: Permission.merge(
+              defaults,
+              Permission.fromConfig({
+                todowrite: "deny",
+                question: "allow",
+              }),
+              user,
+            ),
+            options: {},
+            mode: "subagent",
+            native: true,
+            prompt: PROMPT_SDT,
+          },
+          // testagent_change end
           explore: {
             name: "explore",
             permission: Permission.merge(

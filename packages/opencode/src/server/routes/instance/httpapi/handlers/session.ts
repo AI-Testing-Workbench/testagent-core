@@ -236,10 +236,14 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       )
     })
 
-    const abort = Effect.fn("SessionHttpApi.abort")(function* (ctx: { params: { sessionID: SessionID } }) {
-      yield* promptSvc.cancel(ctx.params.sessionID)
-      return true
-    })
+    // testagent_change start - 接收前端传来的 idle reason
+    const abort = Effect.fn("SessionHttpApi.abort")(
+      function* (ctx: { params: { sessionID: SessionID }; payload: { reason?: "completed" | "user_abort" | "error" } }) {
+        yield* promptSvc.cancel(ctx.params.sessionID, ctx.payload.reason)
+        return true
+      },
+    )
+    // testagent_change end
 
     const init = Effect.fn("SessionHttpApi.init")(function* (ctx: {
       params: { sessionID: SessionID }
@@ -369,6 +373,15 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
     })
     // testagent_change end
 
+    // testagent_change start - 添加 clearContext handler
+    const clearContext = Effect.fn("SessionHttpApi.clearContext")(function* (ctx: {
+      params: { sessionID: SessionID }
+    }) {
+      yield* compactSvc.clearContext({ sessionID: ctx.params.sessionID })
+      return true
+    })
+    // testagent_change end
+
     const permissionRespond = Effect.fn("SessionHttpApi.permissionRespond")(function* (ctx: {
       params: { permissionID: PermissionID }
       payload: typeof PermissionResponsePayload.Type
@@ -434,6 +447,7 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       .handle("revert", revert)
       .handle("unrevert", unrevert)
       .handle("resume", resume) // testagent_change - 添加 resume handler
+      .handle("clearContext", clearContext) // testagent_change - 添加 clearContext handler
       .handle("permissionRespond", permissionRespond)
       .handle("deleteMessage", deleteMessage)
       .handle("deletePart", deletePart)
