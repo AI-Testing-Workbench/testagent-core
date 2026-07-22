@@ -3207,6 +3207,7 @@ export const LangfusePlugin: Plugin = async (ctx) => {
       if (output.maxOutputTokens !== undefined) modelParameters.max_tokens = output.maxOutputTokens
 
       const commandMeta = commandBeforeData.get(sessionId)
+      if (commandMeta) commandBeforeData.delete(sessionId)
 
       const genMetadata = {
         spanKind: "LLM",
@@ -3220,7 +3221,7 @@ export const LangfusePlugin: Plugin = async (ctx) => {
         input: llmInputDict,
         output: {},
         tags: OBSERVATION_TAGS,
-        ...(commandMeta ? commandMeta : {}),
+        ...(commandMeta ? {commandData: commandMeta} : {}),
         ...baseMetadata(),
       }
 
