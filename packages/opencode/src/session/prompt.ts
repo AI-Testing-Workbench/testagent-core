@@ -49,9 +49,6 @@ import { Process } from "@/util/process"
 import { Cause, Effect, Exit, Latch, Layer, Metric, Option, Scope, Context, Schema, Types } from "effect"
 import { zod } from "@/util/effect-zod"
 import { withStatics } from "@/util/schema"
-// testagent_change start
-import { environmentDetails, EditorContext } from "../testagent/editor-context"
-// testagent_change end
 import * as EffectLogger from "@opencode-ai/core/effect/logger"
 import { InstanceState } from "@/effect/instance-state"
 import { TaskTool, type TaskPromptOps } from "@/tool/task"
@@ -975,16 +972,6 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         },
         system: input.system,
         format: input.format,
-        // testagent_change start
-        editorContext: input.editorContext
-          ? {
-              activeFile: input.editorContext.activeFile,
-              openTabs: input.editorContext.openTabs ? [...input.editorContext.openTabs] : undefined,
-              visibleFiles: input.editorContext.visibleFiles ? [...input.editorContext.visibleFiles] : undefined,
-              shell: input.editorContext.shell,
-            }
-          : undefined,
-        // testagent_change end
       }
 
       const current = Database.use((db) =>
@@ -1598,31 +1585,9 @@ NOTE: At any point in time through this workflow you should feel free to ask the
 
             yield* plugin.trigger("experimental.chat.messages.transform", {}, { messages: msgs })
 
-            // testagent_change start — inject dynamic editor context into last user message
-            const envBlock = environmentDetails(lastUser.editorContext)
-            if (envBlock) {
-              const lastUserIdx = msgs.findLastIndex((m) => m.info.role === "user")
-              if (lastUserIdx !== -1) {
-                msgs[lastUserIdx] = {
-                  ...msgs[lastUserIdx],
-                  parts: [
-                    ...msgs[lastUserIdx].parts,
-                    {
-                      id: PartID.ascending(),
-                      sessionID,
-                      messageID: msgs[lastUserIdx].info.id,
-                      type: "text",
-                      text: envBlock,
-                    } satisfies MessageV2.TextPart,
-                  ],
-                }
-              }
-            }
-            // testagent_change end
-
             const [skills, env, instructions, modelMsgs] = yield* Effect.all([
               sys.skills(agent),
-              sys.environment(model, lastUser.editorContext), // testagent_change
+              sys.environment(model),
               instruction.system().pipe(Effect.orDie),
               MessageV2.toModelMessagesEffect(msgs, model),
             ])
@@ -1944,9 +1909,6 @@ export const PromptInput = Schema.Struct({
   format: Schema.optional(MessageV2.Format),
   system: Schema.optional(Schema.String),
   variant: Schema.optional(Schema.String),
-  // testagent_change start
-  editorContext: Schema.optional(EditorContext),
-  // testagent_change end
   parts: Schema.Array(
     Schema.Union([
       MessageV2.TextPartInput,
