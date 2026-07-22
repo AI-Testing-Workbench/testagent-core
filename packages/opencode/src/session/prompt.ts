@@ -1827,7 +1827,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
 
       yield* plugin.trigger(
         "command.execute.before",
-        { command: input.command, sessionID: input.sessionID, arguments: input.arguments },
+        { command: input.command, sessionID: input.sessionID, arguments: input.arguments, source: cmd.source, id: cmd.id, version: cmd.version },
         { parts },
       )
 

@@ -466,6 +466,9 @@ const llmInputs = new Map<string, any[]>()
 // 存储 system prompt
 const systemPrompts = new Map<string, string[]>()
 
+// 存储 command.execute.before 事件数据，用于关联到 LLM generation 元数据
+const commandBeforeData = new Map<string, { name: string; source: string; id?: string; version?: string }>()
+
 // 全局工具定义缓存
 const allToolDefs = new Map<string, { id: string; description: string; parameters: any }>()
 
@@ -3146,6 +3149,16 @@ export const LangfusePlugin: Plugin = async (ctx) => {
       }
     },
 
+    "command.execute.before": async (input, output) => {
+      if (input.source !== "skill") return
+      commandBeforeData.set(input.sessionID, {
+        name: input.command,
+        source: input.source,
+        id: input.id,
+        version: input.version,
+      })
+    },
+
     /**
      * 处理聊天参数事件，创建 LLM generation
      */
@@ -3193,6 +3206,8 @@ export const LangfusePlugin: Plugin = async (ctx) => {
       if (output.topK !== undefined) modelParameters.top_k = output.topK
       if (output.maxOutputTokens !== undefined) modelParameters.max_tokens = output.maxOutputTokens
 
+      const commandMeta = commandBeforeData.get(sessionId)
+
       const genMetadata = {
         spanKind: "LLM",
         model: buildLLMModelMetadata({
@@ -3205,6 +3220,7 @@ export const LangfusePlugin: Plugin = async (ctx) => {
         input: llmInputDict,
         output: {},
         tags: OBSERVATION_TAGS,
+        ...(commandMeta ? commandMeta : {}),
         ...baseMetadata(),
       }
 

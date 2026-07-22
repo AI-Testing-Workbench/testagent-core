@@ -32,6 +32,10 @@ const SKILL_PATTERN = "**/SKILL.md"
 export const Info = Schema.Struct({
   name: Schema.String,
   description: Schema.optional(Schema.String),
+  // testagent_change start - add metadata fields
+  id: Schema.optional(Schema.String),
+  version: Schema.optional(Schema.String),
+  // testagent_change end
   location: Schema.String,
   content: Schema.String,
 }).pipe(withStatics((s) => ({ zod: zod(s) })))
@@ -113,6 +117,8 @@ const add = Effect.fnUntraced(function* (state: State, match: string, bus: Bus.I
   state.skills[parsed.data.name] = {
     name: parsed.data.name,
     description: parsed.data.description,
+    id: typeof md.data.id === "number" ? String(md.data.id) : md.data.id,
+    version: typeof md.data.version === "number" ? String(md.data.version) : md.data.version,
     location: match,
     content: md.content,
   }
