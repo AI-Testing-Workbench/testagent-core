@@ -29,7 +29,7 @@ Do not rely on intent, partial progress, elapsed effort, memory of earlier work,
 export function systemReminder(goal: GoalSnapshot | null) {
   if (!goal || goal.status === "complete" || goal.status === "unmet") return ""
   if (goal.status === "active") return continuationPrompt(goal)
-  return `OpenCode goal mode current state:
+  return `TestAgent goal mode current state:
 
 ${formatGoal(goal)}
 
@@ -37,7 +37,7 @@ If the user resumes the goal, continue from the objective and current evidence.`
 }
 
 export function compactionContext(goal: GoalSnapshot) {
-  return `OpenCode goal mode is tracking this session goal across compaction.
+  return `TestAgent goal mode is tracking this session goal across compaction.
 
 ${formatGoal(goal)}
 
