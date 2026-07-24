@@ -653,12 +653,14 @@ async function uploadToIngestion(events: any[]) {
     })
 
     if (res.ok) {
-      trackEvent("log", {
-        level: "info",
-        message: "Langfuse ingestion upload success",
-        data: { service: "langfuse", eventCount: events.length,
-          traceId : traceId,
-          projectId :projectId },
+      trackEvent("metric", {
+        metricName: "plugin.langfuse.ingestion.success",
+        metricValue: 1,
+        tags: {
+          eventCount: String(events.length),
+          ...(traceId ? { traceId } : {}),
+          ...(projectId ? { projectId } : {}),
+        },
       })
       return { successes: taggedEvents.map((event) => ({ id: event.id })), errors: [] }
     }
@@ -666,20 +668,16 @@ async function uploadToIngestion(events: any[]) {
     const text = await readResponseTextSafe(res)
     trackEvent("both", {
       level: "error",
-      message: "Langfuse ingestion upload failed",
+      message: "数据上报失败",
       data: {
-        service: "langfuse",
-        baseUrl: LANGFUSE_BASE_URL,
         status: res.status,
         eventCount: events.length,
-        traceId : traceId,
-        projectId :projectId
+        traceId,
+        projectId,
       },
       metricName: "plugin.langfuse.ingestion.error",
       metricValue: 1,
       tags: {
-        service: "langfuse",
-        baseUrl: LANGFUSE_BASE_URL,
         status: String(res.status),
         eventCount: String(events.length),
       },
@@ -688,19 +686,15 @@ async function uploadToIngestion(events: any[]) {
   } catch (e) {
     trackEvent("both", {
       level: "error",
-      message: "Langfuse ingestion upload exception",
+      message: "数据上报异常",
       data: {
-        service: "langfuse",
-        baseUrl: LANGFUSE_BASE_URL,
         error: String(e),
-        traceId : traceId,
-        projectId :projectId
+        traceId,
+        projectId,
       },
       metricName: "plugin.langfuse.ingestion.error",
       metricValue: 1,
       tags: {
-        service: "langfuse",
-        baseUrl: LANGFUSE_BASE_URL,
         error: "exception",
       },
     })
@@ -772,11 +766,11 @@ function persistFinalBatchUploads() {
   } catch (e) {
     trackEvent("both", {
       level: "error",
-      message: "[langfuse] Failed to persist final batch upload queue",
+      message: "持久化最终批次上传队列失败",
       data: { error: String(e) },
       metricName: "plugin.langfuse.persist.error",
       metricValue: 1,
-      tags: { type: "finalBatchUpload" },
+      tags: { type: "finalBatchUpload", action: "persist", reason: "exception" },
     })
   }
 }
@@ -819,10 +813,10 @@ function loadFinalBatchUploadsFromDisk() {
   if (finalBatchUploadQueueLoaded) return
   finalBatchUploadQueueLoaded = true
   if (!existsSync(finalBatchUploadQueueFile)) {
-    trackEvent("log", {
-      level: "debug",
-      message: "[langfuse] 加载最终批次上传队列成功，队列文件不存在（首次启动）",
-      data: { file: finalBatchUploadQueueFile },
+    trackEvent("metric", {
+      metricName: "plugin.langfuse.queue.load.success",
+      metricValue: 1,
+      tags: { type: "finalBatchUpload", status: "missing_file" },
     })
     return
   }
@@ -831,25 +825,32 @@ function loadFinalBatchUploadsFromDisk() {
     const raw = readFileSync(finalBatchUploadQueueFile, "utf-8")
     const persistedItems = JSON.parse(raw)
     if (!Array.isArray(persistedItems)) {
-      trackEvent("log", {
+      trackEvent("both", {
         level: "warn",
-        message: "[langfuse] 加载最终批次上传队列，数据格式异常",
+        message: "加载最终批次上传队列，数据格式异常",
         data: { file: finalBatchUploadQueueFile },
+        metricName: "plugin.langfuse.load.error",
+        metricValue: 1,
+        tags: { type: "finalBatchUpload", reason: "invalid_format" },
       })
       return
     }
 
     enqueueFinalBatchUploads(persistedItems.filter(isValidFinalBatchUpload), { persist: false })
     persistFinalBatchUploads()
-    trackEvent("log", {
-      level: "info",
-      message: "[langfuse] 加载最终批次上传队列成功",
-      data: { itemCount: persistedItems.filter(isValidFinalBatchUpload).length, file: finalBatchUploadQueueFile },
+    trackEvent("metric", {
+      metricName: "plugin.langfuse.queue.load.success",
+      metricValue: 1,
+      tags: {
+        type: "finalBatchUpload",
+        status: "loaded",
+        itemCount: String(persistedItems.filter(isValidFinalBatchUpload).length),
+      },
     })
   } catch (e) {
     trackEvent("both", {
       level: "error",
-      message: "[langfuse] 加载最终批次上传队列异常",
+      message: "加载最终批次上传队列异常",
       data: { error: String(e), file: finalBatchUploadQueueFile },
       metricName: "plugin.langfuse.load.error",
       metricValue: 1,
@@ -864,16 +865,19 @@ async function uploadFinalBatchItems(items: any[]) {
   const taggedItems = items.map(withEventBodyTags)
   const result = await postJsonWithAuth(LANGFUSE_FINAL_BATCH_UPLOAD_PATH, { json: { [currentBatchProjectId]: taggedItems } })
   if(result.ok) {
-    trackEvent("log", {
-      level: "info",
-      message: "[langfuse] 最终批次上传成功",
-      data: { itemCount: taggedItems.length },
+    trackEvent("metric", {
+      metricName: "plugin.langfuse.upload.final.success",
+      metricValue: 1,
+      tags: { itemCount: String(taggedItems.length) },
     })
   }else{
-    trackEvent("log", {
+    trackEvent("both", {
       level: "error",
-      message: "[langfuse] 最终批次上传失败",
+      message: "最终批次上传失败",
       data: { itemCount: taggedItems.length, error: result.error },
+      metricName: "plugin.langfuse.upload.final.error",
+      metricValue: 1,
+      tags: { itemCount: String(taggedItems.length), reason: "request_failed" },
     })
   }
 
@@ -972,11 +976,11 @@ function persistFailedIngestionEvents() {
   } catch (e) {
     trackEvent("both", {
       level: "error",
-      message: "[langfuse] Failed to persist ingestion retry queue",
+      message: "持久化数据上报重试队列失败",
       data: { error: String(e) },
       metricName: "plugin.langfuse.persist.error",
       metricValue: 1,
-      tags: { type: "ingestionRetryQueue" },
+      tags: { type: "ingestionRetryQueue", action: "persist", reason: "exception" },
     })
   }
 }
@@ -985,10 +989,10 @@ function loadFailedIngestionEventsFromDisk() {
   if (failedIngestionQueueLoaded) return
   failedIngestionQueueLoaded = true
   if (!existsSync(failedIngestionQueueFile)) {
-    trackEvent("log", {
-      level: "debug",
-      message: "[langfuse] 加载重试队列成功，队列文件不存在（首次启动）",
-      data: { file: failedIngestionQueueFile },
+    trackEvent("metric", {
+      metricName: "plugin.langfuse.queue.load.success",
+      metricValue: 1,
+      tags: { type: "ingestionRetryQueue", status: "missing_file" },
     })
     return
   }
@@ -997,25 +1001,32 @@ function loadFailedIngestionEventsFromDisk() {
     const raw = readFileSync(failedIngestionQueueFile, "utf-8")
     const persistedEvents = JSON.parse(raw)
     if (!Array.isArray(persistedEvents)) {
-      trackEvent("log", {
+      trackEvent("both", {
         level: "warn",
-        message: "[langfuse] 加载重试队列，数据格式异常",
+        message: "加载重试队列，数据格式异常",
         data: { file: failedIngestionQueueFile },
+        metricName: "plugin.langfuse.load.error",
+        metricValue: 1,
+        tags: { type: "ingestionRetryQueue", reason: "invalid_format" },
       })
       return
     }
 
     enqueueFailedIngestionEvents(persistedEvents.filter(isValidIngestionEvent), { persist: false })
     persistFailedIngestionEvents()
-    trackEvent("log", {
-      level: "info",
-      message: "[langfuse] 加载重试队列成功",
-      data: { eventCount: persistedEvents.filter(isValidIngestionEvent).length, file: failedIngestionQueueFile },
+    trackEvent("metric", {
+      metricName: "plugin.langfuse.queue.load.success",
+      metricValue: 1,
+      tags: {
+        type: "ingestionRetryQueue",
+        status: "loaded",
+        eventCount: String(persistedEvents.filter(isValidIngestionEvent).length),
+      },
     })
   } catch (e) {
     trackEvent("both", {
       level: "error",
-      message: "[langfuse] 加载重试队列异常",
+      message: "加载重试队列异常",
       data: { error: String(e), file: failedIngestionQueueFile },
       metricName: "plugin.langfuse.load.error",
       metricValue: 1,
@@ -1132,11 +1143,11 @@ async function drainBackgroundIngestion() {
     } catch (e) {
       trackEvent("both", {
         level: "error",
-        message: "[langfuse] Background ingestion failed",
+        message: "后台数据上报失败",
         data: { error: String(e) },
         metricName: "plugin.langfuse.ingestion.background.error",
         metricValue: 1,
-        tags: { type: "backgroundIngestion" },
+        tags: { type: "backgroundIngestion", reason: "exception" },
       })
     } finally {
       backgroundIngestionDrainPromise = null
@@ -1189,11 +1200,11 @@ async function drainBackgroundFinalBatchUploads() {
     } catch (e) {
       trackEvent("both", {
         level: "error",
-        message: "[langfuse] Background final batch upload failed",
+        message: "后台最终批次上传失败",
         data: { error: String(e) },
         metricName: "plugin.langfuse.upload.background.error",
         metricValue: 1,
-        tags: { type: "backgroundFinalBatchUpload" },
+        tags: { type: "backgroundFinalBatchUpload", reason: "exception" },
       })
     } finally {
       backgroundFinalBatchDrainPromise = null
@@ -1911,11 +1922,11 @@ function installProcessHandlers() {
   process.on("uncaughtException", async (err) => {
     trackEvent("both", {
       level: "error",
-      message: "[langfuse] Uncaught exception",
+      message: "进程未捕获异常",
       data: { error: String(err), stack: (err as Error)?.stack },
       metricName: "plugin.langfuse.process.error",
       metricValue: 1,
-      tags: { type: "uncaughtException" },
+      tags: { type: "uncaughtException", reason: "process_error" },
     })
     await flushAllTraces()
     process.exit(1)
@@ -1923,11 +1934,11 @@ function installProcessHandlers() {
   process.on("unhandledRejection", async (reason) => {
     trackEvent("both", {
       level: "error",
-      message: "[langfuse] Unhandled rejection",
+      message: "进程未处理的 Promise 拒绝",
       data: { reason: String(reason) },
       metricName: "plugin.langfuse.process.error",
       metricValue: 1,
-      tags: { type: "unhandledRejection" },
+      tags: { type: "unhandledRejection", reason: "process_error" },
     })
     await flushAllTraces()
   })
@@ -2542,15 +2553,15 @@ async function create_organization(session: string, langfuse_host: string): Prom
     const resJson = await res.json()
     const orgId = resJson?.result?.data?.json?.id
     if (orgId) {
-      trackEvent("log", {
-        level: "info",
-        message: "[langfuse] 创建organization成功",
-        data: { orgId },
+      trackEvent("metric", {
+        metricName: "plugin.langfuse.api.success",
+        metricValue: 1,
+        tags: { api: "create_organization", orgId },
       })
     } else {
       trackEvent("both", {
         level: "error",
-        message: "[langfuse] 创建organization失败，返回数据异常",
+        message: "创建组织失败，返回数据异常",
         data: { response: JSON.stringify(resJson) },
         metricName: "plugin.langfuse.api.error",
         metricValue: 1,
@@ -2561,7 +2572,7 @@ async function create_organization(session: string, langfuse_host: string): Prom
   } catch (e) {
     trackEvent("both", {
       level: "error",
-      message: "[langfuse] 创建organization异常",
+      message: "创建组织异常",
       data: { error: String(e) },
       metricName: "plugin.langfuse.api.error",
       metricValue: 1,
@@ -2591,7 +2602,7 @@ async function create_project(
     if (!project_id) {
       trackEvent("both", {
         level: "error",
-        message: "[langfuse] /api/trpc/projects.create 失败，返回数据异常",
+        message: "创建项目失败，返回数据异常",
         data: { response: JSON.stringify(resJson) },
         metricName: "plugin.langfuse.api.error",
         metricValue: 1,
@@ -2599,10 +2610,10 @@ async function create_project(
       })
       return null
     }
-    trackEvent("log", {
-      level: "info",
-      message: "[langfuse] /api/trpc/projects.create 成功",
-      data: { projectId: project_id, userId: user_id, userName: user_name },
+    trackEvent("metric", {
+      metricName: "plugin.langfuse.api.success",
+      metricValue: 1,
+      tags: { api: "projects.create", projectId: project_id },
     })
 
     res = await fetchWithTimeout(`${langfuse_host}/api/trpc/projectApiKeys.create`, {
@@ -2618,7 +2629,7 @@ async function create_project(
     if (createApiKeyStatus === "create apiKey failed") {
       trackEvent("both", {
         level: "error",
-        message: "[langfuse] /api/trpc/projectApiKeys.create 返回 create apiKey failed，将使用兜底密钥",
+        message: "创建项目 API 密钥失败，服务端返回创建失败，将使用兜底密钥",
         data: { projectId: project_id, response: JSON.stringify(resJson) },
         metricName: "plugin.langfuse.api.error",
         metricValue: 1,
@@ -2629,7 +2640,7 @@ async function create_project(
     if (!public_key || !secret_key) {
       trackEvent("both", {
         level: "error",
-        message: "[langfuse] /api/trpc/projectApiKeys.create 失败，返回数据异常",
+        message: "创建项目 API 密钥失败，返回数据异常",
         data: { response: JSON.stringify(resJson) },
         metricName: "plugin.langfuse.api.error",
         metricValue: 1,
@@ -2637,16 +2648,16 @@ async function create_project(
       })
       return null
     }
-    trackEvent("log", {
-      level: "info",
-      message: "[langfuse] /api/trpc/projectApiKeys.create 成功",
-      data: { projectId: project_id, publicKey: public_key },
+    trackEvent("metric", {
+      metricName: "plugin.langfuse.api.success",
+      metricValue: 1,
+      tags: { api: "projectApiKeys.create", projectId: project_id },
     })
     return { public_key, secret_key, project_id }
   } catch (e) {
     trackEvent("both", {
       level: "error",
-      message: "[langfuse] 创建project异常",
+      message: "创建项目异常",
       data: { error: String(e), userId: user_id, userName: user_name },
       metricName: "plugin.langfuse.api.error",
       metricValue: 1,
@@ -2695,10 +2706,10 @@ function cachedProjectKeysFromJson(cache: any, user_id: string, user_name: strin
 
 function readCachedProjectKeys(user_id: string, user_name: string, langfuse_host: string): ProjectApiKeys | null {
   if (!existsSync(LANGFUSE_KEY_CACHE_FILE)) {
-    trackEvent("log", {
-      level: "info",
-      message: "[langfuse] 本地项目API密钥缓存不存在，将查询服务端",
-      data: { userId: user_id, userName: user_name, file: LANGFUSE_KEY_CACHE_FILE },
+    trackEvent("metric", {
+      metricName: "plugin.langfuse.cache.status",
+      metricValue: 1,
+      tags: { type: "langfuseKeyCache", status: "missing" },
     })
     return null
   }
@@ -2706,27 +2717,30 @@ function readCachedProjectKeys(user_id: string, user_name: string, langfuse_host
     const cache = JSON.parse(readFileSync(LANGFUSE_KEY_CACHE_FILE, "utf-8"))
     const apiKeys = cachedProjectKeysFromJson(cache, user_id, user_name, langfuse_host)
     if (apiKeys) {
-      trackEvent("log", {
-        level: "info",
-        message: "[langfuse] 命中本地项目API密钥缓存",
-        data: { userId: user_id, userName: user_name, projectId: apiKeys.project_id, file: LANGFUSE_KEY_CACHE_FILE },
+      trackEvent("metric", {
+        metricName: "plugin.langfuse.cache.success",
+        metricValue: 1,
+        tags: { type: "langfuseKeyCache", status: "hit", projectId: apiKeys.project_id },
       })
       return apiKeys
     }
-    trackEvent("log", {
+    trackEvent("both", {
       level: "warn",
-      message: "[langfuse] 本地项目API密钥缓存不匹配，将重新查询",
+      message: "本地项目 API 密钥缓存不匹配，将重新查询",
       data: { userId: user_id, userName: user_name, file: LANGFUSE_KEY_CACHE_FILE },
+      metricName: "plugin.langfuse.cache.error",
+      metricValue: 1,
+      tags: { type: "langfuseKeyCache", action: "read", reason: "mismatch" },
     })
     return null
   } catch (e) {
     trackEvent("both", {
       level: "error",
-      message: "[langfuse] 读取本地项目API密钥缓存异常",
+      message: "读取本地项目 API 密钥缓存异常",
       data: { error: String(e), file: LANGFUSE_KEY_CACHE_FILE },
       metricName: "plugin.langfuse.cache.error",
       metricValue: 1,
-      tags: { type: "langfuseKeyCache", action: "read" },
+      tags: { type: "langfuseKeyCache", action: "read", reason: "exception" },
     })
     return null
   }
@@ -2753,19 +2767,19 @@ function writeCachedProjectKeys(user_id: string, user_name: string, langfuse_hos
     try {
       chmodSync(LANGFUSE_KEY_CACHE_FILE, 0o600)
     } catch {}
-    trackEvent("log", {
-      level: "info",
-      message: "[langfuse] 写入本地项目API密钥缓存成功",
-      data: { userId: user_id, userName: user_name, projectId: apiKeys.project_id, file: LANGFUSE_KEY_CACHE_FILE },
+    trackEvent("metric", {
+      metricName: "plugin.langfuse.cache.success",
+      metricValue: 1,
+      tags: { type: "langfuseKeyCache", action: "write", projectId: apiKeys.project_id },
     })
   } catch (e) {
     trackEvent("both", {
       level: "error",
-      message: "[langfuse] 写入本地项目API密钥缓存异常",
+      message: "写入本地项目 API 密钥缓存异常",
       data: { error: String(e), file: LANGFUSE_KEY_CACHE_FILE },
       metricName: "plugin.langfuse.cache.error",
       metricValue: 1,
-      tags: { type: "langfuseKeyCache", action: "write" },
+      tags: { type: "langfuseKeyCache", action: "write", reason: "exception" },
     })
   }
 }
@@ -2785,7 +2799,7 @@ async function get_apikeys_by_user(
       const text = await readResponseTextSafe(res)
       trackEvent("both", {
         level: "error",
-        message: "[langfuse] 获取密钥信息失败，接口返回非2xx",
+        message: "获取密钥信息失败，接口返回非2xx",
         data: { userId: user_id, userName: user_name, status: res.status, response: text.slice(0, 500) },
         metricName: "plugin.langfuse.api.error",
         metricValue: 1,
@@ -2800,25 +2814,25 @@ async function get_apikeys_by_user(
     const secret_key = json?.secretKey
     const project_id = json?.projectId
     if (lookupStatus === "found project" && public_key && secret_key && project_id) {
-      trackEvent("log", {
-        level: "info",
-        message: "[langfuse] 获取密钥信息成功",
-        data: { userId: user_id, userName: user_name, projectId: project_id },
+      trackEvent("metric", {
+        metricName: "plugin.langfuse.api.success",
+        metricValue: 1,
+        tags: { api: "get_apikeys_by_user", status: "found", projectId: project_id },
       })
       return { status: "found", apiKeys: { public_key, secret_key, project_id } }
     }
     if (lookupStatus === "not found project") {
-      trackEvent("log", {
-        level: "warn",
-        message: "[langfuse] 未查询到用户project",
-        data: { userId: user_id, userName: user_name },
+      trackEvent("metric", {
+        metricName: "plugin.langfuse.api.status",
+        metricValue: 1,
+        tags: { api: "get_apikeys_by_user", status: "not_found" },
       })
       return { status: "not_found" }
     }
     if (lookupStatus === "create apiKey failed") {
       trackEvent("both", {
         level: "error",
-        message: "[langfuse] 查询密钥时服务端创建API Key失败，将使用兜底密钥",
+        message: "查询密钥时服务端创建 API 密钥失败，将使用兜底密钥",
         data: { userId: user_id, userName: user_name, response: JSON.stringify(resJson) },
         metricName: "plugin.langfuse.api.error",
         metricValue: 1,
@@ -2828,7 +2842,7 @@ async function get_apikeys_by_user(
     }
     trackEvent("both", {
       level: "error",
-      message: "[langfuse] 获取密钥信息失败，返回状态或数据异常",
+      message: "获取密钥信息失败，返回状态或数据异常",
       data: { userId: user_id, userName: user_name, lookupStatus, response: JSON.stringify(resJson) },
       metricName: "plugin.langfuse.api.error",
       metricValue: 1,
@@ -2839,7 +2853,7 @@ async function get_apikeys_by_user(
     const isTimeout = e instanceof Error && e.name === "AbortError"
     trackEvent("both", {
       level: "error",
-      message: isTimeout ? "[langfuse] 获取密钥信息超时，将使用兜底密钥" : "[langfuse] 获取密钥信息异常",
+      message: isTimeout ? "获取密钥信息超时，将使用兜底密钥" : "获取密钥信息异常",
       data: { error: String(e), userId: user_id, userName: user_name },
       metricName: "plugin.langfuse.api.error",
       metricValue: 1,
@@ -2861,25 +2875,28 @@ async function get_project_apikeys(
     return lookup.apiKeys
   }
   if (lookup.status !== "not_found") {
-    trackEvent("log", {
+    trackEvent("both", {
       level: "warn",
-      message: "[langfuse] 获取项目API密钥未成功，将使用兜底密钥",
+      message: "获取项目 API 密钥未成功，将使用兜底密钥",
       data: { userId: user_id, userName: user_name, status: lookup.status },
+      metricName: "plugin.langfuse.api.error",
+      metricValue: 1,
+      tags: { api: "get_project_apikeys", reason: lookup.status },
     })
     return null
   }
   if (options?.allowCreateOnNotFound === false) {
-    trackEvent("log", {
-      level: "warn",
-      message: "[langfuse] 服务端返回未查询到project，但已有本地缓存，本次不创建新project",
-      data: { userId: user_id, userName: user_name },
+    trackEvent("metric", {
+      metricName: "plugin.langfuse.api.status",
+      metricValue: 1,
+      tags: { api: "get_project_apikeys", status: "not_found_with_cache" },
     })
     return null
   }
-  trackEvent("log", {
-    level: "warn",
-    message: "[langfuse] 确认未查询到project，将尝试注册新用户并创建project",
-    data: { userId: user_id, userName: user_name },
+  trackEvent("metric", {
+    metricName: "plugin.langfuse.api.status",
+    metricValue: 1,
+    tags: { api: "get_project_apikeys", status: "create_project_required" },
   })
   await signup_user(user_id, user_name, langfuse_host, path_name)
   const session = await get_langfuse_login_token(langfuse_host, user_id)
@@ -2889,16 +2906,22 @@ async function get_project_apikeys(
     if (result?.public_key && result?.secret_key) {
       return result
     }
-    trackEvent("log", {
+    trackEvent("both", {
       level: "warn",
-      message: "[langfuse] 创建project后仍然获取不到API密钥",
+      message: "创建项目后仍然获取不到 API 密钥",
       data: { userId: user_id, userName: user_name },
+      metricName: "plugin.langfuse.api.error",
+      metricValue: 1,
+      tags: { api: "create_project", reason: "missing_api_keys_after_create" },
     })
   } else {
-    trackEvent("log", {
+    trackEvent("both", {
       level: "warn",
-      message: "[langfuse] 创建organization失败，无法继续获取API密钥",
+      message: "创建组织失败，无法继续获取 API 密钥",
       data: { userId: user_id, userName: user_name },
+      metricName: "plugin.langfuse.api.error",
+      metricValue: 1,
+      tags: { api: "create_organization", reason: "missing_org_id" },
     })
   }
   return null
@@ -2924,40 +2947,44 @@ let pluginMetric: ExtendedPluginInput['metric']
  */
 type TrackType = 'log' | 'metric' | 'both'
 
-/**
- * 埋点选项
- */
-interface TrackOptions {
-  /** 日志级别，默认 'info' */
+type LogTrackOptions = {
   level?: 'debug' | 'info' | 'warn' | 'error'
-  /** 日志消息 */
   message: string
-  /** 日志附加数据 */
   data?: Record<string, unknown>
-  /** 指标名称 */
-  metricName?: string
-  /** 指标值 */
-  metricValue?: number
-  /** 指标标签 */
+}
+
+type MetricTrackOptions = {
+  metricName: string
+  metricValue: number
   tags?: Record<string, string | number | boolean>
 }
+
+type BothTrackOptions = LogTrackOptions & MetricTrackOptions
+type TrackOptions = LogTrackOptions | MetricTrackOptions | BothTrackOptions
 
 /**
  * 共用埋点方法
  * @param type - 埋点类型：'log' | 'metric' | 'both'
  * @param options - 埋点选项
  */
+function trackEvent(type: 'log', options: LogTrackOptions): void
+function trackEvent(type: 'metric', options: MetricTrackOptions): void
+function trackEvent(type: 'both', options: BothTrackOptions): void
 function trackEvent(type: TrackType, options: TrackOptions): void {
-  const { level = 'info', message, data, metricName, metricValue, tags } = options
 
   // 记录日志
   if (type === 'log' || type === 'both') {
-    pluginLog?.(level, message, data)
+    const { level = 'info', message, data } = options as LogTrackOptions
+    pluginLog?.(level, message, { ...data, service: "langfuse" })
   }
 
   // 记录指标
-  if ((type === 'metric' || type === 'both') && metricName && metricValue !== undefined) {
-    pluginMetric?.(metricName, metricValue, tags)
+  if (type === 'metric' || type === 'both') {
+    const { metricName, metricValue, tags } = options as MetricTrackOptions
+    pluginMetric?.(metricName, metricValue, {
+      ...tags,
+      service: "langfuse"
+    })
   }
 }
 
@@ -2979,10 +3006,10 @@ export const LangfusePlugin: Plugin = async (ctx) => {
       publicKey = apiKeys.public_key
       secretKey = apiKeys.secret_key
       currentBatchProjectId = apiKeys.project_id
-      trackEvent("log", {
-        level: "info",
-        message: source === "cache" ? "[langfuse] Client initialized with cached keys" : "[langfuse] Client initialized with dynamic keys",
-        data: { userId: user.userId, projectId: project_id },
+      trackEvent("metric", {
+        metricName: "plugin.langfuse.client.init.success",
+        metricValue: 1,
+        tags: { source, projectId: apiKeys.project_id },
       })
     }
     const refreshProjectApiKeys = async (allowCreateOnNotFound: boolean) => {
@@ -2998,10 +3025,13 @@ export const LangfusePlugin: Plugin = async (ctx) => {
         writeCachedProjectKeys(user.userId, user.userName, LANGFUSE_BASE_URL, apiKeys)
         return true
       }
-      trackEvent("log", {
+      trackEvent("both", {
         level: "warn",
-        message: "[langfuse] 获取项目API密钥失败，将使用当前密钥",
+        message: "获取项目 API 密钥失败，将使用当前密钥",
         data: { userId: user.userId, userName: user.userName },
+        metricName: "plugin.langfuse.api.error",
+        metricValue: 1,
+        tags: { api: "get_project_apikeys", reason: "missing_api_keys" },
       })
       return false
     }
@@ -3014,7 +3044,7 @@ export const LangfusePlugin: Plugin = async (ctx) => {
       } catch (e) {
         trackEvent("both", {
           level: "error",
-          message: "[langfuse] 初始化动态密钥异常，将使用兜底密钥",
+          message: "初始化动态密钥异常，将使用兜底密钥",
           data: { error: String(e), userId: user.userId },
           metricName: "plugin.langfuse.api.error",
           metricValue: 1,
@@ -3022,27 +3052,30 @@ export const LangfusePlugin: Plugin = async (ctx) => {
         })
       }
       if (!project_id) {
-        trackEvent("log", {
+        trackEvent("both", {
           level: "warn",
-          message: "[langfuse] 未获取到项目API密钥，将使用兜底密钥",
+          message: "未获取到项目 API 密钥，将使用兜底密钥",
           data: { userId: user.userId, userName: user.userName },
+          metricName: "plugin.langfuse.api.error",
+          metricValue: 1,
+          tags: { api: "get_project_apikeys", reason: "fallback_keys" },
         })
       } else {
-      trackEvent("log", {
-        level: "info",
-        message: "[langfuse] 首次获取项目API密钥成功",
-        data: { userId: user.userId, userName: user.userName, projectId: project_id },
-      })
+        trackEvent("metric", {
+          metricName: "plugin.langfuse.api.success",
+          metricValue: 1,
+          tags: { api: "get_project_apikeys", status: "first_fetch", projectId: project_id },
+        })
       }
     }
   } else {
     trackEvent("both", {
       level: "error",
-      message: "[langfuse] 获取用户信息失败，用户信息为空",
+      message: "获取用户信息失败，用户信息为空",
       data: { userId: user.userId, userName: user.userName },
       metricName: "plugin.langfuse.api.error",
       metricValue: 1,
-      tags: { api: "get_user_info" },
+      tags: { api: "get_user_info", reason: "missing_user_info" },
     })
   }
 
