@@ -10,6 +10,7 @@ import { withStatics } from "@/util/schema"
 import { configEntryNameFromPath } from "./entry-name"
 import { InvalidError } from "./error"
 import * as ConfigMarkdown from "./markdown"
+import { ConfigParse } from "./parse" // testagent_change
 import { ConfigModelID } from "./model-id"
 
 const log = Log.create({ service: "config" })
@@ -43,22 +44,17 @@ export async function load(dir: string) {
       ...md.data,
       template: md.content.trim(),
     }
-    const parsed = Info.zod.safeParse(config)
-    if (parsed.success) {
-      result[config.name] = parsed.data
-      continue
+    // testagent_change start - throw InvalidError so errors propagate to warnings
+    try {
+      // Remove `name` before validation — it's only used as the result key,
+      // not part of the Info schema (which doesn't include `name`).
+      const { name: _name, ...rest } = config
+      result[config.name] = ConfigParse.effectSchema(Info, rest, item)
+    } catch (err) {
+      const issues = err instanceof InvalidError ? err.data.issues : undefined
+      log.error("命令校验失败", { command: item, issues })
+      throw err
     }
-    // testagent_change start - don't throw, just log and skip invalid commands
-    const error = new InvalidError({ path: item, issues: parsed.error.issues }, { cause: parsed.error })
-    log.error("failed to validate command", { command: item, issues: parsed.error.issues })
-    const { Session } = await import("@/session/session")
-    void Bus.publish(Session.Event.Error, { 
-      error: new NamedError.Unknown({ 
-        message: `Command validation failed: ${item}\n${parsed.error.issues.map(i => `- ${i.path.join(".")}: ${i.message}`).join("\n")}` 
-      }).toObject() 
-    })
-    // Skip this command and continue with others
-    continue
     // testagent_change end
   }
   return result

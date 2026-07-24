@@ -482,6 +482,7 @@ export interface Interface {
   readonly testagentDirectories: () => Effect.Effect<string[]> // testagent_change
   readonly waitForDependencies: () => Effect.Effect<void>
   readonly warnings: () => Effect.Effect<Warning[]> // testagent_change
+  readonly reportWarning: (warning: Warning) => Effect.Effect<void> // testagent_change
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/Config") {}
@@ -1089,8 +1090,15 @@ export const layer = Layer.effect(
     })
 
     // testagent_change start
+    const extraWarnings: Warning[] = [] // mutable warnings from other services
+
+    const reportWarning = Effect.fn("Config.reportWarning")(function* (warning: Warning) {
+      extraWarnings.push(warning)
+    })
+
     const warnings = Effect.fn("Config.warnings")(function* () {
-      return yield* InstanceState.use(state, (s) => s.warnings)
+      const stateWarnings = yield* InstanceState.use(state, (s) => s.warnings)
+      return [...stateWarnings, ...extraWarnings]
     })
     // testagent_change end
 
@@ -1172,6 +1180,7 @@ export const layer = Layer.effect(
       testagentDirectories, // testagent_change
       waitForDependencies,
       warnings, // testagent_change
+      reportWarning, // testagent_change
     })
   }),
 )

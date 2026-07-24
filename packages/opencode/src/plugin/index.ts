@@ -177,6 +177,8 @@ export const layer = Layer.effect(
           if (sentErrors.has(message)) return
           sentErrors.add(message)
           bridge.fork(bus.publish(Session.Event.Error, { error: new NamedError.Unknown({ message }).toObject() }))
+          // testagent_change - 同步写入 config 警告，确保轮询能捕获
+          bridge.fork(config.reportWarning({ path: "plugin", message })) // testagent_change
         }
 
         const { Server } = yield* Effect.promise(() => import("../server/server"))

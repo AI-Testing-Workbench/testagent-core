@@ -428,9 +428,9 @@ export const layer = Layer.effect(
         })),
         Effect.catch((error): Effect.Effect<{ client: MCPClient | undefined; status: Status }> => {
           const msg = error instanceof Error ? error.message : String(error)
-          if( key=='testagent-playwright'){
-            notifyVSCode("error", "当前playwright npm源访问失败，请手动修改npm 源或前往【通用设置】修改")
-          }
+          // if( key=='testagent-playwright'){
+          //   notifyVSCode("error", "当前playwright npm源访问失败，请手动修改npm 源或前往【通用设置】修改")
+          // }
           log.error("local mcp startup failed", { key, command: mcp.command, cwd, error: msg })
           return Effect.succeed({ client: undefined, status: { status: "failed", error: msg } })
         }),

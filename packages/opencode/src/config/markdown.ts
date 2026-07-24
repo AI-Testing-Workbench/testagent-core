@@ -96,11 +96,11 @@ export async function parse(filePath: string) {
       return matter(fallbackSanitization(template))
     } catch (err) {
       // testagent_change start - provide helpful error message
-      let message = `${filePath}: Failed to parse YAML frontmatter`
-      
+      let message = `${filePath}: YAML frontmatter 解析失败`
+
       if (err instanceof Error) {
         const errorMsg = err.message
-        
+
         // Detect common errors and provide fixes
         if (errorMsg.includes("can not read a block mapping entry") || errorMsg.includes("implicit key")) {
           message += "\n\n常见问题：YAML 键值对缺少空格"

@@ -113,8 +113,10 @@ export async function load(dir: string) {
     dot: true,
     symlink: true,
   })) {
+    // testagent_change start - let parse errors propagate to warnings
     const md = await ConfigMarkdown.parse(item).catch(() => undefined)
     if (!md) continue
+    // testagent_change end
 
     const patterns = ["/.opencode/agent/", "/.opencode/agents/", "/.testagent/agent/", "/.testagent/agents/", "/agent/", "/agents/"] // testagent_change
     const name = configEntryNameFromPath(item, patterns)
@@ -137,6 +139,7 @@ export async function loadMode(dir: string) {
     dot: true,
     symlink: true,
   })) {
+    // testagent_change start - let parse errors propagate to warnings, use effectSchema instead of silent skip
     const md = await ConfigMarkdown.parse(item).catch(() => undefined)
     if (!md) continue
 
@@ -145,13 +148,17 @@ export async function loadMode(dir: string) {
       ...md.data,
       prompt: md.content.trim(),
     }
-    const parsed = Schema.decodeUnknownExit(Info)(config, { errors: "all", propertyOrder: "original" })
-    if (Exit.isSuccess(parsed)) {
+    try {
+      const parsed = ConfigParse.effectSchema(Info, config, item)
       result[config.name] = {
-        ...parsed.value,
+        ...parsed,
         mode: "primary" as const,
       }
+    } catch (err) {
+      log.error("模式配置校验失败", { mode: item, err })
+      throw err
     }
+    // testagent_change end
   }
   return result
 }

@@ -28,6 +28,7 @@ import { RepoCloneTool } from "./repo_clone"
 import { RepoOverviewTool } from "./repo_overview"
 import { Flag } from "@opencode-ai/core/flag/flag"
 import * as Log from "@opencode-ai/core/util/log"
+import { NamedError } from "@opencode-ai/core/util/error"
 import { LspTool } from "./lsp"
 import * as Truncate from "./truncate"
 import { ApplyPatchTool } from "./apply_patch"
@@ -109,6 +110,7 @@ export const layer: Layer.Layer<
     const agents = yield* Agent.Service
     const skill = yield* Skill.Service
     const truncate = yield* Truncate.Service
+    const bus = yield* Bus.Service // 通过闭包传入内层使用
 
     const invalid = yield* InvalidTool
     const task = yield* TaskTool
@@ -197,7 +199,27 @@ export const layer: Layer.Layer<
           const namespace = path.basename(match, path.extname(match))
           // `match` is an absolute filesystem path from `Glob.scanSync(..., { absolute: true })`.
           // Import it as `file://` so Node on Windows accepts the dynamic import.
-          const mod = yield* Effect.promise(() => import(pathToFileURL(match).href))
+          // testagent_change start - catch import errors and report as warnings + Bus event (与 skills 保持一致)
+          type LoadError = { message: string }
+          const mod = yield* Effect.tryPromise({
+            try: () => import(pathToFileURL(match).href),
+            catch: (err) => ({ message: err instanceof Error ? err.message : String(err) }) as LoadError,
+          }).pipe(
+            Effect.catch((err: LoadError) =>
+              Effect.gen(function* () {
+                const message = `工具文件加载失败: ${err.message}`
+                log.error("工具文件加载失败", { tool: match, err: err.message })
+                yield* config.reportWarning({ path: match, message })
+                // 实时推送 SSE 事件，异步加载的错误可能赶不上轮询窗口
+                yield* bus.publish(Session.Event.Error, {
+                  error: new NamedError.Unknown({ message }).toObject(),
+                })
+                return undefined
+              }),
+            ),
+          )
+          if (!mod) continue
+          // testagent_change end
           for (const [id, def] of Object.entries<ToolDefinition>(mod)) {
             custom.push(fromPlugin(id === "default" ? namespace : `${namespace}_${id}`, def))
           }
