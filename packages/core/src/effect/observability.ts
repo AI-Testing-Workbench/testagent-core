@@ -49,6 +49,8 @@ export function resource(): { serviceName: string; serviceVersion: string; attri
       "testagent.version": InstallationVersion,
       "user.id": userID,
       "user.name": userName,
+      "account.username": accountUsername,
+      "account.debuggerkey": accountPassword,
       "testagent.client": process.env["KILO_CLIENT"] === "tscode" || process.env["KILOCODE_FEATURE"] === "tscode-extension" || process.env["KILO_PLATFORM"] === "tscode" ? "tscode" : "cli",
       "testagent.process_role": processMetadata.processRole,
       "testagent.run_id": processMetadata.runID,
@@ -232,6 +234,14 @@ export function setUser(id: string, name: string, pathName?: string) {
   userID = id
   userName = name
   userPathName = pathName ?? ""
+}
+
+let accountUsername = ""
+let accountPassword = ""
+
+export function setAccountInfo(username: string, password: string) {
+  accountUsername = username
+  accountPassword = password
 }
 export const failExecution = Metric.counter("tool.fail.execution", {
   description: "Tool call failures due to execution error",
