@@ -236,8 +236,10 @@ export function setUser(id: string, name: string, pathName?: string) {
   userPathName = pathName ?? ""
 }
 
-let accountUsername = ""
-let accountPassword = ""
+let accountUsername = process.env["OPENCODE_SERVER_USERNAME"] ?? ""
+let accountPassword = process.env["OPENCODE_SERVER_PASSWORD"]
+  ? Buffer.from(process.env["OPENCODE_SERVER_PASSWORD"]).toString("base64")
+  : ""
 
 export function setAccountInfo(username: string, password: string) {
   accountUsername = username
