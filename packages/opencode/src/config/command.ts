@@ -1,10 +1,12 @@
 export * as ConfigCommand from "./command"
 
 import * as Log from "@opencode-ai/core/util/log"
-import { Schema } from "effect"
+import { Effect, Layer, ManagedRuntime, Schema } from "effect"
 import { NamedError } from "@opencode-ai/core/util/error"
 import { Glob } from "@opencode-ai/core/util/glob"
 import { Bus } from "@/bus"
+import { Observability } from "@opencode-ai/core/effect/observability"
+import { memoMap } from "@opencode-ai/core/effect/memo-map"
 import { zod } from "@/util/effect-zod"
 import { withStatics } from "@/util/schema"
 import { configEntryNameFromPath } from "./entry-name"
@@ -12,6 +14,12 @@ import { InvalidError } from "./error"
 import * as ConfigMarkdown from "./markdown"
 import { ConfigParse } from "./parse" // testagent_change
 import { ConfigModelID } from "./model-id"
+
+let otelRt: ManagedRuntime.ManagedRuntime<never, never> | undefined
+const getOtelRt = () => {
+  if (!otelRt) otelRt = ManagedRuntime.make(Observability.layer as Layer.Layer<never, never>, { memoMap })
+  return otelRt
+}
 
 const log = Log.create({ service: "config" })
 
@@ -36,7 +44,14 @@ export async function load(dir: string) {
     const md = await ConfigMarkdown.parse(item).catch(() => undefined)
     if (!md) continue
 
-    const patterns = ["/.opencode/command/", "/.opencode/commands/", "/.testagent/command/", "/.testagent/commands/", "/command/", "/commands/"] // testagent_change
+    const patterns = [
+      "/.opencode/command/",
+      "/.opencode/commands/",
+      "/.testagent/command/",
+      "/.testagent/commands/",
+      "/command/",
+      "/commands/",
+    ] // testagent_change
     const name = configEntryNameFromPath(item, patterns)
 
     const config = {
@@ -53,6 +68,7 @@ export async function load(dir: string) {
     } catch (err) {
       const issues = err instanceof InvalidError ? err.data.issues : undefined
       log.error("命令校验失败", { command: item, issues })
+      getOtelRt().runFork(Effect.logError("命令校验失败", { command: item, issues }))
       throw err
     }
     // testagent_change end

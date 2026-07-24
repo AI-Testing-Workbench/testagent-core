@@ -1,15 +1,23 @@
 export * as ConfigAgent from "./agent"
 
-import { Exit, Schema, SchemaGetter } from "effect"
+import { Effect, Exit, Layer, ManagedRuntime, Schema, SchemaGetter } from "effect"
 import { zod } from "@/util/effect-zod"
 import { PositiveInt, withStatics } from "@/util/schema"
 import * as Log from "@opencode-ai/core/util/log"
 import { Glob } from "@opencode-ai/core/util/glob"
+import { Observability } from "@opencode-ai/core/effect/observability"
+import { memoMap } from "@opencode-ai/core/effect/memo-map"
 import { configEntryNameFromPath } from "./entry-name"
 import * as ConfigMarkdown from "./markdown"
 import { ConfigModelID } from "./model-id"
 import { ConfigParse } from "./parse"
 import { ConfigPermission } from "./permission"
+
+let otelRt: ManagedRuntime.ManagedRuntime<never, never> | undefined
+const getOtelRt = () => {
+  if (!otelRt) otelRt = ManagedRuntime.make(Observability.layer as Layer.Layer<never, never>, { memoMap })
+  return otelRt
+}
 
 const log = Log.create({ service: "config" })
 
@@ -31,7 +39,9 @@ const AgentSchema = Schema.StructWithRest(
       description: "@deprecated Use 'permission' field instead",
     }),
     disable: Schema.optional(Schema.Boolean),
-    description: Schema.optional(Schema.NullOr(Schema.String)).annotate({ description: "Description of when to use the agent" }),
+    description: Schema.optional(Schema.NullOr(Schema.String)).annotate({
+      description: "Description of when to use the agent",
+    }),
     mode: Schema.optional(Schema.Literals(["subagent", "primary", "all"])),
     hidden: Schema.optional(Schema.Boolean).annotate({
       description: "Hide this subagent from the @ autocomplete menu (default: false, only applies to mode: subagent)",
@@ -118,7 +128,14 @@ export async function load(dir: string) {
     if (!md) continue
     // testagent_change end
 
-    const patterns = ["/.opencode/agent/", "/.opencode/agents/", "/.testagent/agent/", "/.testagent/agents/", "/agent/", "/agents/"] // testagent_change
+    const patterns = [
+      "/.opencode/agent/",
+      "/.opencode/agents/",
+      "/.testagent/agent/",
+      "/.testagent/agents/",
+      "/agent/",
+      "/agents/",
+    ] // testagent_change
     const name = configEntryNameFromPath(item, patterns)
 
     const config = {
@@ -156,6 +173,7 @@ export async function loadMode(dir: string) {
       }
     } catch (err) {
       log.error("模式配置校验失败", { mode: item, err })
+      getOtelRt().runFork(Effect.logError("模式配置校验失败", { mode: item, err }))
       throw err
     }
     // testagent_change end

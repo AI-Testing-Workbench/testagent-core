@@ -370,7 +370,6 @@ export const Info = Schema.Struct({
       reserved: Schema.optional(NonNegativeInt).annotate({
         description: "Token buffer for compaction. Leaves enough window to avoid overflow during compaction.",
       }),
-
     }),
   ),
   experimental: Schema.optional(
@@ -674,7 +673,7 @@ export const layer = Layer.effect(
           loadFile(filepath).pipe(
             Effect.catchDefect((err) => {
               caughtWarning(warnings, filepath, err)
-              return Effect.succeed({} as Info)
+              return Effect.logError("配置文件加载失败", { filepath, err }).pipe(Effect.as({} as Info))
             }),
           )
 
@@ -683,7 +682,7 @@ export const layer = Layer.effect(
             Effect.catchDefect((err) => {
               const source = "path" in opts ? opts.path : opts.source
               caughtWarning(warnings, source, err)
-              return Effect.succeed({} as Info)
+              return Effect.logError("配置内容加载失败", { source, err }).pipe(Effect.as({} as Info))
             }),
           )
         // testagent_change end
@@ -724,13 +723,14 @@ export const layer = Layer.effect(
           if (!next.mcp) return
           if (!result.mcp_origins) result.mcp_origins = {}
           if (!result.mcp_scopes) result.mcp_scopes = {}
-          const scope = source.startsWith("http://") || source.startsWith("https://")
-            ? "global"
-            : source === "OPENCODE_CONFIG_CONTENT"
-              ? "local"
-              : containsPath(source, ctx)
+          const scope =
+            source.startsWith("http://") || source.startsWith("https://")
+              ? "global"
+              : source === "OPENCODE_CONFIG_CONTENT"
                 ? "local"
-                : "global"
+                : containsPath(source, ctx)
+                  ? "local"
+                  : "global"
           for (const key of Object.keys(next.mcp)) {
             result.mcp_origins[key] = source
             result.mcp_scopes[key] = scope
@@ -870,30 +870,39 @@ export const layer = Layer.effect(
           deps.push(dep)
 
           // testagent_change start - capture command/agent/plugin load errors as warnings
-          result.command = mergeDeep(result.command ?? {}, yield* Effect.promise(() => ConfigCommand.load(dir)).pipe(
-            Effect.catchDefect((err) => {
-              caughtWarning(warnings, path.join(dir, "commands"), err)
-              return Effect.succeed({} as Record<string, unknown>)
-            }),
-          ))
-          result.agent = mergeDeep(result.agent ?? {}, yield* Effect.promise(() => ConfigAgent.load(dir)).pipe(
-            Effect.catchDefect((err) => {
-              caughtWarning(warnings, path.join(dir, "agents"), err)
-              return Effect.succeed({} as Record<string, unknown>)
-            }),
-          ))
-          result.agent = mergeDeep(result.agent ?? {}, yield* Effect.promise(() => ConfigAgent.loadMode(dir)).pipe(
-            Effect.catchDefect((err) => {
-              caughtWarning(warnings, path.join(dir, "modes"), err)
-              return Effect.succeed({} as Record<string, unknown>)
-            }),
-          ))
+          result.command = mergeDeep(
+            result.command ?? {},
+            yield* Effect.promise(() => ConfigCommand.load(dir)).pipe(
+              Effect.catchDefect((err) => {
+                caughtWarning(warnings, path.join(dir, "commands"), err)
+                return Effect.logError("命令配置加载失败", { dir, err }).pipe(Effect.as({} as Record<string, unknown>))
+              }),
+            ),
+          )
+          result.agent = mergeDeep(
+            result.agent ?? {},
+            yield* Effect.promise(() => ConfigAgent.load(dir)).pipe(
+              Effect.catchDefect((err) => {
+                caughtWarning(warnings, path.join(dir, "agents"), err)
+                return Effect.logError("代理配置加载失败", { dir, err }).pipe(Effect.as({} as Record<string, unknown>))
+              }),
+            ),
+          )
+          result.agent = mergeDeep(
+            result.agent ?? {},
+            yield* Effect.promise(() => ConfigAgent.loadMode(dir)).pipe(
+              Effect.catchDefect((err) => {
+                caughtWarning(warnings, path.join(dir, "modes"), err)
+                return Effect.logError("模式配置加载失败", { dir, err }).pipe(Effect.as({} as Record<string, unknown>))
+              }),
+            ),
+          )
           // Auto-discovered plugins under `.opencode/plugin(s)` are already local files, so ConfigPlugin.load
           // returns normalized Specs and we only need to attach origin metadata here.
           const list = yield* Effect.promise(() => ConfigPlugin.load(dir)).pipe(
             Effect.catchDefect((err) => {
               caughtWarning(warnings, path.join(dir, "plugins"), err)
-              return Effect.succeed([] as ConfigPlugin.Spec[])
+              return Effect.logError("插件配置加载失败", { dir, err }).pipe(Effect.as([] as ConfigPlugin.Spec[]))
             }),
           )
           yield* mergePluginOrigins(dir, list)

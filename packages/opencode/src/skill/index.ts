@@ -97,7 +97,7 @@ const add = Effect.fnUntraced(function* (state: State, match: string, bus: Bus.I
         yield* config.reportWarning({ path: match, message })
         const { Session } = yield* Effect.promise(() => import("@/session/session"))
         yield* bus.publish(Session.Event.Error, { error: new NamedError.Unknown({ message }).toObject() })
-        log.error("技能加载失败", { skill: match, err })
+        yield* Effect.logError("技能加载失败", { skill: match, err })
         // testagent_change end
         return undefined
       }),
@@ -109,11 +109,11 @@ const add = Effect.fnUntraced(function* (state: State, match: string, bus: Bus.I
   // testagent_change start - publish Bus event and report warning on validation failure
   const parsed = z.object({ name: z.string(), description: z.string().optional() }).safeParse(md.data)
   if (!parsed.success) {
-    const message = `技能文件格式校验失败: ${match}\n${parsed.error.issues.map(i => `- ${i.path.join(".")}: ${i.message}`).join("\n")}`
+    const message = `技能文件格式校验失败: ${match}\n${parsed.error.issues.map((i) => `- ${i.path.join(".")}: ${i.message}`).join("\n")}`
     yield* config.reportWarning({ path: match, message })
     const { Session } = yield* Effect.promise(() => import("@/session/session"))
     yield* bus.publish(Session.Event.Error, { error: new NamedError.Unknown({ message }).toObject() })
-    log.error("技能格式校验失败", { skill: match, issues: parsed.error.issues })
+    yield* Effect.logError("技能格式校验失败", { skill: match, issues: parsed.error.issues })
     return
   }
   // testagent_change end
@@ -235,7 +235,12 @@ const discoverSkills = Effect.fnUntraced(function* (
 })
 
 // testagent_change start - add config parameter for reportWarning
-const loadSkills = Effect.fnUntraced(function* (state: State, discovered: DiscoveryState, bus: Bus.Interface, config: Config.Interface) {
+const loadSkills = Effect.fnUntraced(function* (
+  state: State,
+  discovered: DiscoveryState,
+  bus: Bus.Interface,
+  config: Config.Interface,
+) {
   yield* Effect.forEach(discovered.matches, (match) => add(state, match, bus, config), {
     concurrency: "unbounded",
     discard: true,

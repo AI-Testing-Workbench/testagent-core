@@ -208,7 +208,7 @@ export const layer: Layer.Layer<
             Effect.catch((err: LoadError) =>
               Effect.gen(function* () {
                 const message = `工具文件加载失败: ${err.message}`
-                log.error("工具文件加载失败", { tool: match, err: err.message })
+                yield* Effect.logError("工具文件加载失败", { tool: match, err: err.message })
                 yield* config.reportWarning({ path: match, message })
                 // 实时推送 SSE 事件，异步加载的错误可能赶不上轮询窗口
                 yield* bus.publish(Session.Event.Error, {
