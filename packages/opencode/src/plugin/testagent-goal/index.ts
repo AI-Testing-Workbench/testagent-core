@@ -43,13 +43,13 @@ const DEFAULT_MAX_AUTO_TURNS = 25
 const DEFAULT_CONTINUE_INTERVAL_SECONDS = 3
 const DEFAULT_MAX_PROMPT_FAILURES = 3
 const DEFAULT_COMMAND_NAME = "goal"
-const GOAL_SYSTEM_MARKER = "OpenCode goal mode"
+const GOAL_SYSTEM_MARKER = "TestAgent goal mode"
 const GOAL_TOOL_IDS = ["get_goal", "create_goal", "set_goal", "update_goal", "update_goal_status", "clear_goal"]
 const activeContinuations = new Set<string>()
 const commandSessions = new Set<string>()
 
 function goalCommandTemplate(commandName: string) {
-  return `OpenCode goal mode command "/${commandName}" was invoked.
+  return `TestAgent goal mode command "/${commandName}" was invoked.
 
 Arguments:
 <goal_command_arguments>
@@ -267,7 +267,7 @@ export const GoalPlugin: Plugin = async ({ client }, options?: Options) => {
         },
       },
       update_goal_status: {
-        description: "Pause or resume the current OpenCode goal when the user explicitly asks to pause or resume it.",
+        description: "Pause or resume the current TestAgent goal when the user explicitly asks to pause or resume it.",
         args: {
           status: z.enum(["active", "paused"]).describe("active resumes a goal; paused pauses it without clearing it."),
         },
@@ -278,7 +278,7 @@ export const GoalPlugin: Plugin = async ({ client }, options?: Options) => {
         },
       },
       clear_goal: {
-        description: "Clear the current OpenCode goal for this session when the user explicitly asks to clear it.",
+        description: "Clear the current TestAgent goal for this session when the user explicitly asks to clear it.",
         args: {},
         async execute(_args, context) {
           return JSON.stringify({ cleared: await clearGoal(context.sessionID) }, null, 2)
