@@ -14,7 +14,7 @@ import { ConfigMCP } from "../config/mcp"
 import * as Log from "@opencode-ai/core/util/log"
 import { NamedError } from "@opencode-ai/core/util/error"
 import z from "zod/v4"
-import {User} from "@/testagent/user"
+import { User } from "@/testagent/user"
 import { Installation } from "../installation"
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
 import { withTimeout } from "@/util/timeout"
@@ -26,15 +26,24 @@ import { BusEvent } from "../bus/bus-event"
 import { Bus } from "@/bus"
 import { TuiEvent } from "@/cli/cmd/tui/event"
 import open from "open"
-import { Effect, Exit, Layer, Option, Context, Schema, Stream } from "effect"
+import { Effect, Exit, Layer, ManagedRuntime, Option, Context, Schema, Stream } from "effect"
 import { EffectBridge } from "@/effect/bridge"
 import { InstanceState } from "@/effect/instance-state"
+import { Observability } from "@opencode-ai/core/effect/observability"
+import { memoMap } from "@opencode-ai/core/effect/memo-map"
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 import { zod as effectZod } from "@/util/effect-zod"
 import { withStatics } from "@/util/schema"
 
 const log = Log.create({ service: "mcp" })
+
+let otelRt: ManagedRuntime.ManagedRuntime<never, never> | undefined
+const getOtelRt = () => {
+  if (!otelRt) otelRt = ManagedRuntime.make(Observability.layer as Layer.Layer<never, never>, { memoMap })
+  return otelRt
+}
+
 const DEFAULT_TIMEOUT = 30_000
 const toTimeoutMs = (value: number) => value * 1000
 const mapTimeoutMs = (value: number | undefined) => (value == null ? undefined : toTimeoutMs(value))
@@ -160,10 +169,13 @@ function defs(key: string, client: MCPClient, timeout?: number) {
     catch: (err) => (err instanceof Error ? err : new Error(String(err))),
   }).pipe(
     Effect.map((result) => result.tools),
-    Effect.catch((err) => {
-      log.error("failed to get tools from client", { key, error: err })
-      return Effect.succeed(undefined)
-    }),
+    Effect.catch((err) =>
+      Effect.gen(function* () {
+        log.error("failed to get tools from client", { key, error: err })
+        yield* Effect.logError("failed to get tools from client", { key, error: err })
+        return undefined
+      }),
+    ),
   )
 }
 
@@ -177,6 +189,7 @@ function fetchFromClient<T extends { name: string }>(
     try: () => listFn(client),
     catch: (e: any) => {
       log.error(`failed to get ${label}`, { clientName, error: e.message })
+      getOtelRt().runFork(Effect.logError(`failed to get ${label}`, { clientName, error: e.message }))
       return e
     },
   }).pipe(
@@ -313,9 +326,12 @@ export const layer = Layer.effect(
 
       // testagent_change - inject userId from external-user.json into MCP request headers
       const userData = User.get()
-      let uid = userData.sapId;
-      let token = userData.token;
-      const headers = { ...(uid && token ? { ...mcp.headers, "sap_id": uid, "yst_id_token": token } : mcp.headers), "User-Agent": "testagent" }
+      let uid = userData.sapId
+      let token = userData.token
+      const headers = {
+        ...(uid && token ? { ...mcp.headers, sap_id: uid, yst_id_token: token } : mcp.headers),
+        "User-Agent": "testagent",
+      }
 
       const transports: Array<{ name: string; transport: TransportWithAuth }> = [
         {
@@ -426,14 +442,18 @@ export const layer = Layer.effect(
           client,
           status: { status: "connected" },
         })),
-        Effect.catch((error): Effect.Effect<{ client: MCPClient | undefined; status: Status }> => {
-          const msg = error instanceof Error ? error.message : String(error)
-          // if( key=='testagent-playwright'){
-          //   notifyVSCode("error", "当前playwright npm源访问失败，请手动修改npm 源或前往【通用设置】修改")
-          // }
-          log.error("local mcp startup failed", { key, command: mcp.command, cwd, error: msg })
-          return Effect.succeed({ client: undefined, status: { status: "failed", error: msg } })
-        }),
+        Effect.catch(
+          (error): Effect.Effect<{ client: MCPClient | undefined; status: Status }> =>
+            Effect.gen(function* () {
+              const msg = error instanceof Error ? error.message : String(error)
+              // if( key=='testagent-playwright'){
+              //   notifyVSCode("error", "当前playwright npm源访问失败，请手动修改npm 源或前往【通用设置】修改")
+              // }
+              log.error("local mcp startup failed", { key, command: mcp.command, cwd, error: msg })
+              yield* Effect.logError("local mcp startup failed", { key, command: mcp.command, cwd, error: msg })
+              return { client: undefined, status: { status: "failed", error: msg } }
+            }),
+        ),
       )
     })
 
@@ -520,6 +540,7 @@ export const layer = Layer.effect(
             Effect.gen(function* () {
               if (!isMcpConfigured(mcp)) {
                 log.error("Ignoring MCP config entry without type", { key })
+                yield* Effect.logError("Ignoring MCP config entry without type", { key })
                 return
               }
 
@@ -635,6 +656,7 @@ export const layer = Layer.effect(
       const mcp = yield* getMcpConfig(name)
       if (!mcp) {
         log.error("MCP config not found or invalid", { name })
+        yield* Effect.logError("MCP config not found or invalid", { name })
         return
       }
       yield* createAndStore(name, { ...mcp, enabled: true })
@@ -653,7 +675,8 @@ export const layer = Layer.effect(
 
       const cfg = yield* cfgSvc.get()
       const config = cfg.mcp ?? {}
-      const defaultTimeout = cfg.experimental?.mcp_timeout != null ? toTimeoutMs(cfg.experimental.mcp_timeout) : undefined
+      const defaultTimeout =
+        cfg.experimental?.mcp_timeout != null ? toTimeoutMs(cfg.experimental.mcp_timeout) : undefined
 
       const connectedClients = Object.entries(s.clients).filter(
         ([clientName]) => s.status[clientName]?.status === "connected",
@@ -723,6 +746,7 @@ export const layer = Layer.effect(
         try: () => fn(client),
         catch: (e: any) => {
           log.error(`failed to ${label}`, { clientName, ...meta, error: e?.message })
+          getOtelRt().runFork(Effect.logError(`failed to ${label}`, { clientName, ...meta, error: e?.message }))
           return e
         },
       }).pipe(
@@ -797,7 +821,10 @@ export const layer = Layer.effect(
         auth,
       )
 
-      const transport = new StreamableHTTPClientTransport(url, { authProvider, requestInit: { headers: { "User-Agent": "testagent" } } })
+      const transport = new StreamableHTTPClientTransport(url, {
+        authProvider,
+        requestInit: { headers: { "User-Agent": "testagent" } },
+      })
 
       return yield* Effect.tryPromise({
         try: () => {
@@ -840,7 +867,11 @@ export const layer = Layer.effect(
         return yield* storeClient(s, mcpName, client, listed, timeoutMs)
       }
 
-      yield* Effect.logInfo("opening browser for oauth", { mcpName, url: result.authorizationUrl, state: result.oauthState })
+      yield* Effect.logInfo("opening browser for oauth", {
+        mcpName,
+        url: result.authorizationUrl,
+        state: result.oauthState,
+      })
 
       const callbackPromise = McpOAuthCallback.waitForCallback(result.oauthState, mcpName)
 
@@ -885,6 +916,7 @@ export const layer = Layer.effect(
         try: () => transport.finishAuth(authorizationCode).then(() => true as const),
         catch: (error) => {
           log.error("failed to finish oauth", { mcpName, error })
+          getOtelRt().runFork(Effect.logError("failed to finish oauth", { mcpName, error }))
           return error
         },
       }).pipe(Effect.option)
@@ -939,9 +971,9 @@ export const layer = Layer.effect(
       const cfg = yield* cfgSvc.get()
       const config = cfg.mcp ?? {}
 
-      yield* Effect.logInfo("config reloaded from disk", { 
+      yield* Effect.logInfo("config reloaded from disk", {
         serverCount: Object.keys(config).length,
-        servers: Object.keys(config)
+        servers: Object.keys(config),
       })
 
       // 3. Get current state
