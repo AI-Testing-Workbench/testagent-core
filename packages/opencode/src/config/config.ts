@@ -1099,6 +1099,10 @@ export const layer = Layer.effect(
     })
 
     // testagent_change start
+    // extraWarnings 是 skill/tool/plugin 加载失败时 report 的「一次性」警告。
+    // 采用「读后清空」策略：warnings() 返回后清空 extraWarnings，
+    // 这样 skill 重新加载成功（不再 report）后，下次 warnings() 返回空列表，
+    // banner 不会残留旧的 skill 警告。
     const extraWarnings: Warning[] = [] // mutable warnings from other services
 
     const reportWarning = Effect.fn("Config.reportWarning")(function* (warning: Warning) {
@@ -1107,7 +1111,9 @@ export const layer = Layer.effect(
 
     const warnings = Effect.fn("Config.warnings")(function* () {
       const stateWarnings = yield* InstanceState.use(state, (s) => s.warnings)
-      return [...stateWarnings, ...extraWarnings]
+      const snapshot = [...stateWarnings, ...extraWarnings]
+      extraWarnings.length = 0 // 读后清空：已返回给前端，使命完成
+      return snapshot
     })
     // testagent_change end
 
