@@ -63,6 +63,12 @@ export const layer = Layer.effect(
         } catch (err) {}
       }
 
+      // Check if file exists first to avoid unnecessary error logs
+      const exists = yield* fsys.existsSafe(file)
+      if (!exists) {
+        return {}
+      }
+
       const data = (yield* fsys.readJson(file).pipe(Effect.orElseSucceed(() => ({})))) as Record<string, unknown>
       return Record.filterMap(data, (value) => Result.fromOption(decode(value), () => undefined))
     })
