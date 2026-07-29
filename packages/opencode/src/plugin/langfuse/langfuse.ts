@@ -24,11 +24,16 @@ import { homedir } from "os"
 const LANGFUSE_BASE_URL = decodeURIComponent(
   atob("aHR0cCUzQSUyRiUyRnRlc3RodWItYWdlbnQtdHJhY2UucGFhc3VhdC5jbWJjaGluYS5jbg=="),
 )
+const ENABLE_FINAL_BATCH_UPLOAD = false
 const LANGFUSE_FINAL_BATCH_UPLOAD_PATH = "/api/trpc/batchTrace.save"
 const VERSION = "1.0.2"
 const LANGFUSE_FETCH_TIMEOUT_MS = 5000
+const LANGFUSE_FINAL_BATCH_UPLOAD_TIMEOUT_MS = 30000
 const LANGFUSE_KEY_LOOKUP_TIMEOUT_MS = 15000
-const LANGFUSE_KEY_CACHE_FILE = join(homedir(), ".local", "share", "testagent", "langfuse-project-keys.json")
+const TESTAGENT_DATA_DIR = join(homedir(), ".local", "share", "testagent")
+const LANGFUSE_KEY_CACHE_FILE = join(TESTAGENT_DATA_DIR, "langfuse-project-keys.json")
+const MAX_INGESTION_BATCH_BYTES = 1024 * 1024
+const MAX_OBSERVED_TEXT_LENGTH = 10000
 
 let baseMetadata: () => Record<string, string>
 
@@ -184,14 +189,16 @@ let currentTraceId: string | null = null
 // 已经发起过 trace-create 的 trace，避免多轮 chat.message 重复创建同一条 trace。
 const uploadedTraceIds = new Set<string>()
 
-// 单节点即时上传前先写入本地 outbox，成功后再删除，避免进程崩溃导致事件丢失。
+// 数据上报失败后写入本地 outbox，后续后台重试，避免正常成功路径频繁读写本地文件。
 const failedIngestionEvents: any[] = []
 let retryingFailedIngestionEvents = false
-let failedIngestionQueueFile = join(homedir(), ".testagent", "langfuse-ingestion-queue.json")
+let failedIngestionQueueFile = join(TESTAGENT_DATA_DIR, "langfuse-ingestion-queue.json")
 let failedIngestionQueueLoaded = false
 const MAX_FAILED_INGESTION_EVENTS = 5000
 let handlersInstalled = false // testagent_change
 const BACKGROUND_INGESTION_BATCH_SIZE = 50
+const FAILED_INGESTION_RETRY_BATCH_SIZE = 50
+const FAILED_INGESTION_RETRY_DELAY_MS = 1000
 const MAX_BACKGROUND_INGESTION_EVENTS = 10000
 let backgroundIngestionEvents: any[] = []
 let backgroundIngestionDrainPromise: Promise<void> | null = null
@@ -200,9 +207,9 @@ let backgroundIngestionDrainScheduled = false
 // 最终完整 trace 汇总上报到后端批处理接口，用于兼容 Kafka 消费完整数据的逻辑。
 const finalBatchUploads: any[] = []
 let retryingFinalBatchUploads = false
-let finalBatchUploadQueueFile = join(homedir(), ".testagent", "langfuse-final-batch-upload-queue.json")
+let finalBatchUploadQueueFile = join(TESTAGENT_DATA_DIR, "langfuse-final-batch-upload-queue.json")
 let finalBatchUploadQueueLoaded = false
-const MAX_FINAL_BATCH_UPLOADS = 500
+const MAX_FINAL_BATCH_UPLOADS = 1000
 const BACKGROUND_FINAL_BATCH_UPLOAD_SIZE = 100
 const MAX_BACKGROUND_FINAL_BATCH_UPLOADS = 1000
 let backgroundFinalBatchUploads: any[] = []
@@ -633,14 +640,57 @@ function withEventBodyTags(event: any) {
   }
 }
 
+function jsonByteLength(value: unknown): number {
+  return Buffer.byteLength(JSON.stringify(value), "utf-8")
+}
+
+function splitIngestionEventsBySize(events: any[], maxBytes: number): any[][] {
+  const chunks: any[][] = []
+  let current: any[] = []
+  let currentBytes = jsonByteLength({ batch: [] })
+
+  for (const event of events) {
+    const eventBytes = jsonByteLength(event) + 1
+    if (current.length > 0 && currentBytes + eventBytes > maxBytes) {
+      chunks.push(current)
+      current = []
+      currentBytes = jsonByteLength({ batch: [] })
+    }
+
+    current.push(event)
+    currentBytes += eventBytes
+  }
+
+  if (current.length > 0) chunks.push(current)
+  return chunks
+}
+
 async function uploadToIngestion(events: any[]) {
   if (events.length === 0) return { successes: [], errors: [] }
 
   const taggedEvents = events.map(withEventBodyTags)
+  const chunks = splitIngestionEventsBySize(taggedEvents, MAX_INGESTION_BATCH_BYTES)
+  if (chunks.length > 1) {
+    const successes: any[] = []
+    const errors: any[] = []
+    for (const chunk of chunks) {
+      const result = await uploadToIngestionChunk(chunk)
+      successes.push(...(Array.isArray(result.successes) ? result.successes : []))
+      errors.push(...(Array.isArray(result.errors) ? result.errors : []))
+    }
+    return { successes, errors }
+  }
+
+  return uploadToIngestionChunk(taggedEvents)
+}
+
+async function uploadToIngestionChunk(taggedEvents: any[]) {
+  if (taggedEvents.length === 0) return { successes: [], errors: [] }
+
   const body = JSON.stringify({ batch: taggedEvents })
   const credentials = btoa(`${publicKey}:${secretKey}`)
-  const traceId = events?.[0]?.body?.traceId || events?.[0]?.body?.id
-  const projectId = events?.[0]?.body?.metadata?.projectId
+  const traceId = taggedEvents?.[0]?.body?.traceId || taggedEvents?.[0]?.body?.id
+  const projectId = taggedEvents?.[0]?.body?.metadata?.projectId
   try {
     const res = await fetchWithTimeout(`${LANGFUSE_BASE_URL}/api/public/ingestion`, {
       method: "POST",
@@ -657,7 +707,7 @@ async function uploadToIngestion(events: any[]) {
         metricName: "plugin.langfuse.ingestion.success",
         metricValue: 1,
         tags: {
-          eventCount: String(events.length),
+          eventCount: String(taggedEvents.length),
           ...(traceId ? { traceId } : {}),
           ...(projectId ? { projectId } : {}),
         },
@@ -668,10 +718,10 @@ async function uploadToIngestion(events: any[]) {
     const text = await readResponseTextSafe(res)
     trackEvent("both", {
       level: "error",
-      message: "数据上报失败",
+      message: res.status === 413 ? "数据上报失败，请求体过大" : "数据上报失败",
       data: {
         status: res.status,
-        eventCount: events.length,
+        eventCount: taggedEvents.length,
         traceId,
         projectId,
       },
@@ -679,10 +729,11 @@ async function uploadToIngestion(events: any[]) {
       metricValue: 1,
       tags: {
         status: String(res.status),
-        eventCount: String(events.length),
+        eventCount: String(taggedEvents.length),
+        reason: res.status === 413 ? "payload_too_large" : "request_failed",
       },
     })
-    return { successes: [], errors: [{ id: "batch", status: res.status, error: text }] }
+    return { successes: [], errors: taggedEvents.map((event) => ({ id: event.id, status: res.status, error: text })) }
   } catch (e) {
     trackEvent("both", {
       level: "error",
@@ -698,11 +749,11 @@ async function uploadToIngestion(events: any[]) {
         error: "exception",
       },
     })
-    return { successes: [], errors: [{ id: "batch", status: 500, error: String(e) }] }
+    return { successes: [], errors: taggedEvents.map((event) => ({ id: event.id, status: 500, error: String(e) })) }
   }
 }
 
-async function postJsonWithAuth(path: string, payload: any) {
+async function postJsonWithAuth(path: string, payload: any, timeoutMs = LANGFUSE_FETCH_TIMEOUT_MS) {
   const credentials = btoa(`${publicKey}:${secretKey}`)
   try {
     const res = await fetchWithTimeout(`${LANGFUSE_BASE_URL}${path}`, {
@@ -713,7 +764,7 @@ async function postJsonWithAuth(path: string, payload: any) {
         Authorization: `Basic ${credentials}`,
       },
       body: JSON.stringify(payload),
-    })
+    }, timeoutMs)
 
     if (res.ok) {
       return { ok: true, body: null }
@@ -722,7 +773,8 @@ async function postJsonWithAuth(path: string, payload: any) {
     const text = await readResponseTextSafe(res)
     return { ok: false, status: res.status, error: text }
   } catch (e) {
-    return { ok: false, status: 500, error: String(e) }
+    const isTimeout = e instanceof Error && e.name === "AbortError"
+    return { ok: false, status: isTimeout ? 408 : 500, error: String(e), reason: isTimeout ? "timeout" : "exception" }
   }
 }
 
@@ -750,9 +802,13 @@ function buildFinalBatchUpload(batch: TraceBatch) {
   return events
 }
 
+function getFinalBatchUploadTraceId(item: any): string | undefined {
+  return item?.body?.traceId || item?.body?.id
+}
+
 function configureFinalBatchUploadQueue(projectKey: string) {
   const safeProjectKey = projectKey.replace(/[^a-zA-Z0-9_-]/g, "_")
-  finalBatchUploadQueueFile = join(homedir(), ".testagent", `langfuse-final-batch-upload-queue-${safeProjectKey}.json`)
+  finalBatchUploadQueueFile = join(TESTAGENT_DATA_DIR, `langfuse-final-batch-upload-queue-${safeProjectKey}.json`)
   finalBatchUploadQueueLoaded = false
   finalBatchUploads.splice(0)
 }
@@ -795,8 +851,9 @@ function enqueueFinalBatchUploads(items: any[], options?: { persist?: boolean })
     existingIds.add(item.id)
   }
 
-  if (finalBatchUploads.length > MAX_FINAL_BATCH_UPLOADS) {
-    finalBatchUploads.splice(0, finalBatchUploads.length - MAX_FINAL_BATCH_UPLOADS)
+  const maxQueueSize = Math.max(MAX_FINAL_BATCH_UPLOADS, items.length)
+  if (finalBatchUploads.length > maxQueueSize) {
+    finalBatchUploads.splice(0, finalBatchUploads.length - maxQueueSize)
   }
 
   if (options?.persist !== false) {
@@ -807,6 +864,28 @@ function enqueueFinalBatchUploads(items: any[], options?: { persist?: boolean })
 function replaceFinalBatchUploads(items: any[]) {
   finalBatchUploads.splice(0, finalBatchUploads.length, ...items)
   persistFinalBatchUploads()
+}
+
+function takeNextFinalBatchUploadGroup(queue: any[]): any[] {
+  if (queue.length === 0) return []
+
+  const firstTraceId = getFinalBatchUploadTraceId(queue[0])
+  if (!firstTraceId) {
+    return queue.splice(0, BACKGROUND_FINAL_BATCH_UPLOAD_SIZE)
+  }
+
+  const group: any[] = []
+  for (let i = 0; i < queue.length; ) {
+    const item = queue[i]
+    if (getFinalBatchUploadTraceId(item) === firstTraceId) {
+      group.push(item)
+      queue.splice(i, 1)
+    } else {
+      i += 1
+    }
+  }
+
+  return group
 }
 
 function loadFinalBatchUploadsFromDisk() {
@@ -863,7 +942,11 @@ async function uploadFinalBatchItems(items: any[]) {
   if (items.length === 0) return []
 
   const taggedItems = items.map(withEventBodyTags)
-  const result = await postJsonWithAuth(LANGFUSE_FINAL_BATCH_UPLOAD_PATH, { json: { [currentBatchProjectId]: taggedItems } })
+  const result = await postJsonWithAuth(
+    LANGFUSE_FINAL_BATCH_UPLOAD_PATH,
+    { json: { [currentBatchProjectId]: taggedItems } },
+    LANGFUSE_FINAL_BATCH_UPLOAD_TIMEOUT_MS,
+  )
   if(result.ok) {
     trackEvent("metric", {
       metricName: "plugin.langfuse.upload.final.success",
@@ -877,7 +960,7 @@ async function uploadFinalBatchItems(items: any[]) {
       data: { itemCount: taggedItems.length, error: result.error },
       metricName: "plugin.langfuse.upload.final.error",
       metricValue: 1,
-      tags: { itemCount: String(taggedItems.length), reason: "request_failed" },
+      tags: { itemCount: String(taggedItems.length), reason: result.reason ?? "request_failed", status: String(result.status ?? 0) },
     })
   }
 
@@ -885,6 +968,7 @@ async function uploadFinalBatchItems(items: any[]) {
 }
 
 async function retryFinalBatchUploads() {
+  if (!ENABLE_FINAL_BATCH_UPLOAD) return
   loadFinalBatchUploadsFromDisk()
   if (retryingFinalBatchUploads || finalBatchUploads.length === 0) return
 
@@ -904,6 +988,7 @@ async function retryFinalBatchUploads() {
 }
 
 function uploadFinalTraceBatch(batch: TraceBatch) {
+  if (!ENABLE_FINAL_BATCH_UPLOAD) return
   const items = buildFinalBatchUpload(batch)
   scheduleBackgroundFinalBatchUpload(items)
 }
@@ -962,7 +1047,7 @@ function isValidIngestionEvent(event: any) {
 
 function configureFailedIngestionQueue(projectKey: string) {
   const safeProjectKey = projectKey.replace(/[^a-zA-Z0-9_-]/g, "_")
-  failedIngestionQueueFile = join(homedir(), ".testagent", `langfuse-ingestion-queue-${safeProjectKey}.json`)
+  failedIngestionQueueFile = join(TESTAGENT_DATA_DIR, `langfuse-ingestion-queue-${safeProjectKey}.json`)
   failedIngestionQueueLoaded = false
   failedIngestionEvents.splice(0)
 }
@@ -1012,15 +1097,18 @@ function loadFailedIngestionEventsFromDisk() {
       return
     }
 
-    enqueueFailedIngestionEvents(persistedEvents.filter(isValidIngestionEvent), { persist: false })
-    persistFailedIngestionEvents()
+    const validPersistedEvents = persistedEvents.filter(isValidIngestionEvent)
+    enqueueFailedIngestionEvents(validPersistedEvents, { persist: false })
+    if (validPersistedEvents.length !== persistedEvents.length) {
+      persistFailedIngestionEvents()
+    }
     trackEvent("metric", {
       metricName: "plugin.langfuse.queue.load.success",
       metricValue: 1,
       tags: {
         type: "ingestionRetryQueue",
         status: "loaded",
-        eventCount: String(persistedEvents.filter(isValidIngestionEvent).length),
+        eventCount: String(validPersistedEvents.length),
       },
     })
   } catch (e) {
@@ -1046,7 +1134,18 @@ function enqueueFailedIngestionEvents(events: any[], options?: { persist?: boole
   }
 
   if (failedIngestionEvents.length > MAX_FAILED_INGESTION_EVENTS) {
-    failedIngestionEvents.splice(0, failedIngestionEvents.length - MAX_FAILED_INGESTION_EVENTS)
+    trackEvent("both", {
+      level: "warn",
+      message: "数据上报重试队列超过建议上限，暂不裁剪以避免数据丢失",
+      data: { queueSize: failedIngestionEvents.length, maxQueueSize: MAX_FAILED_INGESTION_EVENTS },
+      metricName: "plugin.langfuse.queue.size.warning",
+      metricValue: 1,
+      tags: {
+        type: "ingestionRetryQueue",
+        queueSize: String(failedIngestionEvents.length),
+        maxQueueSize: String(MAX_FAILED_INGESTION_EVENTS),
+      },
+    })
   }
 
   if (options?.persist !== false) {
@@ -1073,7 +1172,7 @@ async function retryFailedIngestionEvents() {
   if (retryingFailedIngestionEvents || failedIngestionEvents.length === 0) return
 
   retryingFailedIngestionEvents = true
-  const events = [...failedIngestionEvents]
+  const events = failedIngestionEvents.slice(0, FAILED_INGESTION_RETRY_BATCH_SIZE)
   try {
     const result = await uploadToIngestion(events)
     const failedEvents = getFailedEvents(events, result)
@@ -1083,30 +1182,18 @@ async function retryFailedIngestionEvents() {
   }
 }
 
-async function ingestEvents(events: any[], options?: { retryQueued?: boolean; queueOnFailure?: boolean }) {
+async function ingestEvents(events: any[], options?: { queueOnFailure?: boolean }) {
   if (events.length === 0) return { successes: [], errors: [] }
 
-  if (options?.retryQueued !== false) {
-    await retryFailedIngestionEvents()
-  }
-
   const shouldPersistOutbox = options?.queueOnFailure !== false
-  if (shouldPersistOutbox) {
-    enqueueFailedIngestionEvents(events)
-  }
-
   const result = await uploadToIngestion(events)
   const failedEvents = getFailedEvents(events, result)
 
-  if (shouldPersistOutbox) {
-    markIngestionEventsAttempted(events, failedEvents)
+  if (shouldPersistOutbox && failedEvents.length > 0) {
+    enqueueFailedIngestionEvents(failedEvents)
   }
 
   return result
-}
-
-async function ingestEvent(type: string, body: any, timestamp?: string) {
-  return ingestEvents([buildIngestionEvent(type, body, timestamp)])
 }
 
 function scheduleBackgroundIngestion(events: any[]) {
@@ -1114,20 +1201,21 @@ function scheduleBackgroundIngestion(events: any[]) {
 
   backgroundIngestionEvents.push(...events)
   if (backgroundIngestionEvents.length > MAX_BACKGROUND_INGESTION_EVENTS) {
-    backgroundIngestionEvents.splice(0, backgroundIngestionEvents.length - MAX_BACKGROUND_INGESTION_EVENTS)
+    const overflowEvents = backgroundIngestionEvents.splice(0, backgroundIngestionEvents.length - MAX_BACKGROUND_INGESTION_EVENTS)
+    enqueueFailedIngestionEvents(overflowEvents)
   }
 
   scheduleBackgroundIngestionDrain()
 }
 
-function scheduleBackgroundIngestionDrain() {
+function scheduleBackgroundIngestionDrain(delayMs = 0) {
   if (backgroundIngestionDrainPromise || backgroundIngestionDrainScheduled) return
 
   backgroundIngestionDrainScheduled = true
   setTimeout(() => {
     backgroundIngestionDrainScheduled = false
     void drainBackgroundIngestion()
-  }, 0)
+  }, delayMs)
 }
 
 async function drainBackgroundIngestion() {
@@ -1135,11 +1223,11 @@ async function drainBackgroundIngestion() {
 
   backgroundIngestionDrainPromise = (async () => {
     try {
-      await retryFailedIngestionEvents()
       while (backgroundIngestionEvents.length > 0) {
         const events = backgroundIngestionEvents.splice(0, BACKGROUND_INGESTION_BATCH_SIZE)
-        await ingestEvents(events, { retryQueued: false })
+        await ingestEvents(events, { queueOnFailure: true })
       }
+      await retryFailedIngestionEvents()
     } catch (e) {
       trackEvent("both", {
         level: "error",
@@ -1153,6 +1241,8 @@ async function drainBackgroundIngestion() {
       backgroundIngestionDrainPromise = null
       if (backgroundIngestionEvents.length > 0) {
         scheduleBackgroundIngestionDrain()
+      } else if (failedIngestionEvents.length > 0) {
+        scheduleBackgroundIngestionDrain(FAILED_INGESTION_RETRY_DELAY_MS)
       }
     }
   })()
@@ -1161,17 +1251,20 @@ async function drainBackgroundIngestion() {
 }
 
 function scheduleBackgroundFinalBatchUpload(items: any[]) {
+  if (!ENABLE_FINAL_BATCH_UPLOAD) return
   if (items.length === 0) return
 
   backgroundFinalBatchUploads.push(...items)
-  if (backgroundFinalBatchUploads.length > MAX_BACKGROUND_FINAL_BATCH_UPLOADS) {
-    backgroundFinalBatchUploads.splice(0, backgroundFinalBatchUploads.length - MAX_BACKGROUND_FINAL_BATCH_UPLOADS)
+  const maxQueueSize = Math.max(MAX_BACKGROUND_FINAL_BATCH_UPLOADS, items.length)
+  if (backgroundFinalBatchUploads.length > maxQueueSize) {
+    backgroundFinalBatchUploads.splice(0, backgroundFinalBatchUploads.length - maxQueueSize)
   }
 
   scheduleBackgroundFinalBatchDrain()
 }
 
 function scheduleBackgroundFinalBatchDrain() {
+  if (!ENABLE_FINAL_BATCH_UPLOAD) return
   if (backgroundFinalBatchDrainPromise || backgroundFinalBatchDrainScheduled) return
 
   backgroundFinalBatchDrainScheduled = true
@@ -1182,13 +1275,14 @@ function scheduleBackgroundFinalBatchDrain() {
 }
 
 async function drainBackgroundFinalBatchUploads() {
+  if (!ENABLE_FINAL_BATCH_UPLOAD) return
   if (backgroundFinalBatchDrainPromise) return backgroundFinalBatchDrainPromise
 
   backgroundFinalBatchDrainPromise = (async () => {
     try {
       await retryFinalBatchUploads()
       while (backgroundFinalBatchUploads.length > 0) {
-        const items = backgroundFinalBatchUploads.splice(0, BACKGROUND_FINAL_BATCH_UPLOAD_SIZE)
+        const items = takeNextFinalBatchUploadGroup(backgroundFinalBatchUploads)
         enqueueFinalBatchUploads(items)
 
         const failedItems = await uploadFinalBatchItems(items)
@@ -1319,10 +1413,15 @@ function stringifyToolOutput(output: any) {
   }
 }
 
+function truncateObservedText(text: string, maxLength = MAX_OBSERVED_TEXT_LENGTH) {
+  if (text.length <= maxLength) return text
+  return `${text.slice(0, maxLength)}...[truncated ${text.length - maxLength} chars]`
+}
+
 function toSpanOutput(output: any) {
   if (output === undefined) return undefined
   if (output === null) return null
-  return stringifyToolOutput(output).slice(0, 10000)
+  return truncateObservedText(stringifyToolOutput(output))
 }
 
 function getToolCallId(value: any): string | undefined {
@@ -1903,7 +2002,6 @@ async function flushAllTraces() {
     await flushTrace(traceId)
   }
   await flushBackgroundUploads()
-  await retryFailedIngestionEvents()
   await retryFinalBatchUploads()
 }
 
@@ -2931,7 +3029,7 @@ async function get_project_apikeys(
 
 type ExtendedPluginInput = {
   log?: (level: 'debug' | 'info' | 'warn' | 'error', message: string, data?: Record<string, unknown>) => void;
-  metric?: (name: string, value: number, tags?: Record<string, string | number | boolean>) => void;
+  metric?: (...args: any[]) => void;
 }
 
 let pluginLog: ExtendedPluginInput['log']
@@ -2981,10 +3079,17 @@ function trackEvent(type: TrackType, options: TrackOptions): void {
   // 记录指标
   if (type === 'metric' || type === 'both') {
     const { metricName, metricValue, tags } = options as MetricTrackOptions
-    pluginMetric?.(metricName, metricValue, {
+    const metricPayload = {
       ...tags,
-      service: "langfuse"
-    })
+      service: "langfuse",
+      metricName,
+      value: metricValue,
+    }
+    if (pluginMetric?.length === 1) {
+      pluginMetric(metricPayload)
+    } else {
+      pluginMetric?.(metricName, metricValue, metricPayload)
+    }
   }
 }
 
@@ -3443,8 +3548,9 @@ export const LangfusePlugin: Plugin = async (ctx) => {
         try {
           const raw = readFileSync(filePath, "utf-8")
           if (raw.includes("TESTCASE_ID")) {
-            fileContent = injectTestcaseIds(raw)
-            writeFileSync(filePath, fileContent, "utf-8")
+            const injectedContent = injectTestcaseIds(raw)
+            fileContent = injectedContent
+            writeFileSync(filePath, injectedContent, "utf-8")
           }
         } catch (e) {
           // 文件读写失败时静默忽略，不影响正常流程
@@ -3468,8 +3574,9 @@ export const LangfusePlugin: Plugin = async (ctx) => {
           try {
             const raw = readFileSync(filePath, "utf-8")
             if (raw.includes("TESTCASE_ID")) {
-              fileContent = injectTestcaseIds(raw)
-              writeFileSync(filePath, fileContent, "utf-8")
+              const injectedContent = injectTestcaseIds(raw)
+              fileContent = injectedContent
+              writeFileSync(filePath, injectedContent, "utf-8")
             }
           } catch (e) {
             // 文件读写失败时静默忽略
@@ -3535,6 +3642,7 @@ export const LangfusePlugin: Plugin = async (ctx) => {
           : output.output
       const effectiveTitle = output.title ?? cachedResult?.title
       const effectiveMetadata = output.metadata ?? cachedResult?.metadata
+
       const spanOutput = toSpanOutput(effectiveOutput)
 
       const spanUpdates: Partial<SpanData> = {
