@@ -25,6 +25,9 @@ import { InstallationVersion } from "@opencode-ai/core/installation/version"
 import { EffectBridge } from "@/effect/bridge"
 import * as Option from "effect/Option"
 import * as OtelTracer from "@effect/opentelemetry/Tracer"
+// testagent_change start - Global fallback for thinkingEnabled when user message field is lost during rewrites
+export const thinkingEnabledStore = new Map<string, boolean>()
+// testagent_change end
 
 const log = Log.create({ service: "llm" })
 export const OUTPUT_TOKEN_MAX = ProviderTransform.OUTPUT_TOKEN_MAX
@@ -139,7 +142,10 @@ const live: Layer.Layer<
             sessionID: input.sessionID,
             providerOptions: item.options,
           })
-      const options = mergeOptions(mergeOptions(mergeOptions(base, input.model.options), input.agent.options), variant)
+      let options = mergeOptions(mergeOptions(mergeOptions(base, input.model.options), input.agent.options), variant)
+      if (input.user.thinkingEnabled !== undefined && (!input.user.thinkingEnabled || thinkingEnabledStore.get(input.sessionID) === false)) {
+        options = mergeOptions(options, { chat_template_kwargs: { enable_thinking: false } })
+      }
       if (isOpenaiOauth) {
         options.instructions = system.join("\n")
       }

@@ -386,13 +386,6 @@ export type OutputFormatJsonSchema = {
 
 export type OutputFormat = OutputFormatText | OutputFormatJsonSchema
 
-export type EditorContext = {
-  visibleFiles?: Array<string>
-  openTabs?: Array<string>
-  activeFile?: string
-  shell?: string
-}
-
 export type UserMessage = {
   id: string
   sessionID: string
@@ -416,7 +409,7 @@ export type UserMessage = {
   tools?: {
     [key: string]: boolean
   }
-  editorContext?: EditorContext
+  thinkingEnabled?: boolean
 }
 
 export type AssistantMessage = {
@@ -1190,6 +1183,18 @@ export type Config = {
     source: string
     scope: "global" | "local"
   }>
+  /**
+   * Runtime source file paths for each MCP server entry
+   */
+  mcp_origins?: {
+    [key: string]: string
+  }
+  /**
+   * Scope (local/global) for each MCP server entry. local = project config, global = user config.
+   */
+  mcp_scopes?: {
+    [key: string]: "local" | "global"
+  }
   plugin_status?: {
     success: Array<string>
     failed: Array<{
@@ -1198,6 +1203,9 @@ export type Config = {
     }>
   }
   langfuse?: boolean
+  goal?: {
+    enabled?: boolean
+  }
   share?: "manual" | "auto" | "disabled"
   autoshare?: boolean
   /**
@@ -1301,8 +1309,7 @@ export type Config = {
     prune?: boolean
     tail_turns?: number
     preserve_recent_tokens?: number
-    reserved?: number,
-
+    reserved?: number
   }
   experimental?: {
     disable_paste_summary?: boolean
@@ -1311,6 +1318,7 @@ export type Config = {
     primary_tools?: Array<string>
     continue_loop_on_deny?: boolean
     mcp_timeout?: number
+    agent_manager?: boolean
   }
 }
 
@@ -1601,6 +1609,8 @@ export type Command = {
   template: string
   subtask?: boolean
   hints: Array<string>
+  id?: string
+  version?: string
 }
 
 export type Agent = {
@@ -3678,6 +3688,29 @@ export type ConfigUpdateResponses = {
 
 export type ConfigUpdateResponse = ConfigUpdateResponses[keyof ConfigUpdateResponses]
 
+export type ConfigWarningsData = {
+  body?: never
+  path?: never
+  query?: {
+    directory?: string
+    workspace?: string
+  }
+  url: "/config/warnings"
+}
+
+export type ConfigWarningsResponses = {
+  /**
+   * Config warnings
+   */
+  200: Array<{
+    path: string
+    message: string
+    detail?: string
+  }>
+}
+
+export type ConfigWarningsResponse = ConfigWarningsResponses[keyof ConfigWarningsResponses]
+
 export type ConfigProvidersData = {
   body?: never
   path?: never
@@ -4428,6 +4461,8 @@ export type AppSkillsResponses = {
   200: Array<{
     name: string
     description?: string
+    id?: string
+    version?: string
     location: string
     content: string
   }>
@@ -5739,13 +5774,13 @@ export type SessionPromptData = {
     }
     agent?: string
     noReply?: boolean
+    thinkingEnabled?: boolean
     tools?: {
       [key: string]: boolean
     }
     format?: OutputFormat
     system?: string
     variant?: string
-    editorContext?: EditorContext
     parts: Array<TextPartInput | FilePartInput | AgentPartInput | SubtaskPartInput>
   }
   path: {
@@ -5889,7 +5924,9 @@ export type SessionForkResponses = {
 export type SessionForkResponse = SessionForkResponses[keyof SessionForkResponses]
 
 export type SessionAbortData = {
-  body?: never
+  body?: {
+    reason?: "completed" | "user_abort" | "error"
+  }
   path: {
     sessionID: string
   }
@@ -6066,41 +6103,6 @@ export type SessionSummarizeResponses = {
 
 export type SessionSummarizeResponse = SessionSummarizeResponses[keyof SessionSummarizeResponses]
 
-// testagent_change start - clearContext 类型
-export type SessionClearContextData = {
-  path: {
-    sessionID: string
-  }
-  query?: {
-    directory?: string
-    workspace?: string
-  }
-  url: "/session/{sessionID}/context-clear"
-}
-
-export type SessionClearContextErrors = {
-  /**
-   * Bad request
-   */
-  400: BadRequestError
-  /**
-   * NotFoundError
-   */
-  404: NotFoundError
-}
-
-export type SessionClearContextError = SessionClearContextErrors[keyof SessionClearContextErrors]
-
-export type SessionClearContextResponses = {
-  /**
-   * Context cleared
-   */
-  200: boolean
-}
-
-export type SessionClearContextResponse = SessionClearContextResponses[keyof SessionClearContextResponses]
-// testagent_change end
-
 export type SessionPromptAsyncData = {
   body?: {
     messageID?: string
@@ -6110,13 +6112,13 @@ export type SessionPromptAsyncData = {
     }
     agent?: string
     noReply?: boolean
+    thinkingEnabled?: boolean
     tools?: {
       [key: string]: boolean
     }
     format?: OutputFormat
     system?: string
     variant?: string
-    editorContext?: EditorContext
     parts: Array<TextPartInput | FilePartInput | AgentPartInput | SubtaskPartInput>
   }
   path: {
@@ -6158,6 +6160,7 @@ export type SessionCommandData = {
     model?: string
     arguments: string
     command: string
+    thinkingEnabled?: boolean
     variant?: string
     parts?: Array<{
       id?: string
@@ -6322,6 +6325,7 @@ export type SessionUnrevertResponse = SessionUnrevertResponses[keyof SessionUnre
 export type SessionResumeData = {
   body?: {
     messageID: string
+    thinkingEnabled?: boolean
     model?: {
       providerID: string
       modelID: string
@@ -6361,6 +6365,40 @@ export type SessionResumeResponses = {
 }
 
 export type SessionResumeResponse = SessionResumeResponses[keyof SessionResumeResponses]
+
+export type SessionClearContextData = {
+  body?: never
+  path: {
+    sessionID: string
+  }
+  query?: {
+    directory?: string
+    workspace?: string
+  }
+  url: "/session/{sessionID}/context-clear"
+}
+
+export type SessionClearContextErrors = {
+  /**
+   * Bad request
+   */
+  400: BadRequestError
+  /**
+   * NotFoundError
+   */
+  404: NotFoundError
+}
+
+export type SessionClearContextError = SessionClearContextErrors[keyof SessionClearContextErrors]
+
+export type SessionClearContextResponses = {
+  /**
+   * Context cleared
+   */
+  200: boolean
+}
+
+export type SessionClearContextResponse = SessionClearContextResponses[keyof SessionClearContextResponses]
 
 export type PermissionRespondData = {
   body?: {

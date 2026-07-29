@@ -40,6 +40,7 @@ import { Tool } from "@/tool/tool"
 import { Permission } from "@/permission"
 import { SessionStatus, type IdleReason } from "./status"
 import { LLM } from "./llm"
+import { thinkingEnabledStore } from "./llm" // testagent_change
 import { Shell } from "@/shell/shell"
 import { ShellID } from "@/tool/shell/id"
 import { AppFileSystem } from "@opencode-ai/core/filesystem"
@@ -971,6 +972,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           variant,
         },
         system: input.system,
+        thinkingEnabled: input.thinkingEnabled,
         format: input.format,
       }
 
@@ -1389,6 +1391,10 @@ NOTE: At any point in time through this workflow you should feel free to ask the
 
     const prompt: (input: PromptInput) => Effect.Effect<MessageV2.WithParts> = Effect.fn("SessionPrompt.prompt")(
       function* (input: PromptInput) {
+        if (input.thinkingEnabled !== undefined) {
+          thinkingEnabledStore.set(input.sessionID, input.thinkingEnabled)
+        }
+        yield* Effect.logInfo("LLMoptionsprompt", { aaaaa: input.thinkingEnabled })
         const session = yield* sessions.get(input.sessionID).pipe(Effect.orDie)
         yield* revert.cleanup(session)
         const message = yield* createUserMessage(input)
@@ -1662,6 +1668,9 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           input.sessionID,
           lastAssistant(input.sessionID),
           Effect.gen(function* () {
+            if (input.thinkingEnabled !== undefined) {
+              thinkingEnabledStore.set(input.sessionID, input.thinkingEnabled)
+            }
             yield* elog.info("resume", { sessionID: input.sessionID, messageID: input.messageID })
 
             // 找到要删除的 assistant 消息，取出它的 parentID（即对应的 user 消息 ID）
@@ -1732,6 +1741,9 @@ NOTE: At any point in time through this workflow you should feel free to ask the
     )
 
     const command = Effect.fn("SessionPrompt.command")(function* (input: CommandInput) {
+      if (input.thinkingEnabled !== undefined) {
+        thinkingEnabledStore.set(input.sessionID, input.thinkingEnabled)
+      }
       yield* elog.info("command", { sessionID: input.sessionID, command: input.command, agent: input.agent })
       const cmd = yield* commands.get(input.command)
       if (!cmd) {
@@ -1902,6 +1914,7 @@ export const PromptInput = Schema.Struct({
   model: Schema.optional(ModelRef),
   agent: Schema.optional(Schema.String),
   noReply: Schema.optional(Schema.Boolean),
+  thinkingEnabled: Schema.optional(Schema.Boolean),
   tools: Schema.optional(Schema.Record(Schema.String, Schema.Boolean)).annotate({
     description:
       "@deprecated tools and permissions have been merged, you can set permissions on the session itself now",
@@ -1930,6 +1943,7 @@ export class LoopInput extends Schema.Class<LoopInput>("SessionPrompt.LoopInput"
 export const ResumeInput = Schema.Struct({
   sessionID: SessionID,
   messageID: MessageID,
+  thinkingEnabled: Schema.optional(Schema.Boolean),
   model: Schema.optional(ModelRef),
 }).pipe(withStatics((s) => ({ zod: zod(s) })))
 export type ResumeInput = Schema.Schema.Type<typeof ResumeInput>
@@ -1951,6 +1965,7 @@ export const CommandInput = Schema.Struct({
   model: Schema.optional(Schema.String),
   arguments: Schema.String,
   command: Schema.String,
+  thinkingEnabled: Schema.optional(Schema.Boolean),
   variant: Schema.optional(Schema.String),
   // Inlined (no identifier annotation) to keep the original SDK output — the
   // PromptInput call site below references FilePartInput by ref via the
