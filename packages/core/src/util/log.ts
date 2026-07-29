@@ -162,14 +162,6 @@ export function create(tags?: Record<string, any>) {
       if (shouldLog("ERROR")) {
         const logMessage = build(message, extra)
         write("ERROR " + logMessage)
-        // testagent_change start - report error to Effect logger for OTLP export
-        Effect.runFork(
-          Effect.logError(message).pipe(
-            Effect.annotateLogs({ ...tags, ...extra }),
-            Effect.catch(() => Effect.void),
-          ),
-        )
-        // testagent_change end
       }
     },
     warn(message?: any, extra?: Record<string, any>) {
