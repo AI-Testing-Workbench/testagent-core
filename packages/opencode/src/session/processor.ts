@@ -35,6 +35,7 @@ import {
   tokenCacheRead,
   tokenCacheWrite,
   tokenTotal,
+  sessionLlmDuration,
 } from "@opencode-ai/core/effect/observability" // testagent_change
 
 const DOOM_LOOP_THRESHOLD = 3
@@ -792,6 +793,19 @@ export const layer: Layer.Layer<
               totalElapsed: `${totalElapsed}ms`,
               avgEventTime: eventCount > 0 ? `${(totalElapsed / eventCount).toFixed(2)}ms` : "N/A",
             })
+            // Record LLM stream duration on assistant message
+            ctx.assistantMessage.time.llm = totalElapsed
+            yield* session.updateMessage(ctx.assistantMessage)
+            // Report LLM duration metric
+            yield* Metric.update(
+              Metric.withAttributes(sessionLlmDuration, {
+                sessionID: ctx.sessionID,
+                modelID: streamInput.model.id,
+                providerID: streamInput.model.providerID,
+                messageID: ctx.assistantMessage.id,
+              }),
+              totalElapsed,
+            )
             if (ttftValue != null) {
               yield* Metric.update(
                 Metric.withAttributes(ttft, {

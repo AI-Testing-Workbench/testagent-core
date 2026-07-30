@@ -300,6 +300,19 @@ export const tokenTotal = Metric.counter("session.token.total", {
 export const userPrompt = Metric.counter("session.user.prompt", {
   description: "User message submissions in sessions",
 })
+// testagent_change start
+export const sessionTotalDuration = Metric.gauge("session.duration.total", {
+  description: "Session total duration including user wait (ms)",
+})
+export const sessionLlmDuration = Metric.gauge("session.duration.llm", {
+  description: "Sum of all LLM call durations (ms)",
+})
+export const sessionWaitDuration = Metric.gauge("session.duration.wait", {
+  description: "Time spent waiting for user input (question/invalid tools) (ms)",
+})
+export const sessionActualDuration = Metric.gauge("session.duration.actual", {
+  description: "Session duration excluding user wait (ms)",
+})
 // testagent_change end
 
 export const Observability = { enabled, layer }

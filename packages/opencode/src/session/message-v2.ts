@@ -540,6 +540,9 @@ export const Assistant = Schema.Struct({
   time: Schema.Struct({
     created: NonNegativeInt,
     completed: Schema.optional(NonNegativeInt),
+    // testagent_change start - LLM stream total duration (ms)
+    llm: Schema.optional(NonNegativeInt),
+    // testagent_change end
   }),
   error: Schema.optional(AssistantErrorSchema),
   parentID: MessageID,
