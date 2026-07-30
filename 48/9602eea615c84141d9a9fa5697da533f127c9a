@@ -1,0 +1,14 @@
+packages/opencode/src/config/config.ts
+  h_cb3d00609d57f2 641,644,649-656,658-677,686
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "489602eea615c84141d9a9fa5697da533f127c9a",
+  "prompts": {},
+  "humans": {
+    "h_cb3d00609d57f2": {
+      "author": "BoSeal <1135378788@qq.com>"
+    }
+  }
+}
