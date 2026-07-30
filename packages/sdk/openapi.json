@@ -12391,6 +12391,9 @@
           "hidden": {
             "type": "boolean"
           },
+          "thinking": {
+            "type": "boolean"
+          },
           "options": {
             "type": "object"
           },
@@ -14240,6 +14243,9 @@
             "type": "boolean"
           },
           "hidden": {
+            "type": "boolean"
+          },
+          "thinking": {
             "type": "boolean"
           },
           "topP": {

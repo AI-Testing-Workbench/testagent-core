@@ -146,6 +146,14 @@ const live: Layer.Layer<
       if (input.user.thinkingEnabled !== undefined && (!input.user.thinkingEnabled || thinkingEnabledStore.get(input.sessionID) === false)) {
         options = mergeOptions(options, { chat_template_kwargs: { enable_thinking: false } })
       }
+      // testagent_change start - Handle agent thinking configuration
+      // When agent.thinking is explicitly set to false, disable thinking
+      if (input.agent.thinking !== undefined) {
+        yield* Effect.logInfo("agent-thinking", input.agent.thinking)
+        options = mergeOptions(options, { chat_template_kwargs: { enable_thinking: input.agent.thinking } })
+      }
+      // testagent_change end
+      
       if (isOpenaiOauth) {
         options.instructions = system.join("\n")
       }

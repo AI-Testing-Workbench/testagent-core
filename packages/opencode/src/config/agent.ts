@@ -36,6 +36,9 @@ const AgentSchema = Schema.StructWithRest(
     hidden: Schema.optional(Schema.Boolean).annotate({
       description: "Hide this subagent from the @ autocomplete menu (default: false, only applies to mode: subagent)",
     }),
+    thinking: Schema.optional(Schema.Boolean).annotate({ // testagent_change
+      description: "Enable thinking/reasoning for this agent (default: true). When false, disables model thinking.", // testagent_change
+    }), // testagent_change
     options: Schema.optional(Schema.Record(Schema.String, Schema.Any)),
     color: Schema.optional(Color).annotate({
       description: "Hex color code (e.g., #FF5733) or theme color (e.g., primary)",
@@ -59,6 +62,7 @@ const KNOWN_KEYS = new Set([
   "top_p",
   "mode",
   "hidden",
+  "thinking", // testagent_change
   "color",
   "steps",
   "maxSteps",
