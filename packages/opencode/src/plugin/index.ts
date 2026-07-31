@@ -20,6 +20,7 @@ import { EffectBridge } from "@/effect/bridge"
 import { InstanceState } from "@/effect/instance-state"
 import { errorMessage } from "@/util/error"
 import { PluginLoader } from "./loader"
+import { filterPluginOrigins } from "@/testagent/plugin-filter" // testagent_change
 import { parsePluginSpecifier, readPluginId, readV1Plugin, resolvePluginId } from "./shared"
 import { registerAdapter } from "@/control-plane/adapters"
 import type { WorkspaceAdapter } from "@/control-plane/types"
@@ -289,9 +290,19 @@ export const layer = Layer.effect(
           yield* config.waitForDependencies()
         }
 
+        // testagent_change start - filter plugins by external allowlist
+        const { allowed: pluginAllowed, filtered: pluginFiltered } = yield* Effect.promise(() =>
+          filterPluginOrigins(plugins, cfg.plugin_debug),
+        )
+        for (const f of pluginFiltered) {
+          pluginFailed.set(f.spec, f.reason)
+          yield* Effect.logWarning("插件被 allowlist 过滤", { spec: f.spec, reason: f.reason })
+        }
+        // testagent_change end
+
         const loaded = yield* Effect.promise(() =>
           PluginLoader.loadExternal({
-            items: plugins,
+            items: pluginAllowed,
             kind: "server",
             report: {
               start(candidate) {
