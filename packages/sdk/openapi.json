@@ -695,6 +695,67 @@
         ]
       }
     },
+    "/config/warnings": {
+      "get": {
+        "tags": ["config"],
+        "operationId": "config.warnings",
+        "parameters": [
+          {
+            "name": "directory",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Config warnings",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "path": {
+                        "type": "string"
+                      },
+                      "message": {
+                        "type": "string"
+                      },
+                      "detail": {
+                        "type": "string"
+                      }
+                    },
+                    "required": ["path", "message"],
+                    "additionalProperties": false
+                  },
+                  "description": "Config warnings"
+                }
+              }
+            }
+          }
+        },
+        "description": "Get warnings generated during config loading (e.g., invalid JSON, schema errors).",
+        "summary": "Get config warnings",
+        "x-codeSamples": [
+          {
+            "lang": "js",
+            "source": "import { createOpencodeClient } from \"@opencode-ai/sdk\n\nconst client = createOpencodeClient()\nawait client.config.warnings({\n  ...\n})"
+          }
+        ]
+      }
+    },
     "/config/providers": {
       "get": {
         "tags": ["config"],
@@ -6815,9 +6876,6 @@
                   "command": {
                     "type": "string"
                   },
-                  "goal": {
-                    "type": "string"
-                  },
                   "variant": {
                     "type": "string"
                   },
@@ -7264,6 +7322,80 @@
           {
             "lang": "js",
             "source": "import { createOpencodeClient } from \"@opencode-ai/sdk\n\nconst client = createOpencodeClient()\nawait client.session.resume({\n  ...\n})"
+          }
+        ]
+      }
+    },
+    "/session/{sessionID}/context-clear": {
+      "post": {
+        "tags": ["session"],
+        "operationId": "session.clearContext",
+        "parameters": [
+          {
+            "name": "directory",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "sessionID",
+            "in": "path",
+            "schema": {
+              "type": "string",
+              "pattern": "^ses.*"
+            },
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Context cleared",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "boolean",
+                  "description": "Context cleared"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BadRequestError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "NotFoundError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotFoundError"
+                }
+              }
+            }
+          }
+        },
+        "description": "Clear all LLM context while preserving conversation history in the UI.",
+        "summary": "Clear session context",
+        "x-codeSamples": [
+          {
+            "lang": "js",
+            "source": "import { createOpencodeClient } from \"@opencode-ai/sdk\n\nconst client = createOpencodeClient()\nawait client.session.clearContext({\n  ...\n})"
           }
         ]
       }
@@ -12818,6 +12950,15 @@
           "langfuse": {
             "type": "boolean"
           },
+          "goal": {
+            "type": "object",
+            "properties": {
+              "enabled": {
+                "type": "boolean"
+              }
+            },
+            "additionalProperties": false
+          },
           "share": {
             "type": "string",
             "enum": ["manual", "auto", "disabled"]
@@ -13156,6 +13297,9 @@
               "mcp_timeout": {
                 "type": "integer",
                 "exclusiveMinimum": 0
+              },
+              "agent_manager": {
+                "type": "boolean"
               }
             },
             "additionalProperties": false

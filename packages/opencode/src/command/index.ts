@@ -39,6 +39,10 @@ export const Info = Schema.Struct({
   template: Schema.Unknown.annotate({ [ZodOverride]: z.promise(z.string()).or(z.string()) }),
   subtask: Schema.optional(Schema.Boolean),
   hints: Schema.Array(Schema.String),
+  // testagent_change start - add metadata fields
+  id: Schema.optional(Schema.String), // front-matter id field
+  version: Schema.optional(Schema.String), // front-matter version field
+  // testagent_change end
 })
   .annotate({ identifier: "Command" })
   .pipe(withStatics((s) => ({ zod: zod(s) })))
@@ -154,6 +158,10 @@ export const layer = Layer.effect(
             return item.content
           },
           hints: [],
+          // testagent_change start - pass through metadata fields
+          id: item.id,
+          version: item.version,
+          // testagent_change end
         }
       }
 

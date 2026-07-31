@@ -43,11 +43,13 @@ const DEFAULT_MAX_AUTO_TURNS = 25
 const DEFAULT_CONTINUE_INTERVAL_SECONDS = 3
 const DEFAULT_MAX_PROMPT_FAILURES = 3
 const DEFAULT_COMMAND_NAME = "goal"
-const GOAL_SYSTEM_MARKER = "OpenCode goal mode"
+const GOAL_SYSTEM_MARKER = "TestAgent goal mode"
+const GOAL_TOOL_IDS = ["get_goal", "create_goal", "set_goal", "update_goal", "update_goal_status", "clear_goal"]
 const activeContinuations = new Set<string>()
+const commandSessions = new Set<string>()
 
 function goalCommandTemplate(commandName: string) {
-  return `OpenCode goal mode command "/${commandName}" was invoked.
+  return `TestAgent goal mode command "/${commandName}" was invoked.
 
 Arguments:
 <goal_command_arguments>
@@ -80,7 +82,7 @@ function registerDesktopCommand(config: Config, commandName: string) {
   config.command[commandName] = {
     description: "Set or view the long-running session goal",
     template: goalCommandTemplate(commandName),
-    subtask: true,
+    subtask: false,
   }
 }
 
@@ -175,6 +177,17 @@ function mergeSystemReminder(output: { system: string[] }, reminder: string) {
   output.system[0] = `${output.system[0]}\n\n${reminder}`
 }
 
+function disableGoalTools(message: { info: { role?: string; tools?: Record<string, boolean> } }) {
+  if (message.info.role !== "user") return
+  const disabled = Object.fromEntries(
+    GOAL_TOOL_IDS.filter((id) => message.info.tools?.[id] !== true).map((id) => [id, false]),
+  )
+  message.info.tools = {
+    ...(message.info.tools ?? {}),
+    ...disabled,
+  }
+}
+
 export const GoalPlugin: Plugin = async ({ client }, options?: Options) => {
   const autoContinue = options?.auto_continue ?? true
   const maxAutoTurns = options?.max_auto_turns ?? DEFAULT_MAX_AUTO_TURNS
@@ -254,7 +267,7 @@ export const GoalPlugin: Plugin = async ({ client }, options?: Options) => {
         },
       },
       update_goal_status: {
-        description: "Pause or resume the current OpenCode goal when the user explicitly asks to pause or resume it.",
+        description: "Pause or resume the current TestAgent goal when the user explicitly asks to pause or resume it.",
         args: {
           status: z.enum(["active", "paused"]).describe("active resumes a goal; paused pauses it without clearing it."),
         },
@@ -265,12 +278,17 @@ export const GoalPlugin: Plugin = async ({ client }, options?: Options) => {
         },
       },
       clear_goal: {
-        description: "Clear the current OpenCode goal for this session when the user explicitly asks to clear it.",
+        description: "Clear the current TestAgent goal for this session when the user explicitly asks to clear it.",
         args: {},
         async execute(_args, context) {
           return JSON.stringify({ cleared: await clearGoal(context.sessionID) }, null, 2)
         },
       },
+    },
+    async "command.execute.before"(input, _output) {
+      if (input.command === commandName) {
+        commandSessions.add(input.sessionID)
+      }
     },
     async "experimental.chat.messages.transform"(input, output) {
       const sessionID =
@@ -279,6 +297,11 @@ export const GoalPlugin: Plugin = async ({ client }, options?: Options) => {
           : output.messages.find((message) => typeof message.info.sessionID === "string")?.info.sessionID
       if (!sessionID) return
       await accountUsage(sessionID, tokensFromMessages(output.messages))
+      const goal = await getGoal(sessionID)
+      const enabled = commandSessions.delete(sessionID) || goal?.status === "active"
+      if (enabled) return
+      const message = output.messages.findLast((message) => message.info.role === "user")
+      if (message) disableGoalTools(message)
     },
     async "experimental.chat.system.transform"(input, output) {
       if (typeof input.sessionID !== "string") return

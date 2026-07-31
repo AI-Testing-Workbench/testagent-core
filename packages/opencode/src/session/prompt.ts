@@ -49,9 +49,6 @@ import { Process } from "@/util/process"
 import { Cause, Effect, Exit, Latch, Layer, Metric, Option, Scope, Context, Schema, Types } from "effect"
 import { zod } from "@/util/effect-zod"
 import { withStatics } from "@/util/schema"
-// testagent_change start
-import { environmentDetails, EditorContext } from "../testagent/editor-context"
-// testagent_change end
 import * as EffectLogger from "@opencode-ai/core/effect/logger"
 import { InstanceState } from "@/effect/instance-state"
 import { TaskTool, type TaskPromptOps } from "@/tool/task"
@@ -195,6 +192,18 @@ export const layer = Layer.effect(
       const firstUser = context[idx]
       if (!firstUser || firstUser.info.role !== "user") return
       const firstInfo = firstUser.info
+
+      const textParts = firstUser.parts
+        .filter((p) => p.type === "text" && !("synthetic" in p))
+        .map((p) => ("text" in p ? p.text : ""))
+        .filter(Boolean)
+
+      if (textParts.length > 0) {
+        const t = textParts.join("\n").trim().substring(0, 50)
+        yield* sessions
+          .setTitle({ sessionID: input.session.id, title: t })
+          .pipe(Effect.catchCause((cause) => elog.error("failed to generate title", { error: Cause.squash(cause) })))
+      }
 
       const subtasks = firstUser.parts.filter((p): p is MessageV2.SubtaskPart => p.type === "subtask")
       const onlySubtasks = subtasks.length > 0 && firstUser.parts.every((p) => p.type === "subtask")
@@ -963,16 +972,6 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         },
         system: input.system,
         format: input.format,
-        // testagent_change start
-        editorContext: input.editorContext
-          ? {
-              activeFile: input.editorContext.activeFile,
-              openTabs: input.editorContext.openTabs ? [...input.editorContext.openTabs] : undefined,
-              visibleFiles: input.editorContext.visibleFiles ? [...input.editorContext.visibleFiles] : undefined,
-              shell: input.editorContext.shell,
-            }
-          : undefined,
-        // testagent_change end
       }
 
       const current = Database.use((db) =>
@@ -1586,31 +1585,9 @@ NOTE: At any point in time through this workflow you should feel free to ask the
 
             yield* plugin.trigger("experimental.chat.messages.transform", {}, { messages: msgs })
 
-            // testagent_change start — inject dynamic editor context into last user message
-            const envBlock = environmentDetails(lastUser.editorContext)
-            if (envBlock) {
-              const lastUserIdx = msgs.findLastIndex((m) => m.info.role === "user")
-              if (lastUserIdx !== -1) {
-                msgs[lastUserIdx] = {
-                  ...msgs[lastUserIdx],
-                  parts: [
-                    ...msgs[lastUserIdx].parts,
-                    {
-                      id: PartID.ascending(),
-                      sessionID,
-                      messageID: msgs[lastUserIdx].info.id,
-                      type: "text",
-                      text: envBlock,
-                    } satisfies MessageV2.TextPart,
-                  ],
-                }
-              }
-            }
-            // testagent_change end
-
             const [skills, env, instructions, modelMsgs] = yield* Effect.all([
               sys.skills(agent),
-              sys.environment(model, lastUser.editorContext), // testagent_change
+              sys.environment(model),
               instruction.system().pipe(Effect.orDie),
               MessageV2.toModelMessagesEffect(msgs, model),
             ])
@@ -1850,7 +1827,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
 
       yield* plugin.trigger(
         "command.execute.before",
-        { command: input.command, sessionID: input.sessionID, arguments: input.arguments, goal: input.goal },
+        { command: input.command, sessionID: input.sessionID, arguments: input.arguments, source: cmd.source, id: cmd.id, version: cmd.version },
         { parts },
       )
 
@@ -1932,9 +1909,6 @@ export const PromptInput = Schema.Struct({
   format: Schema.optional(MessageV2.Format),
   system: Schema.optional(Schema.String),
   variant: Schema.optional(Schema.String),
-  // testagent_change start
-  editorContext: Schema.optional(EditorContext),
-  // testagent_change end
   parts: Schema.Array(
     Schema.Union([
       MessageV2.TextPartInput,
@@ -1977,7 +1951,6 @@ export const CommandInput = Schema.Struct({
   model: Schema.optional(Schema.String),
   arguments: Schema.String,
   command: Schema.String,
-  goal: Schema.optional(Schema.String), // testagent_change
   variant: Schema.optional(Schema.String),
   // Inlined (no identifier annotation) to keep the original SDK output — the
   // PromptInput call site below references FilePartInput by ref via the

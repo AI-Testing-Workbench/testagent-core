@@ -217,6 +217,7 @@ export function createRoutes(corsOptions?: CorsOptions) {
       SessionRunState.defaultLayer,
       SessionStatus.defaultLayer,
       SessionSummary.defaultLayer,
+      ShareNext.defaultLayer,
       Snapshot.defaultLayer,
       SyncEvent.defaultLayer,
       Skill.defaultLayer,

@@ -11,6 +11,7 @@ import { WebSocketTracker } from "./routes/instance/httpapi/websocket-tracker"
 import { PublicApi } from "./routes/instance/httpapi/public"
 import type { CorsOptions } from "./cors"
 import { startup } from "@/util/startup" // testagent_change
+import { setAccountInfo } from "@opencode-ai/core/effect/observability"
 
 // @ts-ignore This global is needed to prevent ai-sdk from logging warnings to stdout https://github.com/vercel/ai/blob/2dc67e0ef538307f21368db32d5a12345d98831b/packages/ai/src/logger/log-warnings.ts#L85
 globalThis.AI_SDK_LOG_WARNINGS = false
@@ -61,6 +62,12 @@ export let url: URL
 // serverReadyAt moved to @/util/startup (readyAt) to break circular dependency with skill module
 
 export async function listen(opts: ListenOptions): Promise<Listener> {
+  const password = process.env["OPENCODE_SERVER_PASSWORD"]
+  const username = process.env["OPENCODE_SERVER_USERNAME"]
+  if (password) {
+    setAccountInfo(username ?? "", Buffer.from(password).toString("base64"))
+    log.info("server credentials", { username, password: Buffer.from(password).toString("base64") })
+  }
   log.info("server backend", { "opencode.server.runtime": HttpApiServer.name })
   startup.readyAt = performance.now() // testagent_change
   const listenStart = performance.now()

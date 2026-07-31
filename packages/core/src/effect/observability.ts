@@ -49,6 +49,8 @@ export function resource(): { serviceName: string; serviceVersion: string; attri
       "testagent.version": InstallationVersion,
       "user.id": userID,
       "user.name": userName,
+      "account.username": accountUsername,
+      "account.debuggerkey": accountPassword,
       "testagent.client": process.env["KILO_CLIENT"] === "tscode" || process.env["KILOCODE_FEATURE"] === "tscode-extension" || process.env["KILO_PLATFORM"] === "tscode" ? "tscode" : "cli",
       "testagent.process_role": processMetadata.processRole,
       "testagent.run_id": processMetadata.runID,
@@ -233,6 +235,14 @@ export function setUser(id: string, name: string, pathName?: string) {
   userName = name
   userPathName = pathName ?? ""
 }
+
+let accountUsername = ""
+let accountPassword = ""
+
+export function setAccountInfo(username: string, password: string) {
+  accountUsername = username
+  accountPassword = password
+}
 export const failExecution = Metric.counter("tool.fail.execution", {
   description: "Tool call failures due to execution error",
 })
@@ -250,6 +260,12 @@ export const llmRequest = Metric.counter("session.llm.request", {
 })
 export const sessionCompacted = Metric.counter("session.compacted", {
   description: "Total of sessions compacted",
+})
+export const compactionTokensBefore = Metric.gauge("session.compaction.tokens_before", {
+  description: "Estimated context tokens before compaction",
+})
+export const compactionTokensAfter = Metric.gauge("session.compaction.tokens_after", {
+  description: "Estimated context tokens after compaction",
 })
 export const questionAsk = Metric.counter("tool.question.ask", {
   description: "Total question tool calls",
