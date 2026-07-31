@@ -8,7 +8,7 @@ import { isPathPluginSpec } from "@/plugin/shared"
 import { base64Decode } from "@opencode-ai/core/util/encode"
 
 // Base64-encoded default allowlist endpoint; override with TESTAGENT_PLUGIN_ALLOWLIST_URL.
-const encodedUrl = "aHR0cHM6Ly90ZXN0aHViLWdhdGV3YXktZGV2LnBhYXMuY21iY2hpbmEuY24vdGVzdGFnZW50LXBsdWdpbi9yZWdpc3RlcmVkLWxpc3Q"
+const encodedUrl = "aHR0cHM6Ly90ZXN0aHViLWdhdGV3YXkucGFhcy5jbWJjaGluYS5jbi90ZXN0YWdlbnQtcGx1Z2luL3JlZ2lzdGVyZWQtbGlzdA=="
 
 export type PluginAllowlist = {
   enabled: boolean
