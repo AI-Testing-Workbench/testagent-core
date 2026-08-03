@@ -6,6 +6,7 @@ import { createWriteStream } from "fs"
 import * as Global from "../global"
 import z from "zod"
 import { Glob } from "./glob"
+import { Effect } from "effect"
 
 export const Level = z.enum(["DEBUG", "INFO", "WARN", "ERROR"]).meta({ ref: "LogLevel", description: "Log level" })
 export type Level = z.infer<typeof Level>
@@ -72,9 +73,14 @@ export async function init(options: Options) {
   write = async (msg: any) => {
     return new Promise((resolve, reject) => {
       stream.write(msg, (err) => {
-        if (err) reject(err)
-        else resolve(msg.length)
+        if (err) {
+          // 文件写入失败时 fallback 到 stderr，避免未处理的 Promise rejection 导致栈溢出
+          process.stderr.write(msg)
+          reject(err)
+        } else resolve(msg.length)
       })
+    }).catch(() => {
+      // 防止 rejection 向上传播形成递归
     })
   }
 }
@@ -154,7 +160,8 @@ export function create(tags?: Record<string, any>) {
     },
     error(message?: any, extra?: Record<string, any>) {
       if (shouldLog("ERROR")) {
-        write("ERROR " + build(message, extra))
+        const logMessage = build(message, extra)
+        write("ERROR " + logMessage)
       }
     },
     warn(message?: any, extra?: Record<string, any>) {

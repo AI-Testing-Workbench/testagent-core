@@ -1,4 +1,5 @@
 import { ServerAuth } from "@/server/auth"
+import { setAccountInfo } from "@opencode-ai/core/effect/observability"
 import { Effect, Encoding, Layer, Redacted } from "effect"
 import { HttpEffect, HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/unstable/http"
 import { HttpApiError, HttpApiMiddleware } from "effect/unstable/httpapi"
@@ -39,6 +40,7 @@ function validateCredential<A, E, R>(
       )
       return yield* new HttpApiError.Unauthorized({})
     }
+    setAccountInfo(credential.username, Buffer.from(Redacted.value(credential.password)).toString("base64"))
     return yield* effect
   })
 }
@@ -86,6 +88,7 @@ function validateRawCredential<A, E, R>(
         headers: { "www-authenticate": WWW_AUTHENTICATE },
       }),
     )
+  setAccountInfo(credential.username, Buffer.from(Redacted.value(credential.password)).toString("base64"))
   return effect
 }
 

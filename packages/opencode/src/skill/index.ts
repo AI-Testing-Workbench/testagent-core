@@ -82,19 +82,23 @@ export interface Interface {
   readonly reload: () => Effect.Effect<void> // testagent_change - add reload method
 }
 
-const add = Effect.fnUntraced(function* (state: State, match: string, bus: Bus.Interface) {
+// testagent_change start - add config parameter for reportWarning
+const add = Effect.fnUntraced(function* (state: State, match: string, bus: Bus.Interface, config: Config.Interface) {
   const md = yield* Effect.tryPromise({
     try: () => ConfigMarkdown.parse(match),
     catch: (err) => err,
   }).pipe(
     Effect.catch(
       Effect.fnUntraced(function* (err) {
+        // testagent_change start - use Chinese error message and report as warning
         const message = ConfigMarkdown.FrontmatterError.isInstance(err)
           ? err.data.message
-          : `Failed to parse skill ${match}`
+          : `解析技能文件失败: ${match}`
+        yield* config.reportWarning({ path: match, message })
         const { Session } = yield* Effect.promise(() => import("@/session/session"))
         yield* bus.publish(Session.Event.Error, { error: new NamedError.Unknown({ message }).toObject() })
-        log.error("failed to load skill", { skill: match, err })
+        yield* Effect.logError("技能加载失败", { skill: match, err })
+        // testagent_change end
         return undefined
       }),
     ),
@@ -102,11 +106,20 @@ const add = Effect.fnUntraced(function* (state: State, match: string, bus: Bus.I
 
   if (!md) return
 
+  // testagent_change start - publish Bus event and report warning on validation failure
   const parsed = z.object({ name: z.string(), description: z.string().optional() }).safeParse(md.data)
-  if (!parsed.success) return
+  if (!parsed.success) {
+    const message = `技能文件格式校验失败: ${match}\n${parsed.error.issues.map((i) => `- ${i.path.join(".")}: ${i.message}`).join("\n")}`
+    yield* config.reportWarning({ path: match, message })
+    const { Session } = yield* Effect.promise(() => import("@/session/session"))
+    yield* bus.publish(Session.Event.Error, { error: new NamedError.Unknown({ message }).toObject() })
+    yield* Effect.logError("技能格式校验失败", { skill: match, issues: parsed.error.issues })
+    return
+  }
+  // testagent_change end
 
   if (state.skills[parsed.data.name]) {
-    log.warn("duplicate skill name", {
+    log.warn("技能名称重复", {
       name: parsed.data.name,
       existing: state.skills[parsed.data.name].location,
       duplicate: match,
@@ -221,11 +234,18 @@ const discoverSkills = Effect.fnUntraced(function* (
   }
 })
 
-const loadSkills = Effect.fnUntraced(function* (state: State, discovered: DiscoveryState, bus: Bus.Interface) {
-  yield* Effect.forEach(discovered.matches, (match) => add(state, match, bus), {
+// testagent_change start - add config parameter for reportWarning
+const loadSkills = Effect.fnUntraced(function* (
+  state: State,
+  discovered: DiscoveryState,
+  bus: Bus.Interface,
+  config: Config.Interface,
+) {
+  yield* Effect.forEach(discovered.matches, (match) => add(state, match, bus, config), {
     concurrency: "unbounded",
     discard: true,
   })
+  // testagent_change end
 
   // testagent_change start
   if (!startupRecorded) {
@@ -255,7 +275,7 @@ export const layer = Layer.effect(
     const state = yield* InstanceState.make(
       Effect.fn("Skill.state")(function* () {
         const s: State = { skills: {}, dirs: new Set() }
-        yield* loadSkills(s, yield* InstanceState.get(discovered), bus)
+        yield* loadSkills(s, yield* InstanceState.get(discovered), bus, config) // testagent_change - pass config
         return s
       }),
     )
