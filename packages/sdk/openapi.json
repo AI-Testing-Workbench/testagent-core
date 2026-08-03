@@ -2649,6 +2649,12 @@
                       "description": {
                         "type": "string"
                       },
+                      "id": {
+                        "type": "string"
+                      },
+                      "version": {
+                        "type": "string"
+                      },
                       "location": {
                         "type": "string"
                       },
@@ -5907,6 +5913,9 @@
                   "noReply": {
                     "type": "boolean"
                   },
+                  "thinkingEnabled": {
+                    "type": "boolean"
+                  },
                   "tools": {
                     "type": "object",
                     "additionalProperties": {
@@ -5921,9 +5930,6 @@
                   },
                   "variant": {
                     "type": "string"
-                  },
-                  "editorContext": {
-                    "$ref": "#/components/schemas/EditorContext"
                   },
                   "parts": {
                     "type": "array",
@@ -6726,6 +6732,9 @@
                   "noReply": {
                     "type": "boolean"
                   },
+                  "thinkingEnabled": {
+                    "type": "boolean"
+                  },
                   "tools": {
                     "type": "object",
                     "additionalProperties": {
@@ -6740,9 +6749,6 @@
                   },
                   "variant": {
                     "type": "string"
-                  },
-                  "editorContext": {
-                    "$ref": "#/components/schemas/EditorContext"
                   },
                   "parts": {
                     "type": "array",
@@ -6875,6 +6881,9 @@
                   },
                   "command": {
                     "type": "string"
+                  },
+                  "thinkingEnabled": {
+                    "type": "boolean"
                   },
                   "variant": {
                     "type": "string"
@@ -7297,6 +7306,9 @@
                 "properties": {
                   "messageID": {
                     "type": "string"
+                  },
+                  "thinkingEnabled": {
+                    "type": "boolean"
                   },
                   "model": {
                     "type": "object",
@@ -10644,30 +10656,6 @@
           }
         ]
       },
-      "EditorContext": {
-        "type": "object",
-        "properties": {
-          "visibleFiles": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            }
-          },
-          "openTabs": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            }
-          },
-          "activeFile": {
-            "type": "string"
-          },
-          "shell": {
-            "type": "string"
-          }
-        },
-        "additionalProperties": false
-      },
       "UserMessage": {
         "type": "object",
         "properties": {
@@ -10742,8 +10730,8 @@
               "type": "boolean"
             }
           },
-          "editorContext": {
-            "$ref": "#/components/schemas/EditorContext"
+          "thinkingEnabled": {
+            "type": "boolean"
           }
         },
         "required": ["id", "sessionID", "role", "time", "agent", "model"],
@@ -12401,6 +12389,9 @@
             "enum": ["subagent", "primary", "all"]
           },
           "hidden": {
+            "type": "boolean"
+          },
+          "thinking": {
             "type": "boolean"
           },
           "options": {
@@ -14224,6 +14215,12 @@
             "items": {
               "type": "string"
             }
+          },
+          "id": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
           }
         },
         "required": ["name", "template", "hints"],
@@ -14246,6 +14243,9 @@
             "type": "boolean"
           },
           "hidden": {
+            "type": "boolean"
+          },
+          "thinking": {
             "type": "boolean"
           },
           "topP": {
