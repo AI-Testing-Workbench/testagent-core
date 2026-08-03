@@ -153,6 +153,11 @@ const live: Layer.Layer<
         options = mergeOptions(options, { chat_template_kwargs: { enable_thinking: input.agent.thinking } })
       }
       // testagent_change end
+      // testagent_change start - 小模型请求默认关闭思考模式
+      if (input.small) {
+        options = mergeOptions(options, { chat_template_kwargs: { enable_thinking: false } })
+      }
+      // testagent_change end
       
       if (isOpenaiOauth) {
         options.instructions = system.join("\n")
