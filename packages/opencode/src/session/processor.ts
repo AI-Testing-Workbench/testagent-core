@@ -89,6 +89,7 @@ interface ProcessorContext extends Input {
   currentText: MessageV2.TextPart | undefined
   reasoningMap: Record<string, MessageV2.ReasoningPart>
   tokenEstimates?: { system: number; messages: number; tools: number }
+  streamStartTime?: number // testagent_change
 }
 
 type StreamEvent = Event
@@ -747,7 +748,7 @@ export const layer: Layer.Layer<
             ctx.reasoningMap = {}
 
             // testagent_change start - Add stream timing logs
-            const streamStartTime = Date.now()
+            ctx.streamStartTime = Date.now()
             let eventCount = 0
             let firstEventTime: number | undefined
             let ttftValue: number | undefined
@@ -766,7 +767,7 @@ export const layer: Layer.Layer<
                 eventCount++
                 if (!firstEventTime) {
                   firstEventTime = Date.now()
-                  ttftValue = firstEventTime - streamStartTime
+                  ttftValue = firstEventTime - ctx.streamStartTime!
                   slog.info("⚡ First event received (TTFT)", {
                     ttft: `${ttftValue}ms`,
                     eventType: event.type,
@@ -775,7 +776,7 @@ export const layer: Layer.Layer<
                 if (eventCount % 50 === 0) {
                   slog.info("📊 Stream progress", {
                     eventCount,
-                    elapsed: `${Date.now() - streamStartTime}ms`,
+                    elapsed: `${Date.now() - ctx.streamStartTime!}ms`,
                   })
                 }
                 // testagent_change end
@@ -787,7 +788,7 @@ export const layer: Layer.Layer<
             )
 
             // testagent_change start - Log stream completion
-            const totalElapsed = Date.now() - streamStartTime
+            const totalElapsed = Date.now() - ctx.streamStartTime!
             slog.info("✅ Stream completed", {
               totalEvents: eventCount,
               totalElapsed: `${totalElapsed}ms`,
@@ -804,7 +805,7 @@ export const layer: Layer.Layer<
                 providerID: streamInput.model.providerID,
                 messageID: ctx.assistantMessage.id,
               }),
-              totalElapsed,
+              totalElapsed / 1000,
             )
             if (ttftValue != null) {
               yield* Metric.update(
@@ -823,6 +824,11 @@ export const layer: Layer.Layer<
               Effect.gen(function* () {
                 yield* Effect.logInfo(`Session ${ctx.sessionID} 会话中断`, { error: ctx.assistantMessage.error })
                 aborted = true
+                // testagent_change start - record partial LLM duration on interrupt
+                const partialElapsed = Date.now() - ctx.streamStartTime!
+                ctx.assistantMessage.time.llm = partialElapsed
+                yield* session.updateMessage(ctx.assistantMessage)
+                // testagent_change end
                 if (!ctx.assistantMessage.error) {
                   yield* halt(new DOMException("Aborted", "AbortError"))
                 }
