@@ -647,22 +647,43 @@ export const layer = Layer.effect(
       return yield* cachedGlobal
     })
 
+    // testagent_change start - support incremental .gitignore updates
     const ensureGitignore = Effect.fn("Config.ensureGitignore")(function* (dir: string) {
       const gitignore = path.join(dir, ".gitignore")
-      const hasIgnore = yield* fs.existsSafe(gitignore)
-      if (!hasIgnore) {
+      const requiredEntries = [
+        "node_modules",
+        "package.json",
+        "package-lock.json",
+        "bun.lock",
+        ".gitignore",
+        "python-interpreter.json",
+        "commands/memory.md",
+      ]
+
+      const existing = yield* fs.readFileStringSafe(gitignore)
+      if (!existing) {
+        // File doesn't exist, write full template
         yield* fs
-          .writeFileString(
-            gitignore,
-            [
-              "node_modules",
-              "package.json",
-              "package-lock.json",
-              "bun.lock",
-              "python-interpreter.json",
-              ".gitignore",
-            ].join("\n"),
-          ) // testagent_change - add python-interpreter.json to .gitignore
+          .writeFileString(gitignore, requiredEntries.join("\n"))
+          .pipe(
+            Effect.catchIf(
+              (e) => e.reason._tag === "PermissionDenied",
+              () => Effect.void,
+            ),
+          )
+        return
+      }
+
+      // File exists, check for missing entries and append them
+      const existingLines = existing.split("\n").map((line) => line.trim())
+      const missing = requiredEntries.filter((entry) => !existingLines.includes(entry))
+
+      if (missing.length > 0) {
+        const needsNewline = existing.length > 0 && !existing.endsWith("\n")
+        const prefix = needsNewline ? "\n" : ""
+        const updated = existing + prefix + missing.join("\n") + "\n"
+        yield* fs
+          .writeFileString(gitignore, updated)
           .pipe(
             Effect.catchIf(
               (e) => e.reason._tag === "PermissionDenied",
@@ -671,6 +692,7 @@ export const layer = Layer.effect(
           )
       }
     })
+    // testagent_change end
 
     const loadInstanceState = Effect.fn("Config.loadInstanceState")(
       function* (ctx: InstanceContext) {
