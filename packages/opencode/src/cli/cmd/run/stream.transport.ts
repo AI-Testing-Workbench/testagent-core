@@ -16,7 +16,7 @@
 // We also re-check live session status before resolving an idle event so a
 // delayed idle from an older turn cannot complete a newer busy turn.
 import type { Event, GlobalEvent, OpencodeClient } from "@opencode-ai/sdk/v2"
-import { Context, Deferred, Effect, Exit, Layer, Scope, Stream } from "effect"
+import { Context, Deferred, Effect, Exit, Layer, Metric, Scope, Stream } from "effect"
 import { makeRuntime } from "@/effect/run-service"
 import {
   blockerStatus,
@@ -43,6 +43,10 @@ import {
   type SubagentData,
 } from "./subagent-data"
 import { traceFooterOutput, writeSessionOutput } from "./stream"
+import {
+  sessionPermissionDuration,
+  sessionWaitDuration,
+} from "@opencode-ai/core/effect/observability"
 import type {
   FooterApi,
   FooterOutput,
@@ -105,6 +109,8 @@ type State = {
   blockerTick: number
   selectedSubagent?: string
   blockers: Map<string, number>
+  permissionStartTimes: Map<string, number>
+  permissionDurations: Map<string, number>
 }
 
 type TransportService = {
@@ -114,6 +120,12 @@ type TransportService = {
 }
 
 class Service extends Context.Service<Service, TransportService>()("@opencode/RunStreamTransport") {}
+
+const permissionWaitTotals = new Map<string, number>()
+
+export function getPermissionWaitTotal(sessionID: string): number {
+  return permissionWaitTotals.get(sessionID) ?? 0
+}
 
 function sid(event: Event): string | undefined {
   if (event.type === "message.updated") {
@@ -431,6 +443,8 @@ function createLayer(input: StreamInput) {
           footerView: { type: "prompt" },
           blockerTick: 0,
           blockers: new Map(),
+          permissionStartTimes: new Map(),
+          permissionDurations: new Map(),
         }
         const recovering = new Set<string>()
         const currentSubagentState = () => {
@@ -770,6 +784,16 @@ function createLayer(input: StreamInput) {
                 trackBlocker(event)
 
                 const prev = event.type === "message.part.updated" ? listSubagentTabs(state.subagent) : undefined
+
+                if (event.type === "permission.asked") {
+                  const now = Date.now()
+                  state.permissionStartTimes.set(event.properties.id, now)
+                  event.properties.metadata = {
+                    ...event.properties.metadata,
+                    time: { start: now },
+                  }
+                }
+
                 const next = reduceSessionData({
                   data: state.data,
                   event,
@@ -778,6 +802,27 @@ function createLayer(input: StreamInput) {
                   limits: input.limits(),
                 })
                 state.data = next.data
+
+                if (event.type === "permission.asked") {
+                  state.permissionStartTimes.set(event.properties.id, Date.now())
+                }
+
+                if (event.type === "permission.replied") {
+                  const start = state.permissionStartTimes.get(event.properties.requestID)
+                  if (start) {
+                    const duration = Date.now() - start
+                    state.permissionDurations.set(event.properties.requestID, duration)
+                    state.permissionStartTimes.delete(event.properties.requestID)
+                    const currentTotal = permissionWaitTotals.get(input.sessionID) ?? 0
+                    permissionWaitTotals.set(input.sessionID, currentTotal + duration)
+                     yield* Metric.update(
+                       Metric.withAttributes(sessionPermissionDuration, {
+                         sessionID: input.sessionID,
+                       }),
+                       duration / 1000,
+                     )
+                  }
+                }
 
                 if (
                   event.type === "message.part.updated" &&
