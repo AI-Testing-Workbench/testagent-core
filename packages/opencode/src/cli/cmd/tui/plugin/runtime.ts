@@ -39,6 +39,7 @@ import { INTERNAL_TUI_PLUGINS, type InternalTuiPlugin } from "./internal"
 import { setupSlots, Slot as View } from "./slots"
 import type { HostPluginApi, HostSlots } from "./slots"
 import { ConfigPlugin } from "@/config/plugin"
+import { filterPluginOrigins } from "@/testagent/plugin-filter" // testagent_change
 
 ensureRuntimePluginSupport({ additional: keymapRuntimeModules })
 
@@ -1039,6 +1040,13 @@ async function load(input: { api: Api; config: TuiConfig.Resolved }) {
           log.info("skipping external tui plugins in pure mode", { count: config.plugin_origins.length })
         }
 
+        // testagent_change start - filter plugins by external allowlist
+        const { allowed: pluginRecords, filtered: pluginFiltered } = await filterPluginOrigins(records, config.plugin_debug)
+        for (const f of pluginFiltered) {
+          log.info("tui plugin filtered by allowlist", { spec: f.spec, reason: f.reason })
+        }
+        // testagent_change end
+
         for (const item of INTERNAL_TUI_PLUGINS) {
           log.info("loading internal tui plugin", { id: item.id })
           const entry = loadInternalPlugin(item)
@@ -1053,7 +1061,7 @@ async function load(input: { api: Api; config: TuiConfig.Resolved }) {
           })
         }
 
-        const ready = await resolveExternalPlugins(records, () => TuiConfig.waitForDependencies())
+        const ready = await resolveExternalPlugins(pluginRecords, () => TuiConfig.waitForDependencies())
         await addExternalPluginEntries(next, ready)
 
         applyInitialPluginEnabledState(next, config)

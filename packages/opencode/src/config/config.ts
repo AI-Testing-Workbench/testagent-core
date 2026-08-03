@@ -209,6 +209,12 @@ export const Info = Schema.Struct({
       ),
     }),
   ),
+  // testagent_change start - plugin debug mode: when true, skip all plugin allowlist filtering
+  plugin_debug: Schema.optional(Schema.Boolean).annotate({
+    description:
+      "Enable plugin debug mode. When true, all plugins load without allowlist filtering (default: false)",
+  }),
+  // testagent_change end
   // testagent_change start - langfuse tracing toggle
   langfuse: Schema.optional(Schema.Boolean).annotate({
     description: "Enable or disable Langfuse tracing (default: true)",
@@ -418,6 +424,9 @@ export type Info = DeepMutable<Schema.Schema.Type<typeof Info>> & {
     success: string[]
     failed: { spec: string; error: string }[]
   }
+  // testagent_change end
+  // testagent_change start - plugin debug mode toggle
+  plugin_debug?: boolean
   // testagent_change end
 }
 
