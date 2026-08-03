@@ -108,6 +108,16 @@ const cli = yargs(args)
     process.env.OPENCODE = "1"
     process.env.OPENCODE_PID = String(process.pid)
 
+    // testagent_change start - Load custom env vars into process.env at startup
+    try {
+      const { EnvVars } = await import("@/testagent/env-vars")
+      await EnvVars.syncToProcessEnv()
+      Log.Default.info("custom env vars loaded")
+    } catch (err: any) {
+      Log.Default.warn("failed to load custom env vars", { error: err?.message || String(err) })
+    }
+    // testagent_change end
+
     Log.Default.info("opencode", {
       version: InstallationVersion,
       args: process.argv.slice(2),

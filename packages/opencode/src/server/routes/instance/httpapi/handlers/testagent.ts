@@ -1,9 +1,17 @@
 import * as Log from "@opencode-ai/core/util/log"
 import { Effect } from "effect"
-import { HttpApiBuilder } from "effect/unstable/httpapi"
+import { HttpApiBuilder, HttpApiError } from "effect/unstable/httpapi" // testagent_change
 import { RootHttpApi } from "../api"
-import { TestagentUserPayload } from "../groups/testagent"
+import {
+  ApiEnvVarsConfigInvalidError,
+  EnvVarBatchCreatePayload,
+  EnvVarBatchDeletePayload,
+  EnvVarBatchQueryPayload,
+  EnvVarBatchUpdatePayload,
+  TestagentUserPayload,
+} from "../groups/testagent" // testagent_change
 import type { StoredToken } from "@/external-auth"
+import { EnvVarsConfigInvalidError } from "@/testagent/env-vars" // testagent_change
 
 const log = Log.create({ service: "server" })
 
@@ -19,6 +27,8 @@ export const testagentHandlers = HttpApiBuilder.group(RootHttpApi, "testagent", 
 
       log.info("Setting testagent user info", { userId, userName, sapId, hasToken: !!token })
       User.set({ userId, userName, sapId, openId, originPathId, pathName, token })
+      const { EnvVars } = yield* Effect.promise(() => import("@/testagent/env-vars"))
+      yield* Effect.promise(() => EnvVars.syncToProcessEnv())
 
       if (token && userId && userName && sapId) {
         const existingToken = yield* Effect.promise(() => ExternalAuth.getToken())
@@ -31,6 +41,85 @@ export const testagentHandlers = HttpApiBuilder.group(RootHttpApi, "testagent", 
       return true
     })
 
-    return handlers.handle("userSet", userSet)
+    // testagent_change start
+    const mapEnvVarsError = (error: unknown) => {
+      if (error instanceof EnvVarsConfigInvalidError) {
+        return new ApiEnvVarsConfigInvalidError({
+          name: "EnvVarsConfigInvalidError",
+          data: {
+            message: error.message,
+            invalidEntries: error.invalidEntries,
+          },
+        })
+      }
+      return new HttpApiError.InternalServerError({})
+    }
+
+    const envVarsList = Effect.fn("TestagentHttpApi.envVarsList")(function* () {
+      const { EnvVars } = yield* Effect.promise(() => import("@/testagent/env-vars"))
+      return yield* Effect.tryPromise({
+        try: () => EnvVars.getAll(),
+        catch: mapEnvVarsError,
+      })
+    })
+
+    const envVarBatchQuery = Effect.fn("TestagentHttpApi.envVarBatchQuery")(function* (ctx: {
+      payload: typeof EnvVarBatchQueryPayload.Type
+    }) {
+      const { EnvVars } = yield* Effect.promise(() => import("@/testagent/env-vars"))
+      return yield* Effect.tryPromise({
+        try: () => EnvVars.query([...ctx.payload]),
+        catch: mapEnvVarsError,
+      })
+    })
+    // testagent_change end
+
+    const customEnvVarBatchCreate = Effect.fn("TestagentHttpApi.customEnvVarBatchCreate")(function* (ctx: {
+      payload: typeof EnvVarBatchCreatePayload.Type
+    }) {
+      const { EnvVars } = yield* Effect.promise(() => import("@/testagent/env-vars"))
+      const result = yield* Effect.promise(() => EnvVars.batchCreate(ctx.payload.map(item => ({ ...item }))))
+      if (result.successKeys.length > 0) {
+        yield* Effect.promise(() => EnvVars.syncToProcessEnv())
+        log.info("Batch create custom env vars and synced to process.env", { 
+          success: result.successKeys.length, 
+          failed: result.failedKeys.length 
+        })
+      }
+      return result
+    })
+
+    const customEnvVarBatchUpdate = Effect.fn("TestagentHttpApi.customEnvVarBatchUpdate")(function* (ctx: {
+      payload: typeof EnvVarBatchUpdatePayload.Type
+    }) {
+      const { EnvVars } = yield* Effect.promise(() => import("@/testagent/env-vars"))
+      const result = yield* Effect.promise(() => EnvVars.batchUpdate(ctx.payload.map(item => ({ ...item }))))
+      if (result.successKeys.length > 0) {
+        yield* Effect.promise(() => EnvVars.syncToProcessEnv())
+        log.info("Batch update custom env vars and synced to process.env", { 
+          success: result.successKeys.length, 
+          failed: result.failedKeys.length 
+        })
+      }
+      return result
+    })
+
+    const customEnvVarBatchDelete = Effect.fn("TestagentHttpApi.customEnvVarBatchDelete")(function* (ctx: {
+      payload: typeof EnvVarBatchDeletePayload.Type
+    }) {
+      const { EnvVars } = yield* Effect.promise(() => import("@/testagent/env-vars"))
+      yield* Effect.promise(() => EnvVars.batchDelete([...ctx.payload]))
+      yield* Effect.promise(() => EnvVars.syncToProcessEnv())
+      log.info("Batch delete custom env vars and synced to process.env", { keys: ctx.payload.length })
+      return true
+    })
+
+    return handlers
+      .handle("userSet", userSet)
+      .handle("envVarsList", envVarsList)
+      .handle("envVarBatchQuery", envVarBatchQuery)
+      .handle("customEnvVarBatchCreate", customEnvVarBatchCreate)
+      .handle("customEnvVarBatchUpdate", customEnvVarBatchUpdate)
+      .handle("customEnvVarBatchDelete", customEnvVarBatchDelete)
   }),
 )
