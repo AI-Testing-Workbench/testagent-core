@@ -18,6 +18,15 @@ interface UserInfo {
 let override: UserInfo | undefined
 let cachedFromFile: UserInfo | undefined
 let fileReadAttempted = false
+const initialEnv: UserInfo = {
+  userId: process.env["TESTAGENT_USER_ID"],
+  userName: process.env["TESTAGENT_USER_NAME"],
+  sapId: process.env["TESTAGENT_SAP_ID"],
+  openId: process.env["TESTAGENT_OPEN_ID"],
+  originPathId: process.env["TESTAGENT_ORIGIN_PATH_ID"],
+  pathName: process.env["TESTAGENT_PATH_NAME"],
+  token: process.env["TESTAGENT_USER_TOKEN"],
+}
 
 export const User = {
   get(): UserInfo {
@@ -27,16 +36,9 @@ export const User = {
       return override
     }
     
-    // fall back to env vars written by thread.ts after external auth
-    const fromEnv = {
-      userId: process.env["TESTAGENT_USER_ID"],
-      userName: process.env["TESTAGENT_USER_NAME"],
-      sapId: process.env["TESTAGENT_SAP_ID"],
-      openId: process.env["TESTAGENT_OPEN_ID"],
-      originPathId: process.env["TESTAGENT_ORIGIN_PATH_ID"],
-      pathName: process.env["TESTAGENT_PATH_NAME"],
-      token: process.env["TESTAGENT_USER_TOKEN"],
-    }
+    // Preserve the initial process values. Custom environment variables can later
+    // override process.env, but they must not change the automatic system identity.
+    const fromEnv = initialEnv
     if (fromEnv.userId) {
       log.debug("from env", { user: fromEnv })
       return fromEnv
