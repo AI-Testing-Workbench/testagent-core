@@ -37,7 +37,6 @@ export const Info = Schema.Struct({
   mode: Schema.Literals(["subagent", "primary", "all"]),
   native: Schema.optional(Schema.Boolean),
   hidden: Schema.optional(Schema.Boolean),
-  thinking: Schema.optional(Schema.Boolean), // testagent_change
   topP: Schema.optional(Schema.Finite),
   temperature: Schema.optional(Schema.Finite),
   color: Schema.optional(Schema.String),
@@ -320,12 +319,6 @@ export const layer = Layer.effect(
           item.mode = value.mode ?? item.mode
           item.color = value.color ?? item.color
           item.hidden = value.hidden ?? item.hidden
-          // testagent_change start - plugin hooks may use object-form provider thinking options
-          if (typeof value.thinking === "boolean") item.thinking = value.thinking
-          if (value.thinking !== undefined && typeof value.thinking !== "boolean") {
-            item.options = mergeDeep(item.options, { thinking: value.thinking })
-          }
-          // testagent_change end
           item.name = value.name ?? item.name
           item.steps = value.steps ?? item.steps
           item.options = mergeDeep(item.options, value.options ?? {})

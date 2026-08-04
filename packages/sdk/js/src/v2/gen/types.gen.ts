@@ -974,14 +974,6 @@ export type AgentConfig = {
   description?: string
   mode?: "subagent" | "primary" | "all"
   hidden?: boolean
-  /**
-   * Enable agent thinking with a boolean, or pass provider-specific thinking options.
-   */
-  thinking?:
-    | boolean
-    | {
-        [key: string]: unknown
-      }
   options?: {
     [key: string]: unknown
   }
@@ -1003,10 +995,6 @@ export type AgentConfig = {
     | "subagent"
     | "primary"
     | "all"
-    | boolean
-    | {
-        [key: string]: unknown
-      }
     | {
         [key: string]: unknown
       }
@@ -1645,7 +1633,6 @@ export type Agent = {
   mode: "subagent" | "primary" | "all"
   native?: boolean
   hidden?: boolean
-  thinking?: boolean
   topP?: number
   temperature?: number
   color?: string
