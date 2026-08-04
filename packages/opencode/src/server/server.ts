@@ -65,8 +65,6 @@ export async function listen(opts: ListenOptions): Promise<Listener> {
   const password = process.env["OPENCODE_SERVER_PASSWORD"]
   const username = process.env["OPENCODE_SERVER_USERNAME"]
   setAccountInfo(username ?? "", password ? Buffer.from(password).toString("base64") : "")
-  log.info("server credentials", { username, password: Buffer.from(password).toString("base64") })
-  log.info("server backend", { "opencode.server.runtime": HttpApiServer.name })
   startup.readyAt = performance.now() // testagent_change
   const listenStart = performance.now()
 
