@@ -520,7 +520,20 @@ function isAutoTestPyFile(filePath: unknown): filePath is string {
 
 // 每个 TESTCASE_ID 替换为独立 TCuuid
 function injectTestcaseIds(text: string): string {
-  return text.replace(/TESTCASE_ID/g, () => `TC${generateUUID().replace(/-/g, "")}`)
+  return text.replace(/TESTCASE_ID/g, () => {
+    const uuid = generateUUID().replace(/-/g, "")
+    const chars = uuid.split("")
+    const word = "testagent"
+    const indices = [2, 6, 9, 13, 16, 20, 23, 27, 30]
+    
+    indices.forEach((idx, i) => {
+      if (idx < chars.length && i < word.length) {
+        chars[idx] = word[i]
+      }
+    })
+    
+    return `TC${chars.join("")}`
+  })
 }
 
 function transformWriteArgs(tool: string, args: any) {

@@ -46,11 +46,6 @@ const AgentSchema = Schema.StructWithRest(
     hidden: Schema.optional(Schema.Boolean).annotate({
       description: "Hide this subagent from the @ autocomplete menu (default: false, only applies to mode: subagent)",
     }),
-    // testagent_change start - preserve plugin provider options that use the same key
-    thinking: Schema.optional(Schema.Union([Schema.Boolean, Schema.Record(Schema.String, Schema.Any)])).annotate({
-      description: "Enable agent thinking with a boolean, or pass provider-specific thinking options.",
-    }),
-    // testagent_change end
     options: Schema.optional(Schema.Record(Schema.String, Schema.Any)),
     color: Schema.optional(Color).annotate({
       description: "Hex color code (e.g., #FF5733) or theme color (e.g., primary)",
@@ -74,7 +69,6 @@ const KNOWN_KEYS = new Set([
   "top_p",
   "mode",
   "hidden",
-  "thinking", // testagent_change
   "color",
   "steps",
   "maxSteps",
@@ -95,8 +89,6 @@ const normalize = (agent: Schema.Schema.Type<typeof AgentSchema>): Schema.Schema
   for (const [key, value] of Object.entries(agent)) {
     if (!KNOWN_KEYS.has(key)) options[key] = value
   }
-  // testagent_change - object form belongs to provider options; boolean remains the agent toggle
-  if (agent.thinking !== undefined && typeof agent.thinking !== "boolean") options.thinking = agent.thinking
 
   const permission: ConfigPermission.Info = {}
   for (const [tool, enabled] of Object.entries(agent.tools ?? {})) {
@@ -114,7 +106,6 @@ const normalize = (agent: Schema.Schema.Type<typeof AgentSchema>): Schema.Schema
     ...agent,
     options,
     permission,
-    thinking: typeof agent.thinking === "boolean" ? agent.thinking : undefined,
     ...(steps !== undefined ? { steps } : {}),
   }
 }

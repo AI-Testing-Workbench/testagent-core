@@ -546,6 +546,499 @@
         ]
       }
     },
+    "/testagent/env-vars": {
+      "get": {
+        "tags": ["testagent"],
+        "operationId": "testagent.envVars.list",
+        "parameters": [
+          {
+            "name": "directory",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "按来源分组的环境变量列表",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "system": {
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "object",
+                        "properties": {
+                          "key": {
+                            "type": "string",
+                            "pattern": "^[a-zA-Z_][a-zA-Z0-9_]*$"
+                          },
+                          "value": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "description": {
+                            "type": "string"
+                          }
+                        },
+                        "required": ["key", "value"],
+                        "additionalProperties": false
+                      }
+                    },
+                    "custom": {
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "object",
+                        "properties": {
+                          "key": {
+                            "type": "string",
+                            "pattern": "^[a-zA-Z_][a-zA-Z0-9_]*$"
+                          },
+                          "value": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "description": {
+                            "type": "string"
+                          }
+                        },
+                        "required": ["key", "value"],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": ["system", "custom"],
+                  "additionalProperties": false,
+                  "description": "按来源分组的环境变量列表"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "EnvVarsConfigInvalidError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EnvVarsConfigInvalidError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "InternalServerError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/effect_HttpApiError_InternalServerError"
+                }
+              }
+            }
+          }
+        },
+        "description": "Get system auto-injected and custom environment variables separately.",
+        "summary": "Get environment variables",
+        "x-codeSamples": [
+          {
+            "lang": "js",
+            "source": "import { createOpencodeClient } from \"@opencode-ai/sdk\n\nconst client = createOpencodeClient()\nawait client.testagent.envVars.list({\n  ...\n})"
+          }
+        ]
+      }
+    },
+    "/testagent/env-vars/query": {
+      "post": {
+        "tags": ["testagent"],
+        "operationId": "testagent.envVars.batchQuery",
+        "parameters": [
+          {
+            "name": "directory",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "按来源分组的查询结果",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "system": {
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "object",
+                        "properties": {
+                          "key": {
+                            "type": "string",
+                            "pattern": "^[a-zA-Z_][a-zA-Z0-9_]*$"
+                          },
+                          "value": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "description": {
+                            "type": "string"
+                          }
+                        },
+                        "required": ["key", "value"],
+                        "additionalProperties": false
+                      }
+                    },
+                    "custom": {
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "object",
+                        "properties": {
+                          "key": {
+                            "type": "string",
+                            "pattern": "^[a-zA-Z_][a-zA-Z0-9_]*$"
+                          },
+                          "value": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "description": {
+                            "type": "string"
+                          }
+                        },
+                        "required": ["key", "value"],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": ["system", "custom"],
+                  "additionalProperties": false,
+                  "description": "按来源分组的查询结果"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "EnvVarsConfigInvalidError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EnvVarsConfigInvalidError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "InternalServerError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/effect_HttpApiError_InternalServerError"
+                }
+              }
+            }
+          }
+        },
+        "description": "Query environment variables by a list of keys. Returns system and custom groups with only matching keys.",
+        "summary": "Query environment variables by keys",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "pattern": "^[a-zA-Z_][a-zA-Z0-9_]*$"
+                }
+              }
+            }
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "js",
+            "source": "import { createOpencodeClient } from \"@opencode-ai/sdk\n\nconst client = createOpencodeClient()\nawait client.testagent.envVars.batchQuery({\n  ...\n})"
+          }
+        ]
+      }
+    },
+    "/testagent/env-vars/custom": {
+      "post": {
+        "tags": ["testagent"],
+        "operationId": "testagent.customEnvVars.batchCreate",
+        "parameters": [
+          {
+            "name": "directory",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "批量创建结果",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "successKeys": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "failedKeys": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "failedEntries": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "key": {
+                            "type": "string"
+                          },
+                          "message": {
+                            "type": "string"
+                          }
+                        },
+                        "required": ["key", "message"],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": ["successKeys", "failedKeys", "failedEntries"],
+                  "additionalProperties": false,
+                  "description": "批量创建结果"
+                }
+              }
+            }
+          }
+        },
+        "description": "Create multiple custom environment variables. Only non-existing keys with valid format will succeed.",
+        "summary": "Batch create custom environment variables",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "key": {
+                      "type": "string"
+                    },
+                    "value": {
+                      "type": "string"
+                    },
+                    "description": {
+                      "type": "string"
+                    }
+                  },
+                  "required": ["key", "value"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "js",
+            "source": "import { createOpencodeClient } from \"@opencode-ai/sdk\n\nconst client = createOpencodeClient()\nawait client.testagent.customEnvVars.batchCreate({\n  ...\n})"
+          }
+        ]
+      },
+      "put": {
+        "tags": ["testagent"],
+        "operationId": "testagent.customEnvVars.batchUpdate",
+        "parameters": [
+          {
+            "name": "directory",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "批量更新结果",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "successKeys": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "failedKeys": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "failedEntries": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "key": {
+                            "type": "string"
+                          },
+                          "message": {
+                            "type": "string"
+                          }
+                        },
+                        "required": ["key", "message"],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": ["successKeys", "failedKeys", "failedEntries"],
+                  "additionalProperties": false,
+                  "description": "批量更新结果"
+                }
+              }
+            }
+          }
+        },
+        "description": "Update multiple custom environment variables. Only existing custom keys with valid format will succeed.",
+        "summary": "Batch update custom environment variables",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "key": {
+                      "type": "string"
+                    },
+                    "value": {
+                      "type": "string"
+                    },
+                    "description": {
+                      "type": "string"
+                    }
+                  },
+                  "required": ["key", "value"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "js",
+            "source": "import { createOpencodeClient } from \"@opencode-ai/sdk\n\nconst client = createOpencodeClient()\nawait client.testagent.customEnvVars.batchUpdate({\n  ...\n})"
+          }
+        ]
+      },
+      "delete": {
+        "tags": ["testagent"],
+        "operationId": "testagent.customEnvVars.batchDelete",
+        "parameters": [
+          {
+            "name": "directory",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "批量删除成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "boolean",
+                  "description": "批量删除成功"
+                }
+              }
+            }
+          }
+        },
+        "description": "Delete multiple custom environment variables. Non-existing keys are ignored.",
+        "summary": "Batch delete custom environment variables",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "pattern": "^[a-zA-Z_][a-zA-Z0-9_]*$"
+                }
+              }
+            }
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "js",
+            "source": "import { createOpencodeClient } from \"@opencode-ai/sdk\n\nconst client = createOpencodeClient()\nawait client.testagent.customEnvVars.batchDelete({\n  ...\n})"
+          }
+        ]
+      }
+    },
     "/event": {
       "get": {
         "tags": ["event"],
@@ -10760,6 +11253,10 @@
               "completed": {
                 "type": "integer",
                 "minimum": 0
+              },
+              "llm": {
+                "type": "integer",
+                "minimum": 0
               }
             },
             "required": ["created"],
@@ -12391,9 +12888,6 @@
           "hidden": {
             "type": "boolean"
           },
-          "thinking": {
-            "type": "boolean"
-          },
           "options": {
             "type": "object"
           },
@@ -12857,6 +13351,9 @@
               ]
             }
           },
+          "plugin_enable": {
+            "type": "boolean"
+          },
           "plugin_origins": {
             "type": "array",
             "items": {
@@ -12937,6 +13434,9 @@
             },
             "required": ["success", "failed"],
             "additionalProperties": false
+          },
+          "plugin_debug": {
+            "type": "boolean"
           },
           "langfuse": {
             "type": "boolean"
@@ -13298,6 +13798,54 @@
         },
         "additionalProperties": false
       },
+      "EnvVarsConfigInvalidError": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "enum": ["EnvVarsConfigInvalidError"]
+          },
+          "data": {
+            "type": "object",
+            "properties": {
+              "message": {
+                "type": "string"
+              },
+              "invalidEntries": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "key": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": ["key", "message"],
+                  "additionalProperties": false
+                }
+              }
+            },
+            "required": ["message", "invalidEntries"],
+            "additionalProperties": false
+          }
+        },
+        "required": ["name", "data"],
+        "additionalProperties": false
+      },
+      "effect_HttpApiError_InternalServerError": {
+        "type": "object",
+        "properties": {
+          "_tag": {
+            "type": "string",
+            "enum": ["InternalServerError"]
+          }
+        },
+        "required": ["_tag"],
+        "additionalProperties": false
+      },
       "Model": {
         "type": "object",
         "properties": {
@@ -13569,17 +14117,6 @@
           }
         },
         "required": ["consoleManagedProviders", "switchableOrgCount"],
-        "additionalProperties": false
-      },
-      "effect_HttpApiError_InternalServerError": {
-        "type": "object",
-        "properties": {
-          "_tag": {
-            "type": "string",
-            "enum": ["InternalServerError"]
-          }
-        },
-        "required": ["_tag"],
         "additionalProperties": false
       },
       "ToolListItem": {
@@ -14243,9 +14780,6 @@
             "type": "boolean"
           },
           "hidden": {
-            "type": "boolean"
-          },
-          "thinking": {
             "type": "boolean"
           },
           "topP": {
