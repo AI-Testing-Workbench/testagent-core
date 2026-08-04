@@ -706,6 +706,29 @@ test("treats agent variant as model-scoped setting (not provider option)", async
   })
 })
 
+// testagent_change start - support plugin-provided thinking options
+test("moves agent thinking options into provider options", async () => {
+  await using tmp = await tmpdir({
+    config: {
+      agent: {
+        "Sisyphus-Junior": {
+          thinking: { type: "enabled", budgetTokens: 32_000 },
+        },
+      },
+    },
+  })
+
+  await WithInstance.provide({
+    directory: tmp.path,
+    fn: async () => {
+      const agent = (await load()).agent?.["Sisyphus-Junior"]
+      expect(agent?.thinking).toBeUndefined()
+      expect(agent?.options?.thinking).toEqual({ type: "enabled", budgetTokens: 32_000 })
+    },
+  })
+})
+// testagent_change end
+
 test("handles command configuration", async () => {
   await using tmp = await tmpdir({
     init: async (dir) => {

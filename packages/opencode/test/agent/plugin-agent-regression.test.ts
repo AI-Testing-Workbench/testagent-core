@@ -23,6 +23,8 @@ it.instance(
       const added = agents.find((agent) => agent.name === PLUGIN_AGENT.name)
       expect(added?.description).toBe(PLUGIN_AGENT.description)
       expect(added?.mode).toBe(PLUGIN_AGENT.mode)
+      expect(added?.thinking).toBeUndefined()
+      expect(added?.options.thinking).toEqual({ type: "enabled", budgetTokens: 32_000 })
     }),
   { config: { plugin: [pluginUrl] } },
 )

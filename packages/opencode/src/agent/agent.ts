@@ -320,7 +320,12 @@ export const layer = Layer.effect(
           item.mode = value.mode ?? item.mode
           item.color = value.color ?? item.color
           item.hidden = value.hidden ?? item.hidden
-          item.thinking = value.thinking ?? item.thinking // testagent_change
+          // testagent_change start - plugin hooks may use object-form provider thinking options
+          if (typeof value.thinking === "boolean") item.thinking = value.thinking
+          if (value.thinking !== undefined && typeof value.thinking !== "boolean") {
+            item.options = mergeDeep(item.options, { thinking: value.thinking })
+          }
+          // testagent_change end
           item.name = value.name ?? item.name
           item.steps = value.steps ?? item.steps
           item.options = mergeDeep(item.options, value.options ?? {})
