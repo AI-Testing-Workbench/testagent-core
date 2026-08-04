@@ -174,6 +174,11 @@ export const Info = Schema.Struct({
   }),
   // User-facing plugin config is stored as Specs; provenance gets attached later while configs are merged.
   plugin: Schema.optional(Schema.mutable(Schema.Array(ConfigPlugin.Spec))),
+  // testagent_change start - global plugin system toggle
+  pluginEnable: Schema.optional(Schema.Boolean).annotate({
+    description: "Enable or disable all built-in and external plugins (default: true)",
+  }),
+  // testagent_change end
   // testagent_change start - expose runtime plugin load state to clients without persisting it
   plugin_origins: Schema.optional(
     Schema.mutable(

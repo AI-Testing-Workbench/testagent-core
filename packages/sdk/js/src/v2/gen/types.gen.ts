@@ -419,6 +419,7 @@ export type AssistantMessage = {
   time: {
     created: number
     completed?: number
+    llm?: number
   }
   error?:
     | ProviderAuthError
@@ -973,7 +974,14 @@ export type AgentConfig = {
   description?: string
   mode?: "subagent" | "primary" | "all"
   hidden?: boolean
-  thinking?: boolean
+  /**
+   * Enable agent thinking with a boolean, or pass provider-specific thinking options.
+   */
+  thinking?:
+    | boolean
+    | {
+        [key: string]: unknown
+      }
   options?: {
     [key: string]: unknown
   }
@@ -995,6 +1003,10 @@ export type AgentConfig = {
     | "subagent"
     | "primary"
     | "all"
+    | boolean
+    | {
+        [key: string]: unknown
+      }
     | {
         [key: string]: unknown
       }
@@ -1172,6 +1184,7 @@ export type Config = {
         },
       ]
   >
+  pluginEnable?: boolean
   plugin_origins?: Array<{
     spec:
       | string
@@ -1203,6 +1216,7 @@ export type Config = {
       error: string
     }>
   }
+  plugin_debug?: boolean
   langfuse?: boolean
   goal?: {
     enabled?: boolean
@@ -1323,6 +1337,21 @@ export type Config = {
   }
 }
 
+export type EnvVarsConfigInvalidError = {
+  name: "EnvVarsConfigInvalidError"
+  data: {
+    message: string
+    invalidEntries: Array<{
+      key: string
+      message: string
+    }>
+  }
+}
+
+export type EffectHttpApiErrorInternalServerError = {
+  _tag: "InternalServerError"
+}
+
 export type Model = {
   id: string
   providerID: string
@@ -1412,10 +1441,6 @@ export type ConsoleState = {
   consoleManagedProviders: Array<string>
   activeOrgName?: string
   switchableOrgCount: number
-}
-
-export type EffectHttpApiErrorInternalServerError = {
-  _tag: "InternalServerError"
 }
 
 export type ToolListItem = {
@@ -3623,6 +3648,183 @@ export type TestagentUserSetResponses = {
 }
 
 export type TestagentUserSetResponse = TestagentUserSetResponses[keyof TestagentUserSetResponses]
+
+export type TestagentEnvVarsListData = {
+  body?: never
+  path?: never
+  query?: {
+    directory?: string
+    workspace?: string
+  }
+  url: "/testagent/env-vars"
+}
+
+export type TestagentEnvVarsListErrors = {
+  /**
+   * EnvVarsConfigInvalidError
+   */
+  422: EnvVarsConfigInvalidError
+  /**
+   * InternalServerError
+   */
+  500: EffectHttpApiErrorInternalServerError
+}
+
+export type TestagentEnvVarsListError = TestagentEnvVarsListErrors[keyof TestagentEnvVarsListErrors]
+
+export type TestagentEnvVarsListResponses = {
+  /**
+   * 按来源分组的环境变量列表
+   */
+  200: {
+    system: {
+      [key: string]: {
+        key: string
+        value: string
+        description?: string
+      }
+    }
+    custom: {
+      [key: string]: {
+        key: string
+        value: string
+        description?: string
+      }
+    }
+  }
+}
+
+export type TestagentEnvVarsListResponse = TestagentEnvVarsListResponses[keyof TestagentEnvVarsListResponses]
+
+export type TestagentEnvVarsBatchQueryData = {
+  body?: Array<string>
+  path?: never
+  query?: {
+    directory?: string
+    workspace?: string
+  }
+  url: "/testagent/env-vars/query"
+}
+
+export type TestagentEnvVarsBatchQueryErrors = {
+  /**
+   * EnvVarsConfigInvalidError
+   */
+  422: EnvVarsConfigInvalidError
+  /**
+   * InternalServerError
+   */
+  500: EffectHttpApiErrorInternalServerError
+}
+
+export type TestagentEnvVarsBatchQueryError = TestagentEnvVarsBatchQueryErrors[keyof TestagentEnvVarsBatchQueryErrors]
+
+export type TestagentEnvVarsBatchQueryResponses = {
+  /**
+   * 按来源分组的查询结果
+   */
+  200: {
+    system: {
+      [key: string]: {
+        key: string
+        value: string
+        description?: string
+      }
+    }
+    custom: {
+      [key: string]: {
+        key: string
+        value: string
+        description?: string
+      }
+    }
+  }
+}
+
+export type TestagentEnvVarsBatchQueryResponse =
+  TestagentEnvVarsBatchQueryResponses[keyof TestagentEnvVarsBatchQueryResponses]
+
+export type TestagentCustomEnvVarsBatchDeleteData = {
+  body?: Array<string>
+  path?: never
+  query?: {
+    directory?: string
+    workspace?: string
+  }
+  url: "/testagent/env-vars/custom"
+}
+
+export type TestagentCustomEnvVarsBatchDeleteResponses = {
+  /**
+   * 批量删除成功
+   */
+  200: boolean
+}
+
+export type TestagentCustomEnvVarsBatchDeleteResponse =
+  TestagentCustomEnvVarsBatchDeleteResponses[keyof TestagentCustomEnvVarsBatchDeleteResponses]
+
+export type TestagentCustomEnvVarsBatchCreateData = {
+  body?: Array<{
+    key: string
+    value: string
+    description?: string
+  }>
+  path?: never
+  query?: {
+    directory?: string
+    workspace?: string
+  }
+  url: "/testagent/env-vars/custom"
+}
+
+export type TestagentCustomEnvVarsBatchCreateResponses = {
+  /**
+   * 批量创建结果
+   */
+  200: {
+    successKeys: Array<string>
+    failedKeys: Array<string>
+    failedEntries: Array<{
+      key: string
+      message: string
+    }>
+  }
+}
+
+export type TestagentCustomEnvVarsBatchCreateResponse =
+  TestagentCustomEnvVarsBatchCreateResponses[keyof TestagentCustomEnvVarsBatchCreateResponses]
+
+export type TestagentCustomEnvVarsBatchUpdateData = {
+  body?: Array<{
+    key: string
+    value: string
+    description?: string
+  }>
+  path?: never
+  query?: {
+    directory?: string
+    workspace?: string
+  }
+  url: "/testagent/env-vars/custom"
+}
+
+export type TestagentCustomEnvVarsBatchUpdateResponses = {
+  /**
+   * 批量更新结果
+   */
+  200: {
+    successKeys: Array<string>
+    failedKeys: Array<string>
+    failedEntries: Array<{
+      key: string
+      message: string
+    }>
+  }
+}
+
+export type TestagentCustomEnvVarsBatchUpdateResponse =
+  TestagentCustomEnvVarsBatchUpdateResponses[keyof TestagentCustomEnvVarsBatchUpdateResponses]
 
 export type EventSubscribeData = {
   body?: never

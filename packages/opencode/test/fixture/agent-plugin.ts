@@ -7,6 +7,7 @@ export default async () => ({
     cfg.agent["plugin_added"] = {
       description: "Added by a plugin via the config hook",
       mode: "subagent",
+      thinking: { type: "enabled", budgetTokens: 32_000 },
     }
   },
 })

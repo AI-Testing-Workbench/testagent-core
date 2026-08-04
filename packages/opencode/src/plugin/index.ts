@@ -169,6 +169,13 @@ export const layer = Layer.effect(
         // testagent_change end
 
         const hooks: Hooks[] = []
+        const cfg = yield* config.get()
+        // testagent_change start - skip all built-in and external plugins when globally disabled
+        if (cfg.pluginEnable === false) {
+          yield* Effect.logInfo("插件系统已被配置禁用")
+          return { hooks }
+        }
+        // testagent_change end
         const bridge = yield* EffectBridge.make()
 
         // Deduplicate plugin error messages across repeated state initializations
@@ -190,7 +197,6 @@ export const layer = Layer.effect(
           headers: ServerAuth.headers(),
           fetch: async (...args) => Server.Default().app.fetch(...args),
         })
-        const cfg = yield* config.get()
         const input: PluginInput = {
           client,
           project: ctx.project,
