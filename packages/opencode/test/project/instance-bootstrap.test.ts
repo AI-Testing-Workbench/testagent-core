@@ -21,7 +21,7 @@ afterEach(async () => {
   await disposeAllInstances()
 })
 
-async function bootstrapFixture(pluginEnable?: boolean) {
+async function bootstrapFixture(plugin_enable?: boolean) {
   return tmpdir({
     init: async (dir) => {
       const marker = path.join(dir, "config-hook-fired")
@@ -43,7 +43,7 @@ async function bootstrapFixture(pluginEnable?: boolean) {
         JSON.stringify({
           $schema: "https://opencode.ai/config.json",
           plugin: [pathToFileURL(pluginFile).href],
-          pluginEnable,
+          plugin_enable,
         }),
       )
       return marker
@@ -79,7 +79,7 @@ test("InstanceRuntime.reloadInstance runs InstanceBootstrap", async () => {
 })
 
 // testagent_change start - global plugin system toggle
-test("InstanceBootstrap skips all plugins when pluginEnable is false", async () => {
+test("InstanceBootstrap skips all plugins when plugin_enable is false", async () => {
   await using tmp = await bootstrapFixture(false)
 
   await WithInstance.provide({
