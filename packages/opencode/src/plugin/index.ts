@@ -171,7 +171,7 @@ export const layer = Layer.effect(
         const hooks: Hooks[] = []
         const cfg = yield* config.get()
         // testagent_change start - skip all built-in and external plugins when globally disabled
-        if (cfg.pluginEnable === false) {
+        if (cfg.plugin_enable === false) {
           yield* Effect.logInfo("插件系统已被配置禁用")
           return { hooks }
         }

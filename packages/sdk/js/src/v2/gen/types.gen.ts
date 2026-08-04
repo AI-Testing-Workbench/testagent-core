@@ -1184,7 +1184,7 @@ export type Config = {
         },
       ]
   >
-  pluginEnable?: boolean
+  plugin_enable?: boolean
   plugin_origins?: Array<{
     spec:
       | string
