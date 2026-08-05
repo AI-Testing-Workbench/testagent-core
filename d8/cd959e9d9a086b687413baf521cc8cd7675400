@@ -1,0 +1,14 @@
+packages/opencode/src/testagent/env-vars.ts
+  h_cb3d00609d57f2 14-15,55,58-60,62-64,66,68-69,71-72,74-76,81-82,97,117-126,132-133,185,221
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.20",
+  "base_commit_sha": "d8cd959e9d9a086b687413baf521cc8cd7675400",
+  "prompts": {},
+  "humans": {
+    "h_cb3d00609d57f2": {
+      "author": "BoSeal <1135378788@qq.com>"
+    }
+  }
+}
