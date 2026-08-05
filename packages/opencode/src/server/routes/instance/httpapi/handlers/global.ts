@@ -4,17 +4,15 @@ import { EffectBridge } from "@/effect/bridge"
 import { Bus } from "@/bus"
 import { Installation } from "@/installation"
 import { disposeAllInstancesAndEmitGlobalDisposed } from "@/server/global-lifecycle"
+import { url as serverUrl } from "@/server/server"
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
-import * as Log from "@opencode-ai/core/util/log"
-import { Effect, Queue, Schema } from "effect"
+import { Cause, Effect, Queue, Schema } from "effect"
 import * as Stream from "effect/Stream"
 import { HttpServerRequest, HttpServerResponse } from "effect/unstable/http"
 import { HttpApiBuilder } from "effect/unstable/httpapi"
 import * as Sse from "effect/unstable/encoding/Sse"
 import { RootHttpApi } from "../api"
 import { GlobalUpgradeInput } from "../groups/global"
-
-const log = Log.create({ service: "server" })
 
 function eventData(data: unknown): Sse.Event {
   return {
@@ -33,8 +31,12 @@ function parseBody(body: string) {
   }
 }
 
-function eventResponse() {
-  log.info("global event connected")
+function* eventResponse() {
+  const request = yield* HttpServerRequest.HttpServerRequest
+  yield* Effect.logInfo("global event connected", {
+    server: serverUrl.toString(),
+    remoteAddress: request.remoteAddress,
+  })
   const events = Stream.callback<GlobalBusEvent>((queue) => {
     const handler = (event: GlobalBusEvent) => Queue.offerUnsafe(queue, event)
     return Effect.acquireRelease(
@@ -53,7 +55,14 @@ function eventResponse() {
       Stream.map(eventData),
       Stream.pipeThroughChannel(Sse.encode()),
       Stream.encodeText,
-      Stream.ensuring(Effect.sync(() => log.info("global event disconnected"))),
+      Stream.catchCause((cause) => {
+        Effect.runSync(Effect.logInfo("global event error", { cause: Cause.pretty(cause) }))
+        return Stream.failCause(cause)
+      }),
+      Stream.ensuring(Effect.logInfo("global event disconnected", {
+        server: serverUrl.toString(),
+        remoteAddress: request.remoteAddress,
+      })),
     ),
     {
       contentType: "text/event-stream",
@@ -77,7 +86,7 @@ export const globalHandlers = HttpApiBuilder.group(RootHttpApi, "global", (handl
     })
 
     const event = Effect.fn("GlobalHttpApi.event")(function* () {
-      return eventResponse()
+      return yield* eventResponse()
     })
 
     const configGet = Effect.fn("GlobalHttpApi.configGet")(function* () {
@@ -85,19 +94,19 @@ export const globalHandlers = HttpApiBuilder.group(RootHttpApi, "global", (handl
     })
 
     const configUpdate = Effect.fn("GlobalHttpApi.configUpdate")(function* (ctx) {
-      log.info("global.config.update received", {
+      yield* Effect.logInfo("global.config.update received", {
         keys: Object.keys(ctx.payload ?? {}),
         empty: Object.keys(ctx.payload ?? {}).length === 0,
       })
       const result = yield* config.updateGlobal(ctx.payload)
-      log.info("global.config.update completed", { changed: result.changed })
+      yield* Effect.logInfo("global.config.update completed", { changed: result.changed })
       if (result.changed) {
         // testagent_change: For MCP-only config changes, skip disposeAllInstances
         // and let the extension call /mcp/reload instead. This avoids killing all
         // sessions, providers, and other services just because an MCP setting changed.
         const keys = Object.keys(ctx.payload ?? {})
         if (keys.length === 1 && keys[0] === "mcp") {
-          log.info("MCP-only config change, skipping full disposeAll - extension will call /mcp/reload")
+          yield* Effect.logInfo("MCP-only config change, skipping full disposeAll - extension will call /mcp/reload")
         } else {
           bridge.fork(disposeAllInstancesAndEmitGlobalDisposed({ swallowErrors: true }))
         }
