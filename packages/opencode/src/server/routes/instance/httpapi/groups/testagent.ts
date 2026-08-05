@@ -29,7 +29,6 @@ const EnvVarValue = Schema.String.check(Schema.isMinLength(1))
 export const EnvVarItem = Schema.Struct({
   key: EnvVarKey,
   value: EnvVarValue,
-  description: Schema.optional(Schema.String),
 })
 
 export const EnvVarGroups = Schema.Struct({
@@ -41,7 +40,6 @@ export const EnvVarGroups = Schema.Struct({
 export const EnvVarSetPayload = Schema.Struct({
   key: Schema.String,
   value: Schema.String,
-  description: Schema.optional(Schema.String),
 })
 // testagent_change end
 
