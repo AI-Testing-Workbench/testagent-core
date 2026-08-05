@@ -9,8 +9,9 @@ const log = Log.create({ service: "testagent.env-vars" })
 interface EnvVar {
   key: string
   value: string
-  description?: string
 }
+
+type CustomEnvVars = Record<string, string>
 
 interface EnvVarGroups {
   system: Record<string, EnvVar>
@@ -51,66 +52,34 @@ function getStoragePath(): string {
 }
 
 // 读取环境变量
-async function load(): Promise<Record<string, EnvVar>> {
+async function load(): Promise<CustomEnvVars> {
   const filepath = getStoragePath()
   try {
-    const content = await readFile(filepath, "utf-8")
-    const data = JSON.parse(content)
-    if (typeof data !== "object" || data === null) {
-      log.warn("env-vars.json is not an object, resetting to empty", { data })
-      return {}
+    const data: unknown = JSON.parse(await readFile(filepath, "utf-8"))
+    if (typeof data !== "object" || data === null || Array.isArray(data)) {
+      throw new EnvVarsConfigInvalidError(filepath, [{ key: "<root>", message: "根节点必须是对象" }])
     }
-    
-    const validated: Record<string, EnvVar> = {}
-    const invalidEntries: InvalidEnvVarEntry[] = []
-    
-    for (const [key, value] of Object.entries(data)) {
-      // 检查 key 格式
+
+    const entries = Object.entries(data)
+    const invalidEntries = entries.flatMap(([key, value]): InvalidEnvVarEntry[] => {
       if (!validateKey(key)) {
-        invalidEntries.push({ key, message: "格式非法（必须以字母或下划线开头，只能包含字母、数字和下划线）" })
-        continue
+        return [{ key, message: "格式非法（必须以字母或下划线开头，只能包含字母、数字和下划线）" }]
       }
-      
-      // 检查 value 结构
-      if (typeof value !== "object" || value === null) {
-        invalidEntries.push({ key, message: "值结构非法（必须是对象）" })
-        continue
+      if (typeof value !== "string") {
+        return [{ key, message: "value 必须是字符串" }]
       }
-      
-      const envVar = value as any
-      
-      // 检查必填字段
-      if (typeof envVar.key !== "string" || typeof envVar.value !== "string") {
-        invalidEntries.push({ key, message: "缺少必填字段（key 和 value 必须是字符串）" })
-        continue
+      if (!value) {
+        return [{ key, message: "value 不能为空字符串" }]
       }
-      
-      // 检查 key 一致性
-      if (envVar.key !== key) {
-        invalidEntries.push({ key, message: `内外不一致（外层键名: ${key}, 内层 key: ${envVar.key}）` })
-        continue
-      }
-      
-      // 检查 value 非空
-      if (envVar.value === "") {
-        invalidEntries.push({ key, message: "value 不能为空字符串" })
-        continue
-      }
-      
-      validated[key] = {
-        key: envVar.key,
-        value: envVar.value,
-        description: typeof envVar.description === "string" ? envVar.description : undefined,
-      }
-    }
-    
-    // 如果存在非法条目，抛出错误
+      return []
+    })
+
     if (invalidEntries.length > 0) {
       log.error("invalid entries in env-vars.json", { count: invalidEntries.length, invalidEntries })
       throw new EnvVarsConfigInvalidError(filepath, invalidEntries)
     }
-    
-    return validated
+
+    return Object.fromEntries(entries) as CustomEnvVars
   } catch (err: any) {
     if (err.code === "ENOENT") {
       log.debug("env-vars.json does not exist, returning empty")
@@ -125,7 +94,7 @@ async function load(): Promise<Record<string, EnvVar>> {
 }
 
 // 保存环境变量
-async function save(vars: Record<string, EnvVar>): Promise<void> {
+async function save(vars: CustomEnvVars): Promise<void> {
   const filepath = getStoragePath()
   const dir = join(Path.data)
   
@@ -145,62 +114,23 @@ async function getSystem(): Promise<Record<string, EnvVar>> {
   const user = User.get()
   if (!user) return {}
 
-  const system: Record<string, EnvVar> = {}
-  if (user.userId) {
-    system.TESTAGENT_USER_ID = {
-      key: "TESTAGENT_USER_ID",
-      value: user.userId,
-      description: "当前用户 ID（自动注入）",
-    }
+  return {
+    ...(user.userId ? { TESTAGENT_USER_ID: { key: "TESTAGENT_USER_ID", value: user.userId } } : {}),
+    ...(user.userName ? { TESTAGENT_USER_NAME: { key: "TESTAGENT_USER_NAME", value: user.userName } } : {}),
+    ...(user.sapId ? { TESTAGENT_SAP_ID: { key: "TESTAGENT_SAP_ID", value: user.sapId } } : {}),
+    ...(user.openId ? { TESTAGENT_OPEN_ID: { key: "TESTAGENT_OPEN_ID", value: user.openId } } : {}),
+    ...(user.originPathId
+      ? { TESTAGENT_ORIGIN_PATH_ID: { key: "TESTAGENT_ORIGIN_PATH_ID", value: user.originPathId } }
+      : {}),
+    ...(user.pathName ? { TESTAGENT_PATH_NAME: { key: "TESTAGENT_PATH_NAME", value: user.pathName } } : {}),
+    ...(user.token ? { TESTAGENT_USER_TOKEN: { key: "TESTAGENT_USER_TOKEN", value: user.token } } : {}),
   }
-  if (user.userName) {
-    system.TESTAGENT_USER_NAME = {
-      key: "TESTAGENT_USER_NAME",
-      value: user.userName,
-      description: "当前用户名（自动注入）",
-    }
-  }
-  if (user.sapId) {
-    system.TESTAGENT_SAP_ID = {
-      key: "TESTAGENT_SAP_ID",
-      value: user.sapId,
-      description: "当前用户 SAP ID（自动注入）",
-    }
-  }
-  if (user.openId) {
-    system.TESTAGENT_OPEN_ID = {
-      key: "TESTAGENT_OPEN_ID",
-      value: user.openId,
-      description: "当前用户 Open ID（自动注入）",
-    }
-  }
-  if (user.originPathId) {
-    system.TESTAGENT_ORIGIN_PATH_ID = {
-      key: "TESTAGENT_ORIGIN_PATH_ID",
-      value: user.originPathId,
-      description: "当前源路径 ID（自动注入）",
-    }
-  }
-  if (user.pathName) {
-    system.TESTAGENT_PATH_NAME = {
-      key: "TESTAGENT_PATH_NAME",
-      value: user.pathName,
-      description: "当前路径名称（自动注入）",
-    }
-  }
-  if (user.token) {
-    system.TESTAGENT_USER_TOKEN = {
-      key: "TESTAGENT_USER_TOKEN",
-      value: user.token,
-      description: "当前用户令牌（自动注入）",
-    }
-  }
-  return system
 }
 
 // 获取环境变量，按来源分组展示
 async function getAll(): Promise<EnvVarGroups> {
-  const [system, custom] = await Promise.all([getSystem(), load()])
+  const [system, stored] = await Promise.all([getSystem(), load()])
+  const custom = Object.fromEntries(Object.entries(stored).map(([key, value]) => [key, { key, value }]))
   log.debug("getAll", { system: Object.keys(system).length, custom: Object.keys(custom).length })
   return { system, custom }
 }
@@ -252,7 +182,7 @@ async function batchCreate(items: EnvVar[]): Promise<BatchResult> {
       continue
     }
     seenKeys.add(item.key)
-    vars[item.key] = item
+    vars[item.key] = item.value
     successKeys.push(item.key)
   }
   
@@ -288,7 +218,7 @@ async function batchUpdate(items: EnvVar[]): Promise<BatchResult> {
       failedEntries.push({ key: item.key, message })
       continue
     }
-    vars[item.key] = item
+    vars[item.key] = item.value
     successKeys.push(item.key)
   }
   
