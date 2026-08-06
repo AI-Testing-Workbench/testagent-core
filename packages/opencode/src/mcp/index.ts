@@ -26,10 +26,11 @@ import { BusEvent } from "../bus/bus-event"
 import { Bus } from "@/bus"
 import { TuiEvent } from "@/cli/cmd/tui/event"
 import open from "open"
-import { Effect, Exit, Layer, ManagedRuntime, Option, Context, Schema, Stream } from "effect"
+import { Effect, Exit, Layer, ManagedRuntime, Option, Context, Schema, Stream, Metric } from "effect"
 import { EffectBridge } from "@/effect/bridge"
 import { InstanceState } from "@/effect/instance-state"
-import { Observability } from "@opencode-ai/core/effect/observability"
+import { Observability } from "@opencode-ai/core/effect/observability" // testagent_change
+import { mcpCallTotal, mcpCallFailed, mcpCallDuration, mcpOperationTotal, mcpOperationFailed } from "@opencode-ai/core/effect/observability" // testagent_change
 import { memoMap } from "@opencode-ai/core/effect/memo-map"
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
@@ -133,7 +134,7 @@ function remoteURL(key: string, value: string) {
 }
 
 // Convert MCP tool definition to AI SDK Tool type
-function convertMcpTool(mcpTool: MCPToolDef, client: MCPClient, timeout?: number): Tool {
+function convertMcpTool(clientName: string, mcpTool: MCPToolDef, client: MCPClient, timeout?: number): Tool {
   const inputSchema = mcpTool.inputSchema
 
   // Spread first, then override type to ensure it's always "object"
@@ -144,21 +145,50 @@ function convertMcpTool(mcpTool: MCPToolDef, client: MCPClient, timeout?: number
     additionalProperties: false,
   }
 
+  // testagent_change start
+  const record = (attrs: Record<string, string>, failed: boolean, ms: number) => {
+    const updates = [
+      Metric.update(Metric.withAttributes(mcpCallTotal, attrs), 1),
+      Metric.update(Metric.withAttributes(mcpCallDuration, attrs), ms),
+    ]
+    if (failed) updates.push(Metric.update(Metric.withAttributes(mcpCallFailed, attrs), 1))
+    getOtelRt().runFork(Effect.all(updates))
+  }
+  // testagent_change end
+
   return dynamicTool({
     description: mcpTool.description ?? "",
     inputSchema: jsonSchema(schema),
     execute: async (args: unknown) => {
-      return client.callTool(
-        {
-          name: mcpTool.name,
-          arguments: (args || {}) as Record<string, unknown>,
-        },
-        CallToolResultSchema,
-        {
-          resetTimeoutOnProgress: true,
-          timeout,
-        },
+      // testagent_change start
+      const start = Date.now()
+      const attrs = { client_name: clientName, tool_name: mcpTool.name }
+      return getOtelRt().runPromise(
+        Effect.gen(function* () {
+          yield* Effect.logInfo("mcp tool call", { clientName, tool: mcpTool.name })
+          const result = yield* Effect.tryPromise({
+            try: () =>
+              client.callTool(
+                {
+                  name: mcpTool.name,
+                  arguments: (args || {}) as Record<string, unknown>,
+                },
+                CallToolResultSchema,
+                {
+                  resetTimeoutOnProgress: true,
+                  timeout,
+                },
+              ),
+            catch: (err) => {
+              record(attrs, true, Date.now() - start)
+              return err
+            },
+          })
+          record(attrs, result.isError === true, Date.now() - start)
+          return result
+        }),
       )
+      // testagent_change end
     },
   })
 }
@@ -697,7 +727,7 @@ export const layer = Layer.effect(
 
             const timeout = entry?.timeout != null ? toTimeoutMs(entry.timeout) : defaultTimeout
             for (const mcpTool of listed) {
-              result[sanitize(clientName) + "_" + sanitize(mcpTool.name)] = convertMcpTool(mcpTool, client, timeout)
+              result[sanitize(clientName) + "_" + sanitize(mcpTool.name)] = convertMcpTool(clientName, mcpTool, client, timeout)
             }
           }),
         { concurrency: "unbounded" },
@@ -752,10 +782,12 @@ export const layer = Layer.effect(
       }).pipe(
         Effect.tap(() => {
           const ms = Date.now() - start
+          getOtelRt().runFork(Metric.update(Metric.withAttributes(mcpOperationTotal, { client_name: clientName, operation: label }), 1)) // testagent_change
           return Effect.logInfo("mcp call ok", { clientName, label, durationMs: ms })
         }),
         Effect.tapError((e) => {
           const ms = Date.now() - start
+          getOtelRt().runFork(Metric.update(Metric.withAttributes(mcpOperationFailed, { client_name: clientName, operation: label }), 1)) // testagent_change
           return Effect.logInfo("mcp call failed", { clientName, label, durationMs: ms, error: (e as any)?.message })
         }),
       )

@@ -254,6 +254,21 @@ export const failInvalidArgs = Metric.counter("tool.fail.invalid_args", {
 export const callTotal = Metric.counter("tool.call.total", {
   description: "Total tool calls made by LLM",
 })
+export const mcpCallTotal = Metric.counter("tool.call.mcp.total", {
+  description: "Total MCP tool calls made by LLM",
+})
+export const mcpCallFailed = Metric.counter("tool.call.mcp.failed", {
+  description: "MCP tool calls that failed or returned an error",
+})
+export const mcpCallDuration = Metric.gauge("tool.call.mcp.duration", {
+  description: "MCP tool call duration (ms)",
+})
+export const mcpOperationTotal = Metric.counter("mcp.operation.total", {
+  description: "Total MCP client operations (getPrompt/readResource)",
+})
+export const mcpOperationFailed = Metric.counter("mcp.operation.failed", {
+  description: "Failed MCP client operations (getPrompt/readResource)",
+})
 export const sessionCreated = Metric.counter("session.created", {
   description: "Total of new sessions created",
 })
@@ -302,7 +317,6 @@ export const tokenTotal = Metric.counter("session.token.total", {
 export const userPrompt = Metric.counter("session.user.prompt", {
   description: "User message submissions in sessions",
 })
-// testagent_change start
 export const sessionTotalDuration = Metric.gauge("session.duration.total", {
   description: "Session total duration excluding user wait (s)",
 })
@@ -318,6 +332,5 @@ export const sessionActualDuration = Metric.gauge("session.duration.actual", {
 export const sessionPermissionDuration = Metric.gauge("session.duration.permission", {
   description: "Time spent waiting for permission approval (s)",
 })
-// testagent_change end
 
 export const Observability = { enabled, layer }

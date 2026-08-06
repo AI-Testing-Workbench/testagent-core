@@ -1394,7 +1394,6 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         if (input.thinkingEnabled !== undefined) {
           thinkingEnabledStore.set(input.sessionID, input.thinkingEnabled)
         }
-        yield* Effect.logInfo("LLMoptionsprompt", { aaaaa: input.thinkingEnabled })
         const session = yield* sessions.get(input.sessionID).pipe(Effect.orDie)
         yield* revert.cleanup(session)
         const message = yield* createUserMessage(input)
