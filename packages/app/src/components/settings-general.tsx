@@ -491,7 +491,6 @@ export const SettingsGeneral: Component = () => {
           description={
             <>
               {language.t("settings.general.row.theme.description")}{" "}
-              <Link href="https://opencode.ai/docs/themes/">{language.t("common.learnMore")}</Link>
             </>
           }
         >
@@ -747,7 +746,7 @@ export const SettingsGeneral: Component = () => {
 
         <SoundsSection />
 
-        <UpdatesSection />
+        {/* <UpdatesSection /> */}
 
         <Show when={linux()}>
           <div class="flex flex-col gap-1">
