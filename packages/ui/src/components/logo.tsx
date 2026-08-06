@@ -1,14 +1,14 @@
 import { ComponentProps } from "solid-js"
 import logoLight from "../assets/images/kilo-light.png"
 
-export const Mark = (props: { class?: string }) => {
+export const Mark = (props: { class?: string; style?: any }) => {
   return (
     <img
       data-component="logo-mark"
       classList={{ [props.class ?? ""]: !!props.class }}
       src={logoLight}
       alt="logo"
-      style={{ "object-fit": "contain", display: "block", margin: "0 auto" }}
+      style={{ "object-fit": "contain", display: "block", margin: "0 auto", ...props.style }}
     />
   )
 }
@@ -33,11 +33,13 @@ export const Splash = (props: Pick<ComponentProps<"svg">, "ref" | "class">) => {
 
 export const Logo = (props: { class?: string }) => {
   return (
+   <div style={{display:"flex"}}>
     <svg
       xmlns="http://www.w3.org/2000/svg"
       viewBox="0 0 200 42"
       fill="none"
       classList={{ [props.class ?? ""]: !!props.class }}
+      style={{"margin-right":"-100px"}}
     >
       <text
         y="32"
@@ -49,5 +51,7 @@ export const Logo = (props: { class?: string }) => {
         TestAgent
       </text>
     </svg>
+     <Mark class="w-20" style={{"margin-top":"-20px"}} />
+   </div>
   )
 }
