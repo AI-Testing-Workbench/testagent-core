@@ -147,13 +147,14 @@ async function sendContinuation(client: Parameters<Plugin>[0]["client"], session
 }
 
 function isIdleEvent(event: { type?: string; properties?: Record<string, unknown> }) {
-  if (event.type === "session.idle") return true
+  if (event.type === "session.idle") return event.properties?.reason !== "user_abort"
   const status = event.properties?.status
   return (
     event.type === "session.status" &&
     typeof status === "object" &&
     status !== null &&
-    (status as { type?: unknown }).type === "idle"
+    (status as { type?: unknown; reason?: unknown }).type === "idle" &&
+    (status as { reason?: unknown }).reason !== "user_abort"
   )
 }
 
