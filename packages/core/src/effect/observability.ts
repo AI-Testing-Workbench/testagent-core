@@ -303,8 +303,9 @@ export const userPrompt = Metric.counter("session.user.prompt", {
   description: "User message submissions in sessions",
 })
 // testagent_change start
+// session 从开始到结束的总耗时（秒），包含所有等待时间
 export const sessionTotalDuration = Metric.gauge("session.duration.total", {
-  description: "Session total duration excluding user wait (s)",
+  description: "Session total elapsed duration (s)",
 })
 export const sessionLlmDuration = Metric.gauge("session.duration.llm", {
   description: "Sum of all LLM call durations (s)",
@@ -312,6 +313,7 @@ export const sessionLlmDuration = Metric.gauge("session.duration.llm", {
 export const sessionWaitDuration = Metric.gauge("session.duration.wait", {
   description: "Time spent waiting for user input (question/invalid tools) (s)",
 })
+// session 的实际工作时间（秒），从总耗时中扣除了用户等待时间（如回答 question 工具的提问、等待权限审批等）
 export const sessionActualDuration = Metric.gauge("session.duration.actual", {
   description: "Session duration excluding user wait (s)",
 })
