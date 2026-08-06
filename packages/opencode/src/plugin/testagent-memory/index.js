@@ -423,18 +423,6 @@ export const MemoryPlugin = async (params) => {
             const cfg = input;
             cfg.agent = {
                 ...cfg.agent,
-                "build": {
-                    permission: {
-                        "memory_personal_read": "deny",
-                        "memory_personal_save": "deny",
-                    },
-                },
-                "plan": {
-                    permission: {
-                        "memory_personal_read": "deny",
-                        "memory_personal_save": "deny",
-                    },
-                },
                 "auto-extraction": {
                     hidden: true,
                     mode: "subagent",
