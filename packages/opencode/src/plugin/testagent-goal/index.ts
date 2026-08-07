@@ -1,5 +1,7 @@
 import type { Config, Plugin } from "@opencode-ai/plugin"
 import { z } from "zod"
+import { Effect } from "effect"
+import * as EffectLogger from "@opencode-ai/core/effect/logger"
 import {
   accountUsage,
   clearGoal,
@@ -47,6 +49,31 @@ const GOAL_SYSTEM_MARKER = "TestAgent goal mode"
 const GOAL_TOOL_IDS = ["get_goal", "create_goal", "set_goal", "update_goal", "update_goal_status", "clear_goal"]
 const activeContinuations = new Set<string>()
 const commandSessions = new Set<string>()
+const finishedGoals = new Set<string>()
+
+function logInfo(message: string, fields: Record<string, unknown>) {
+  Effect.runFork(
+    Effect.logInfo(message).pipe(
+      Effect.annotateLogs({ service: "testagent-goal", ...fields }),
+      Effect.provide(EffectLogger.layer),
+    ),
+  )
+}
+
+async function finishGoal(sessionID: string, reason: string, value?: Awaited<ReturnType<typeof getGoal>>) {
+  if (finishedGoals.has(sessionID)) return
+  const goal = value ?? (await getGoal(sessionID))
+  if (!goal) return
+  if (reason !== "complete" && reason !== "unmet" && (goal.status === "complete" || goal.status === "unmet")) return
+  finishedGoals.add(sessionID)
+  logInfo("goal finished", {
+    event: "goal_finished",
+    sessionID,
+    status: goal.status,
+    reason,
+    continuationCount: goal.autoTurns,
+  })
+}
 
 function goalCommandTemplate(commandName: string) {
   return `TestAgent goal mode command "/${commandName}" was invoked.
@@ -147,14 +174,13 @@ async function sendContinuation(client: Parameters<Plugin>[0]["client"], session
 }
 
 function isIdleEvent(event: { type?: string; properties?: Record<string, unknown> }) {
-  if (event.type === "session.idle") return event.properties?.reason !== "user_abort"
+  if (event.type === "session.idle") return true
   const status = event.properties?.status
   return (
     event.type === "session.status" &&
     typeof status === "object" &&
     status !== null &&
-    (status as { type?: unknown; reason?: unknown }).type === "idle" &&
-    (status as { reason?: unknown }).reason !== "user_abort"
+    (status as { type?: unknown }).type === "idle"
   )
 }
 
@@ -208,6 +234,7 @@ export const GoalPlugin: Plugin = async ({ client }, options?: Options) => {
           "Get the current goal for this OpenCode session, including status, observed token usage, and elapsed-time usage.",
         args: {},
         async execute(_args, context) {
+          logInfo("goal used", { event: "goal_used", sessionID: context.sessionID, source: "tool", tool: "get_goal" })
           return JSON.stringify({ goal: await getGoal(context.sessionID) }, null, 2)
         },
       },
@@ -220,6 +247,13 @@ export const GoalPlugin: Plugin = async ({ client }, options?: Options) => {
         async execute(args, context) {
           const input = args as CreateGoalArgs
           const goal = await createGoal(context.sessionID, input.objective)
+          finishedGoals.delete(context.sessionID)
+          logInfo("goal activated", {
+            event: "goal_activated",
+            sessionID: context.sessionID,
+            source: "tool",
+            tool: "set_goal",
+          })
           return JSON.stringify({ goal }, null, 2)
         },
       },
@@ -232,6 +266,13 @@ export const GoalPlugin: Plugin = async ({ client }, options?: Options) => {
         async execute(args, context) {
           const input = args as CreateGoalArgs
           const goal = await createGoal(context.sessionID, input.objective)
+          finishedGoals.delete(context.sessionID)
+          logInfo("goal activated", {
+            event: "goal_activated",
+            sessionID: context.sessionID,
+            source: "tool",
+            tool: "create_goal",
+          })
           return JSON.stringify({ goal }, null, 2)
         },
       },
@@ -257,12 +298,15 @@ export const GoalPlugin: Plugin = async ({ client }, options?: Options) => {
         },
         async execute(args, context) {
           const input = args as UpdateGoalArgs
+          logInfo("goal used", { event: "goal_used", sessionID: context.sessionID, source: "tool", tool: "update_goal" })
           if (input.status === "complete") {
             const goal = await completeGoal(context.sessionID, input.evidence ?? "")
+            await finishGoal(context.sessionID, "complete")
             const report = `Goal achieved. Time used: ${goal.timeUsedSeconds} seconds. Evidence: ${goal.completionEvidence}.`
             return JSON.stringify({ goal, completion_report: report }, null, 2)
           }
           const goal = await markGoalUnmet(context.sessionID, input.blocker ?? "")
+          await finishGoal(context.sessionID, "unmet")
           const report = `Goal unmet. Time used: ${goal.timeUsedSeconds} seconds. Blocker: ${goal.blocker}.`
           return JSON.stringify({ goal, unmet_report: report }, null, 2)
         },
@@ -274,7 +318,14 @@ export const GoalPlugin: Plugin = async ({ client }, options?: Options) => {
         },
         async execute(args, context) {
           const input = args as { status: "active" | "paused" }
+          logInfo("goal used", {
+            event: "goal_used",
+            sessionID: context.sessionID,
+            source: "tool",
+            tool: "update_goal_status",
+          })
           const goal = await setGoalStatus(context.sessionID, input.status)
+          if (input.status === "active") finishedGoals.delete(context.sessionID)
           return JSON.stringify({ goal }, null, 2)
         },
       },
@@ -282,13 +333,18 @@ export const GoalPlugin: Plugin = async ({ client }, options?: Options) => {
         description: "Clear the current TestAgent goal for this session when the user explicitly asks to clear it.",
         args: {},
         async execute(_args, context) {
-          return JSON.stringify({ cleared: await clearGoal(context.sessionID) }, null, 2)
+          logInfo("goal used", { event: "goal_used", sessionID: context.sessionID, source: "tool", tool: "clear_goal" })
+          const goal = await getGoal(context.sessionID)
+          const cleared = await clearGoal(context.sessionID)
+          if (cleared && goal) await finishGoal(context.sessionID, "cleared", goal)
+          return JSON.stringify({ cleared }, null, 2)
         },
       },
     },
     async "command.execute.before"(input, _output) {
       if (input.command === commandName) {
         commandSessions.add(input.sessionID)
+        logInfo("goal used", { event: "goal_used", sessionID: input.sessionID, source: "command", command: input.command })
       }
     },
     async "experimental.chat.messages.transform"(input, output) {
@@ -314,18 +370,30 @@ export const GoalPlugin: Plugin = async ({ client }, options?: Options) => {
       output.context.push(compactionContext(goal))
     },
     async event({ event }) {
-      if (!autoContinue || !isIdleEvent(event as never)) return
       const sessionID = sessionIDFromEvent(event as never)
       if (!sessionID) return
+      const props = event as { type?: string; properties?: Record<string, unknown> }
+      const status = props.properties?.status
+      const nested = typeof status === "object" && status !== null ? (status as { reason?: unknown }).reason : undefined
+      const reason = typeof props.properties?.reason === "string" ? props.properties.reason : nested
+      if (props.type === "session.error") return finishGoal(sessionID, "error")
+      if (reason === "user_abort") return finishGoal(sessionID, "user_abort")
+      if (reason === "error") return finishGoal(sessionID, "error")
+      if (!autoContinue || !isIdleEvent(event as never)) return
       if (activeContinuations.has(sessionID)) return
       activeContinuations.add(sessionID)
       try {
         const goal = await reserveContinuation(sessionID, maxAutoTurns, minInterval)
-        if (!goal) return
+        if (!goal) {
+          const current = await getGoal(sessionID)
+          if (current?.autoTurns >= maxAutoTurns) await finishGoal(sessionID, "max_auto_turns")
+          return
+        }
         await sendContinuation(client, sessionID, continuationPrompt(goal))
         await recordContinuationResult(sessionID, "success", maxPromptFailures)
       } catch (error) {
         await recordContinuationResult(sessionID, "failure", maxPromptFailures)
+        await finishGoal(sessionID, "continuation_error")
         await client.app?.log?.({
           body: {
             service: "testagent-goal-plugin",
