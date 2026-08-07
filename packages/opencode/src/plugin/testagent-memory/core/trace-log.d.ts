@@ -21,9 +21,9 @@ export interface TraceLogRequest {
     /** 事件来源 */
     event_source: string;
     /** 开始时间 */
-    start_time: Date;
+    start_time?: Date;
     /** 结束时间 */
-    end_time: Date;
+    end_time?: Date;
     /** 配置参数 */
     config_param?: string;
     /** 输入内容 */
@@ -38,6 +38,10 @@ export interface TraceLogRequest {
     message_id: string;
     /** 部分ID */
     part_id?: string;
+    /** 总耗时  */
+    total_ms?: number;
+    start_time_ms?: number;
+    end_time_ms?: number;
 }
 /**
  * 追踪日志接口响应

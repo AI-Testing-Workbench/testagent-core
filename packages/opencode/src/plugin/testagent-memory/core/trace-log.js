@@ -11,6 +11,28 @@ export async function sendTraceLog(traceData) {
         return { success: false, message: "追踪日志功能未启用" };
     }
     try {
+        // 处理 start_time 和 end_time，统一转为北京时间（+8小时）
+        const now = new Date(Date.now() + 8 * 60 * 60 * 1000);
+        if (!traceData.start_time) {
+            traceData.start_time = now;
+        }
+        else {
+            traceData.start_time = new Date(traceData.start_time.getTime() + 8 * 60 * 60 * 1000);
+        }
+        traceData.start_time_ms = traceData.start_time.getTime();
+        if (!traceData.end_time) {
+            traceData.end_time = now;
+        }
+        else {
+            traceData.end_time = new Date(traceData.end_time.getTime() + 8 * 60 * 60 * 1000);
+        }
+        traceData.end_time_ms = traceData.end_time.getTime();
+        // 如果 total_ms 没有值，则使用 end_time - start_time 计算
+        if (traceData.total_ms === undefined || traceData.total_ms === null) {
+            const startTime = traceData.start_time instanceof Date ? traceData.start_time.getTime() : new Date(traceData.start_time).getTime();
+            const endTime = traceData.end_time instanceof Date ? traceData.end_time.getTime() : new Date(traceData.end_time).getTime();
+            traceData.total_ms = endTime - startTime;
+        }
         log.callExternalLogOriginl("info", "trace-log-info", traceData);
         return { success: true, data: null };
     }

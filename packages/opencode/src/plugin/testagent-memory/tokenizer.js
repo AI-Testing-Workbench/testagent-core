@@ -137,7 +137,7 @@ function getJieba() {
  *
  * Tokens are lowercased and filtered for stop words.
  */
-export function buildFtsTokens(raw, isQuery) {
+export function buildFtsTokens(raw, isQuery, keepDuplicates = false) {
     // 输入校验
     if (!raw || typeof raw !== 'string')
         return [];
@@ -151,17 +151,17 @@ export function buildFtsTokens(raw, isQuery) {
         tokens = tokens
             .map((t) => t.trim())
             .filter((t) => t && HAS_LETTER_OR_NUMBER.test(t));
-        // jieba 路径：先去重，再统一后处理
-        tokens = [...new Set(tokens)];
     }
     else {
-        // 回退路径：使用正则分词，并应用相同的后处理逻辑
+        // 回退路径：使用正则分词
         tokens = raw
             .match(/[\p{L}\p{N}_]+/gu)
             ?.map((t) => t.trim())
             .filter((t) => t && HAS_LETTER_OR_NUMBER.test(t)) ?? [];
-        tokens = [...new Set(tokens)];
     }
+    // 文档分词做词频统计时需要保留重复，默认对查询/内容做去重
+    if (!keepDuplicates)
+        tokens = [...new Set(tokens)];
     if (tokens.length === 0)
         return [];
     // 统一后处理：小写 → 去引号 → 停用词过滤

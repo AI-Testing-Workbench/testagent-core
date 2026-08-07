@@ -3,6 +3,7 @@ import { getMemoryDir } from "./paths.js";
 import { readMemoryContent, truncateMemoryContent } from "./recall.js";
 import { chineseTokenizer, buildFtsTokens } from "./tokenizer.js";
 import { readFileSync } from "fs";
+import { normalizeVector } from "./embedding/service.js";
 // 向量维度：提升到 512 减少碰撞
 const VECTOR_DIM = 512;
 // 每个 token 映射到的哈希位置数，增加信息密度
@@ -222,6 +223,74 @@ export function calcTimeBonus(now, mtimeMs) {
     const decay = Math.exp(-lambda * diff);
     return decay * TIME_BONUS_FACTOR * decay;
 }
+/**
+ * 构建语料库统计信息（用于 BM25 计算）
+ * @param allDocTokens 所有文档的 token 列表
+ * @returns 语料库统计对象
+ */
+export function buildCorpusStats(allDocTokens) {
+    const docCount = allDocTokens.length;
+    if (docCount === 0)
+        return { docCount: 0, docFreq: new Map(), avgDocLength: 0 };
+    // 统计每个词出现在多少个文档中（文档频率 DF）
+    const docFreq = new Map();
+    let totalLength = 0;
+    for (const docTokens of allDocTokens) {
+        totalLength += docTokens.length;
+        // 使用 Set 去重，统计文档频率而非词频
+        const uniqueTokens = new Set(docTokens);
+        for (const token of uniqueTokens) {
+            docFreq.set(token, (docFreq.get(token) || 0) + 1);
+        }
+    }
+    const avgDocLength = totalLength / docCount;
+    return { docCount, docFreq, avgDocLength };
+}
+/**
+ * 计算 BM25 关键词匹配得分
+ * BM25 公式：score = IDF(q) * (TF(q) * (K1 + 1)) / (TF(q) + K1 * (1 - B + B * |doc|/avgdl))
+ *
+ * @param queryTokens 查询词的 token 列表
+ * @param textTokens 当前文档的 token 列表
+ * @param corpusStats 语料库统计信息（包含文档频率、平均文档长度等）
+ * @returns BM25 得分 [0, KEYWORD_BONUS]
+ */
+export function calcBm25KeywordBonus(queryTokens, textTokens, corpusStats) {
+    const BM25_K1 = 1.2; // 词频饱和参数
+    const BM25_B = 0.75; // 文档长度归一化参数
+    if (queryTokens.length === 0 || textTokens.length === 0)
+        return 0;
+    // 统计当前文档词频
+    const textFreq = new Map();
+    for (const t of textTokens) {
+        textFreq.set(t, (textFreq.get(t) || 0) + 1);
+    }
+    // 文档长度
+    const docLength = textTokens.length;
+    // 使用传入的语料库统计，或回退到默认值
+    const docCount = corpusStats?.docCount ?? 1;
+    const docFreq = corpusStats?.docFreq ?? new Map();
+    const avgDocLength = corpusStats?.avgDocLength ?? docLength;
+    let bm25Score = 0;
+    const seenTokens = new Set();
+    for (const q of queryTokens) {
+        if (seenTokens.has(q))
+            continue;
+        seenTokens.add(q);
+        const tf = textFreq.get(q) || 0;
+        if (tf === 0)
+            continue;
+        // 计算 IDF：基于语料库统计的文档频率
+        const df = docFreq.get(q) || 0;
+        const idf = Math.log((docCount - df + 0.5) / (df + 0.5) + 1);
+        // 计算 BM25 TF 分量
+        const tfComponent = (tf * (BM25_K1 + 1)) / (tf + BM25_K1 * (1 - BM25_B + BM25_B * (docLength / avgDocLength)));
+        bm25Score += idf * tfComponent;
+    }
+    // 归一化：除以查询词数
+    const normalizedScore = queryTokens.length > 0 ? bm25Score / queryTokens.length : 0;
+    return Math.min(1, normalizedScore) * KEYWORD_BONUS;
+}
 // =====================================================================
 // 8. 生成记忆唯一键
 // =====================================================================
@@ -259,7 +328,7 @@ export async function vectorfilter(worktree, sessionID, query, alreadySurfaced =
                 const fullText = buildWeightedMemoryText(memory, content);
                 // 向量+基础语义分
                 const memVec = textToEmbeddingSync(fullText);
-                const baseSim = cosineSimilarity(queryVec, memVec);
+                const baseSim = cosineSimilarity(Array.from(normalizeVector(queryVec)), Array.from(normalizeVector(memVec)));
                 // 多策略关键词匹配
                 const queryTokens = buildFtsTokens(query, true);
                 const textTokens = buildFtsTokens(fullText, false);

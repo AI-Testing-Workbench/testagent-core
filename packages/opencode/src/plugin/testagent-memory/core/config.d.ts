@@ -56,8 +56,8 @@ export declare const MemoryConfig: z.ZodObject<{
         llmRecall: z.ZodDefault<z.ZodBoolean>;
         /** 使用llm召回记忆超时时间 */
         llmRecallTimeout: z.ZodDefault<z.ZodNumber>;
-        providerID: z.ZodString;
-        modelID: z.ZodString;
+        providerID: z.ZodDefault<z.ZodString>;
+        modelID: z.ZodDefault<z.ZodString>;
     }, "strip", z.ZodTypeAny, {
         recallEnable: boolean;
         llmRecall: boolean;
@@ -65,11 +65,11 @@ export declare const MemoryConfig: z.ZodObject<{
         providerID: string;
         modelID: string;
     }, {
-        providerID: string;
-        modelID: string;
         recallEnable?: boolean | undefined;
         llmRecall?: boolean | undefined;
         llmRecallTimeout?: number | undefined;
+        providerID?: string | undefined;
+        modelID?: string | undefined;
     }>>;
     trace: z.ZodDefault<z.ZodObject<{
         enable: z.ZodDefault<z.ZodBoolean>;
@@ -77,6 +77,25 @@ export declare const MemoryConfig: z.ZodObject<{
         enable: boolean;
     }, {
         enable?: boolean | undefined;
+    }>>;
+    /** question工具调用时，是否注入相似答案 */
+    similarAnswer: z.ZodDefault<z.ZodObject<{
+        enable: z.ZodDefault<z.ZodBoolean>;
+    }, "strip", z.ZodTypeAny, {
+        enable: boolean;
+    }, {
+        enable?: boolean | undefined;
+    }>>;
+    /** 子Agent默认使用的模型配置 */
+    subAgentModel: z.ZodDefault<z.ZodObject<{
+        providerID: z.ZodDefault<z.ZodString>;
+        modelID: z.ZodDefault<z.ZodString>;
+    }, "strip", z.ZodTypeAny, {
+        providerID: string;
+        modelID: string;
+    }, {
+        providerID?: string | undefined;
+        modelID?: string | undefined;
     }>>;
 }, "strip", z.ZodTypeAny, {
     memory: {
@@ -106,6 +125,13 @@ export declare const MemoryConfig: z.ZodObject<{
     trace: {
         enable: boolean;
     };
+    similarAnswer: {
+        enable: boolean;
+    };
+    subAgentModel: {
+        providerID: string;
+        modelID: string;
+    };
 }, {
     memory?: {
         autoExtractMaxLength?: number | undefined;
@@ -125,14 +151,21 @@ export declare const MemoryConfig: z.ZodObject<{
         dream?: boolean | undefined;
     } | undefined;
     recall?: {
-        providerID: string;
-        modelID: string;
         recallEnable?: boolean | undefined;
         llmRecall?: boolean | undefined;
         llmRecallTimeout?: number | undefined;
+        providerID?: string | undefined;
+        modelID?: string | undefined;
     } | undefined;
     trace?: {
         enable?: boolean | undefined;
+    } | undefined;
+    similarAnswer?: {
+        enable?: boolean | undefined;
+    } | undefined;
+    subAgentModel?: {
+        providerID?: string | undefined;
+        modelID?: string | undefined;
     } | undefined;
 }>;
 export type MemoryConfig = z.infer<typeof MemoryConfig>;

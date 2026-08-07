@@ -64,6 +64,7 @@ export async function runAutoPersonal(input) {
         }
         else {
             log.warn(`[autoPersonal] completed fail, response text is empty`);
+            await rollbackConsolidationLock(projectPath, priorMtime, LOCK_FILE_PERSONAL);
         }
     }
     catch (e) {

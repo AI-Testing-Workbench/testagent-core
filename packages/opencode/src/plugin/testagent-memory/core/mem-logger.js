@@ -45,7 +45,10 @@ export function log(message, data) {
     const logFile = getLogFilePath();
     //const timestamp = new Date().toISOString();
     const timestamp = new Date(Date.now() + 8 * 3600000).toISOString();
-    const line = data
+    const isEmptyObject = (obj) => {
+        return obj !== null && typeof obj === 'object' && Object.keys(obj).length === 0;
+    };
+    const line = data && !isEmptyObject(data)
         ? `[${timestamp}] ${message}: ${JSON.stringify(data)}\n`
         : `[${timestamp}] ${message}\n`;
     appendFileSync(logFile, line);

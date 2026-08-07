@@ -1,10 +1,11 @@
 import { type RecalledMemory } from "../recall.js";
+/**
+ * 归一化向量。写入和搜索时必须使用相同归一化方式。
+ * 归一化后向量模长为 1，余弦距离退化为 1 - 内积，是 sqlite-vec 的前置条件。
+ */
+export declare function normalizeVector(vec: number[]): Float32Array;
 export declare class EmbeddingService {
-    /**
-     * 记忆向量缓存，key 为 sessionID，value 为 { vectors: 向量数组, texts: 文本数组 }
-     * 用于在同一个 session 会话中避免重复调用 getBatchEmbedding
-     */
-    private memoryVectorCache;
+    private buildQueryPrompt;
     /**
      * 单个文本生成向量
      * @param text 待向量化文本

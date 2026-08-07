@@ -42,34 +42,31 @@ export function callExternalLogOriginl(level, message, data) {
  * 调用外部日志适配器
  */
 function callExternalLog(level, ...args) {
+    const { message, data } = extractDataFromArgs(args);
+    log(`[${level}]${message}`, data);
     if (externalLog) {
-        const { message, data } = extractDataFromArgs(args);
         externalLog(level, message, { ...DEFAULT_SERVICE_DATA, ...data });
     }
 }
 /** Log an informational status message. Suppressed unless LORE_DEBUG=1. */
 export function info(...args) {
     // 优先调用外部日志适配器
-    callExternalLog("info", args);
-    log("[info]" + logText(args));
+    callExternalLog("info", ...args);
 }
 /** Log a warning. Suppressed unless LORE_DEBUG=1. */
 export function warn(...args) {
     // 优先调用外部日志适配器
-    callExternalLog("warn", args);
-    log("[warn]" + logText(args));
+    callExternalLog("warn", ...args);
 }
 /** Log an error. Always visible — these indicate real failures. */
 export function error(...args) {
     // 优先调用外部日志适配器
-    callExternalLog("error", args);
-    log("[error]" + logText(args));
+    callExternalLog("error", ...args);
 }
 export function debug(...args) {
     if (config().debug) {
         // 优先调用外部日志适配器
-        callExternalLog("debug", args);
-        log("[debug]" + logText(args));
+        callExternalLog("debug", ...args);
     }
 }
 /**

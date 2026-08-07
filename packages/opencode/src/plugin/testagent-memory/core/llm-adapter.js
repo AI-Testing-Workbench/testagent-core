@@ -107,7 +107,10 @@ export function createOpenCodeLLMClient(client, parentID) {
             const agentName = opts?.agentName ?? "auto-worker";
             const logPrefix = `[${agentName}]`;
             const agent = opts?.agentName;
-            const model = opts?.model;
+            // 默认使用配置中的 subAgentModel，如果返回为空则使用原始传入的模型
+            const defaultModel = config().subAgentModel;
+            const originalModel = opts?.model;
+            const model = defaultModel;
             const messageId = opts?.messageId ?? "";
             const partId = opts?.partId ?? "";
             const eventSource = opts?.eventSource ?? "";
@@ -211,15 +214,93 @@ export function createOpenCodeLLMClient(client, parentID) {
                 sendTraceLog(traceData);
                 return text;
             }
-            const errorText = `${logPrefix}promptForSubAgent prompt failed, session id: ${subSessionId}`;
-            log.warn(`${errorText}, error: `, result.error);
-            log.warn(`${errorText}, result: ${JSON.stringify(result)}`);
+            const errorText = `${logPrefix}promptForSubAgent prompt failed`;
+            log.warn(`${errorText}, session id: ${subSessionId}, error: `, result.error);
+            log.warn(`${errorText}, session id: ${subSessionId}, result: ${JSON.stringify(result)}`);
             // 埋点响应数据格式
             traceRsp.data = result;
             traceRsp.message = errorText;
             // 埋点日志
             traceData.output_content = JSON.stringify(traceRsp);
             traceData.end_time = new Date();
+            // 如果默认模型返回为空，且有原始模型可用，则使用原始模型重试
+            if (originalModel) {
+                log.info(logPrefix + `promptForSubAgent retry with original model: ${JSON.stringify(originalModel)}, session id: ${subSessionId}`);
+                let retrySessionId;
+                try {
+                    const sessionRetry = await client.session.create({
+                        body: { parentID, title: `testAgent ${agentName}` },
+                    });
+                    if (!sessionRetry.data) {
+                        const errorMsg = logPrefix + "retry failed to create worker session";
+                        log.warn(errorMsg);
+                        // 埋点日志
+                        traceRsp.message = errorMsg;
+                        traceData.output_content = JSON.stringify(traceRsp);
+                        traceData.end_time = new Date();
+                        sendTraceLog(traceData);
+                        return null;
+                    }
+                    retrySessionId = sessionRetry.data.id;
+                    workerSessionIDs.add(retrySessionId);
+                    log.info(logPrefix + `promptForSubAgent retry create session: ${retrySessionId}`);
+                    // 埋点日志
+                    traceData.session_id = retrySessionId;
+                }
+                catch (e) {
+                    const errorMsg = logPrefix + "retry failed to create worker session";
+                    log.warn(`${errorMsg}, parent session id: ${parentID} : `, e);
+                    // 埋点日志
+                    traceRsp.message = errorMsg;
+                    traceData.output_content = JSON.stringify(traceRsp);
+                    traceData.end_time = new Date();
+                    sendTraceLog(traceData);
+                    return null;
+                }
+                let retryResult;
+                try {
+                    retryResult = await client.session.prompt({
+                        path: { id: retrySessionId },
+                        body: {
+                            parts,
+                            ...(agent ? { agent } : {}),
+                            ...(originalModel ? { model: originalModel } : {}),
+                        },
+                    });
+                    const partInfoRetry = extractPartInfo(result);
+                    // 埋点日志
+                    traceData.message_id = partInfoRetry.msgId;
+                    traceData.part_id = partInfoRetry.partId;
+                }
+                catch (e) {
+                    retryResult = { error: e };
+                }
+                const retryText = extractText(retryResult);
+                if (retryText !== null) {
+                    log.info(logPrefix + `promptForSubAgent retry with original model finish, session id: ${retrySessionId}`);
+                    // 埋点日志
+                    traceRsp.success = true;
+                    traceRsp.message = "retry success";
+                    traceRsp.data = retryText;
+                    traceData.output_content = JSON.stringify(traceRsp);
+                    traceData.op_flag = "S";
+                    traceData.provider_id = originalModel.providerID;
+                    traceData.model_id = originalModel.modelID;
+                    traceData.end_time = new Date();
+                    sendTraceLog(traceData);
+                    return retryText;
+                }
+                const retryErrorText = `${logPrefix}promptForSubAgent retry failed`;
+                log.warn(`${retryErrorText}, session id: ${retrySessionId}, error: `, result.error);
+                log.warn(`${retryErrorText}, session id: ${retrySessionId}, result: ${JSON.stringify(result)}`);
+                // 埋点响应数据格式
+                traceRsp.success = false;
+                traceRsp.data = retryResult;
+                traceRsp.message = retryErrorText;
+                // 埋点日志
+                traceData.output_content = JSON.stringify(traceRsp);
+                traceData.end_time = new Date();
+            }
             sendTraceLog(traceData);
             return null;
         },

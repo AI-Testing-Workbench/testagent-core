@@ -3,6 +3,7 @@ import { join, basename } from "path";
 import { getMemoryDir, getMemoryEntrypoint, ENTRYPOINT_NAME, validateMemoryFileName, MAX_MEMORY_FILES, MAX_MEMORY_FILE_BYTES, MAX_ENTRYPOINT_LINES, MAX_ENTRYPOINT_BYTES, FRONTMATTER_MAX_LINES, getPersonalMemoryFile, getPersonalMemoryBackupDir, } from "./paths.js";
 import * as log from "./core/log.js";
 import { config } from "./core/config.js";
+import { getDatabase } from "./core/db.js";
 export const MEMORY_TYPES = ["user", "feedback", "project", "reference"];
 function parseFrontmatter(raw) {
     const trimmed = raw.trim();
@@ -98,7 +99,7 @@ export function readMemory(worktree, fileName) {
         return null;
     }
 }
-export function saveMemory(worktree, fileName, name, description, type, content) {
+export async function saveMemory(worktree, fileName, name, description, type, content) {
     const safeName = validateMemoryFileName(fileName);
     const memDir = getMemoryDir(worktree);
     const filePath = join(memDir, safeName);
@@ -109,15 +110,34 @@ export function saveMemory(worktree, fileName, name, description, type, content)
     }
     writeFileSync(filePath, fileContent, "utf-8");
     updateIndex(worktree, safeName, nameNew, description);
+    // 异步生成并存储向量
+    try {
+        const { EmbeddingService } = await import("./embedding/service.js");
+        const provider = new EmbeddingService();
+        const vector = await provider.getSingleEmbedding(content.trim());
+        const db = await getDatabase();
+        db.upsertMemoryVector(safeName, worktree, vector, content.trim());
+    }
+    catch (e) {
+        log.error(`[saveMemory] 向量生成/存储失败: ${safeName}`, e);
+    }
     return filePath;
 }
-export function deleteMemory(worktree, fileName) {
+export async function deleteMemory(worktree, fileName) {
     const safeName = validateMemoryFileName(fileName);
     const memDir = getMemoryDir(worktree);
     const filePath = join(memDir, safeName);
     try {
         unlinkSync(filePath);
         removeFromIndex(worktree, safeName);
+        // 同步删除向量
+        try {
+            const db = await getDatabase();
+            db.deleteMemoryVector(safeName, worktree);
+        }
+        catch (e) {
+            log.error(`[deleteMemory] 向量删除失败: ${safeName}`, e);
+        }
         return true;
     }
     catch {
@@ -224,6 +244,49 @@ function removeFromIndex(worktree, fileName) {
         .split("\n")
         .filter((l) => l.trim() && !l.includes(`(${fileName})`));
     writeFileSync(entrypoint, lines.length > 0 ? lines.join("\n") + "\n" : "", "utf-8");
+}
+/**
+ * 扫描 worktree 下所有记忆文件（不含 MEMORY.md），为没有向量的文件生成并存入向量库
+ * 用于存量数据回填，新增记忆由 saveMemory 自动处理
+ */
+export async function backfillMemoryVectors(worktree) {
+    const memDir = getMemoryDir(worktree);
+    const files = readdirSync(memDir, { encoding: "utf-8" })
+        .filter(f => f.endsWith(".md") && f !== ENTRYPOINT_NAME);
+    if (files.length === 0)
+        return { total: 0, success: 0, failed: 0 };
+    const { EmbeddingService } = await import("./embedding/service.js");
+    const provider = new EmbeddingService();
+    const db = await getDatabase();
+    let success = 0;
+    let failed = 0;
+    for (const file of files) {
+        try {
+            const filePath = join(memDir, file);
+            const rawContent = readFileSync(filePath, "utf-8");
+            // 提取 frontmatter 后的正文内容（与 saveMemory / parseFrontmatter 逻辑一致）
+            const trimmed = rawContent.trim();
+            let content = trimmed;
+            if (trimmed.startsWith("---")) {
+                const endIdx = trimmed.indexOf("\n---", 3);
+                if (endIdx !== -1) {
+                    content = trimmed.slice(endIdx + 4).trim();
+                }
+            }
+            if (!content) {
+                failed++;
+                continue;
+            }
+            const vector = await provider.getSingleEmbedding(content);
+            db.upsertMemoryVector(file, worktree, vector, content);
+            success++;
+        }
+        catch (e) {
+            log.error(`[backfillMemoryVectors] 处理失败: ${file}`, e);
+            failed++;
+        }
+    }
+    return { total: files.length, success, failed };
 }
 function formatFileSize(bytes) {
     if (bytes < 1024)

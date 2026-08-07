@@ -38,6 +38,35 @@ export declare class DatabaseManager {
      */
     createMemExtractHisTable(ifNotExists?: boolean): boolean;
     /**
+     * Create memory_vectors table for storing memory embeddings
+     * 记忆向量存储表
+     */
+    createMemoryVectorTable(ifNotExists?: boolean): boolean;
+    /**
+     * Upsert a memory vector
+     * 保存记忆向量。内部做 L2 归一化 + 零向量跳过，调用方无需额外处理。
+     */
+    upsertMemoryVector(filePath: string, worktree: string, vector: number[], content?: string): void;
+    /**
+     * Delete a memory vector
+     * 删除记忆向量
+     */
+    deleteMemoryVector(filePath: string, worktree: string): void;
+    /**
+     * Get a single memory vector
+     * 获取单条记忆向量
+     */
+    getMemoryVector(filePath: string, worktree: string): number[] | null;
+    /**
+     * Get all memory vectors for a given worktree
+     * 获取指定项目的所有记忆向量
+     */
+    getAllMemoryVectors(worktree: string): Array<{
+        filePath: string;
+        vector: number[];
+        content: string;
+    }>;
+    /**
      * Query all records by project_id with optional status filter
      * 根据项目ID查询所有记录，可选按status过滤
      *
@@ -64,6 +93,13 @@ export declare class DatabaseManager {
      * @returns Array of pending memory extract history records
      */
     queryPendingByProjectId(projectId: string, sessionId?: string): Promise<MemExtractHisRecord[]>;
+    queryQuestionCandidates(excludePartId: string, projectPath: string, limit?: number): Promise<Array<{
+        part_id: string;
+        session_id: string;
+        message_id: string;
+        content: string | null;
+        time_created: number;
+    }>>;
     /**
      * Update status for multiple records by part_ids
      * 批量更新记录状态
@@ -73,6 +109,22 @@ export declare class DatabaseManager {
      * @returns Number of records updated
      */
     updateStatusByPartIds(partIds: string[], status?: number): Promise<number>;
+    queryRecentQuestionsWithPrevAnswer(projectId: string, excludePartId: string, limit?: number): Promise<Array<{
+        question: {
+            part_id: string;
+            session_id: string;
+            message_id: string;
+            content: string | null;
+            time_created: number;
+        };
+        prevRecord: {
+            part_id: string;
+            session_id: string;
+            message_id: string;
+            content: string | null;
+            time_created: number;
+        } | null;
+    }>>;
 }
 /**
  * Get the database singleton instance
