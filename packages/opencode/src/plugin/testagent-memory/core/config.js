@@ -35,9 +35,9 @@ export const MemoryConfig = z.object({
         autoExtractEnable: z.boolean().default(true),
         personalMemoryBackupSize: z.number().default(10),
     })
-        .default({ autoExtractMaxLength: 10000, autoExtractBufferSize: 10, personalMemoryEnable: true,
+        .default({ autoExtractMaxLength: 10000, autoExtractBufferSize: 10, autoExtractBatchSize: 6, personalMemoryEnable: true,
         personalMemoryPrompt: "", autoDreamEnable: true, autoExtractEnable: true, personalMemoryBackupSize: 10,
-        autoExtractBatchSize: 6, autoExtractBatchToken: 10000 }),
+        autoExtractBatchToken: 10000 }),
     recall: z
         .object({
         recallEnable: z.boolean().default(true),
@@ -45,15 +45,28 @@ export const MemoryConfig = z.object({
         llmRecall: z.boolean().default(false),
         /** 使用llm召回记忆超时时间 */
         llmRecallTimeout: z.number().default(10000),
-        providerID: z.string(),
-        modelID: z.string(),
+        providerID: z.string().default("test-llm"),
+        modelID: z.string().default("Economy"),
     })
-        .default({ recallEnable: true, llmRecall: false, llmRecallTimeout: 10000, providerID: "", modelID: "" }),
-    trace: z
-        .object({
+        .default({ recallEnable: true, llmRecall: false, llmRecallTimeout: 10000, providerID: "test-llm", modelID: "Economy" }),
+    trace: z.object({
         enable: z.boolean().default(true),
     }).default({
         enable: true
+    }),
+    /** question工具调用时，是否注入相似答案 */
+    similarAnswer: z.object({
+        enable: z.boolean().default(false),
+    }).default({
+        enable: false
+    }),
+    /** 子Agent默认使用的模型配置 */
+    subAgentModel: z.object({
+        providerID: z.string().default("test-llm"),
+        modelID: z.string().default("Economy"),
+    }).default({
+        providerID: "test-llm",
+        modelID: "Economy",
     }),
 });
 let current = MemoryConfig.parse({});

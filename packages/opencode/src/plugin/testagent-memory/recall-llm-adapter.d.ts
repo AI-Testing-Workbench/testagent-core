@@ -45,6 +45,9 @@ export interface LLMClient {
          * (e.g. OpenCode uses this as the session agent name).
          */
         workerID?: string;
+        sessionID: string;
+        partId: string;
+        messageId: string;
     }): Promise<string | null>;
 }
 /**
@@ -69,5 +72,8 @@ export declare function createOpenCodeRecallLLMClient(client: Client, parentID: 
      * (e.g. OpenCode uses this as the session agent name).
      */
     workerID?: string;
+    sessionID: string;
+    partId: string;
+    messageId: string;
 }): LLMClient;
 export {};

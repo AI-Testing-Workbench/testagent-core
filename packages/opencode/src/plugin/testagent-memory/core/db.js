@@ -7,6 +7,8 @@
 import { existsSync, mkdirSync } from 'fs';
 import { dirname, join } from 'path';
 import { homedir } from 'os';
+import * as log from './log.js';
+import { normalizeVector } from "../embedding/service.js";
 /**
  * Get the default database path in current user's home directory
  * @returns Database path
@@ -45,10 +47,9 @@ export class DatabaseManager {
         // Enable foreign keys and WAL mode for better performance
         this.db.exec('PRAGMA foreign_keys = ON');
         this.db.exec('PRAGMA journal_mode = WAL');
-        // If database file did not exist, create required tables
-        if (!dbFileExists) {
-            this.createMemExtractHisTable(true);
-        }
+        // Create required tables (always try, IF NOT EXISTS handles idempotency)
+        this.createMemExtractHisTable(true);
+        this.createMemoryVectorTable(true);
     }
     /**
      * Close database connection
@@ -88,6 +89,111 @@ export class DatabaseManager {
             '    )';
         this.db.exec(sql);
         return true;
+    }
+    // ==================== memory_vectors 表 ====================
+    /**
+     * Create memory_vectors table for storing memory embeddings
+     * 记忆向量存储表
+     */
+    createMemoryVectorTable(ifNotExists = true) {
+        if (!this.db) {
+            throw new Error('Database not initialized');
+        }
+        let sql = 'CREATE TABLE';
+        if (ifNotExists) {
+            sql += ' IF NOT EXISTS';
+        }
+        sql += ` memory_vectors(
+      file_path   TEXT NOT NULL,
+      worktree    TEXT NOT NULL,
+      vector      BLOB NOT NULL,
+      content     TEXT DEFAULT '',
+      updated_at  INTEGER NOT NULL,
+      PRIMARY KEY (file_path, worktree)
+    )`;
+        this.db.exec(sql);
+        // 兼容旧表：尝试添加 content 列（表已存在时会忽略）
+        try {
+            this.db.exec('ALTER TABLE memory_vectors ADD COLUMN content TEXT DEFAULT \'\'');
+        }
+        catch {
+            // column already exists
+        }
+        return true;
+    }
+    /**
+     * Upsert a memory vector
+     * 保存记忆向量。内部做 L2 归一化 + 零向量跳过，调用方无需额外处理。
+     */
+    upsertMemoryVector(filePath, worktree, vector, content) {
+        if (!this.db) {
+            throw new Error('Database not initialized');
+        }
+        // L2 归一化
+        const float32 = normalizeVector(vector);
+        // 零向量跳过写入
+        const isZero = float32.every(v => v === 0);
+        if (isZero)
+            return;
+        // 维度校验：与首条已存向量保持一致性
+        const dim = float32.length;
+        const checkDim = this.db.prepare('SELECT vector FROM memory_vectors LIMIT 1').get();
+        if (checkDim) {
+            const existingDim = checkDim.vector.byteLength / Float32Array.BYTES_PER_ELEMENT;
+            if (existingDim !== dim) {
+                log.error(`[upsertMemoryVector] 向量维度不匹配: 已存 ${existingDim}，新向量 ${dim}，跳过写入`);
+                return;
+            }
+        }
+        const buf = Buffer.from(float32.buffer);
+        const stmt = this.db.prepare(`INSERT INTO memory_vectors (file_path, worktree, vector, content, updated_at)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(file_path, worktree) DO UPDATE SET
+         vector      = excluded.vector,
+         content     = excluded.content,
+         updated_at  = excluded.updated_at`);
+        stmt.run(filePath, worktree, buf, content ?? '', Date.now());
+    }
+    /**
+     * Delete a memory vector
+     * 删除记忆向量
+     */
+    deleteMemoryVector(filePath, worktree) {
+        if (!this.db) {
+            throw new Error('Database not initialized');
+        }
+        const stmt = this.db.prepare('DELETE FROM memory_vectors WHERE file_path = ? AND worktree = ?');
+        stmt.run(filePath, worktree);
+    }
+    /**
+     * Get a single memory vector
+     * 获取单条记忆向量
+     */
+    getMemoryVector(filePath, worktree) {
+        if (!this.db) {
+            throw new Error('Database not initialized');
+        }
+        const stmt = this.db.prepare('SELECT vector FROM memory_vectors WHERE file_path = ? AND worktree = ?');
+        const row = stmt.get(filePath, worktree);
+        if (!row)
+            return null;
+        return Array.from(new Float32Array(row.vector.buffer, row.vector.byteOffset, row.vector.byteLength / Float32Array.BYTES_PER_ELEMENT));
+    }
+    /**
+     * Get all memory vectors for a given worktree
+     * 获取指定项目的所有记忆向量
+     */
+    getAllMemoryVectors(worktree) {
+        if (!this.db) {
+            throw new Error('Database not initialized');
+        }
+        const stmt = this.db.prepare('SELECT file_path, vector, content FROM memory_vectors WHERE worktree = ?');
+        const rows = stmt.all(worktree);
+        return rows.map(row => ({
+            filePath: row.file_path,
+            vector: Array.from(new Float32Array(row.vector.buffer, row.vector.byteOffset, row.vector.byteLength / Float32Array.BYTES_PER_ELEMENT)),
+            content: row.content ?? '',
+        }));
     }
     /**
      * Query all records by project_id with optional status filter
@@ -181,6 +287,28 @@ export class DatabaseManager {
             time_updated: row.time_updated
         }));
     }
+    async queryQuestionCandidates(excludePartId, projectPath, limit = 50) {
+        if (!this.db)
+            throw new Error('Database not initialized');
+        const stmt = this.db.prepare(`
+      SELECT q.part_id, q.session_id, q.message_id, q.content, q.time_created
+      FROM mem_extract_his q
+      WHERE q.role = 'tool_question'
+        AND q.project_id = ?
+        AND q.part_id != ?
+        AND q.content LIKE '%Answer:%'
+      ORDER BY q.time_created DESC
+      LIMIT ?
+    `);
+        const rows = stmt.all(projectPath, excludePartId, limit);
+        return rows.map(r => ({
+            part_id: r.part_id,
+            session_id: r.session_id,
+            message_id: r.message_id,
+            content: r.content,
+            time_created: r.time_created,
+        }));
+    }
     /**
      * Update status for multiple records by part_ids
      * 批量更新记录状态
@@ -201,6 +329,54 @@ export class DatabaseManager {
         const stmt = this.db.prepare(sql);
         const result = stmt.run(status, Date.now(), ...partIds);
         return Number(result.changes);
+    }
+    async queryRecentQuestionsWithPrevAnswer(projectId, excludePartId, limit = 50) {
+        if (!this.db)
+            throw new Error('Database not initialized');
+        const questionsStmt = this.db.prepare(`
+      SELECT part_id, session_id, message_id, content, time_created
+      FROM mem_extract_his
+      WHERE project_id = ?
+        AND role = 'tool_question'
+        AND part_id != ?
+        AND content LIKE '%Answer:%'
+      ORDER BY time_created DESC
+      LIMIT ?
+    `);
+        const questions = questionsStmt.all(projectId, excludePartId, limit);
+        if (questions.length === 0)
+            return [];
+        const result = [];
+        for (const q of questions) {
+            const prevStmt = this.db.prepare(`
+        SELECT part_id, session_id, message_id, content, time_created
+        FROM mem_extract_his
+        WHERE project_id = ?
+          AND time_created < ?
+          AND part_id != ?
+        ORDER BY time_created DESC
+        LIMIT 1
+      `);
+            const prevRows = prevStmt.all(projectId, q.time_created, q.part_id);
+            const prevRecord = prevRows.length > 0 ? prevRows[0] : null;
+            result.push({
+                question: {
+                    part_id: q.part_id,
+                    session_id: q.session_id,
+                    message_id: q.message_id,
+                    content: q.content,
+                    time_created: q.time_created,
+                },
+                prevRecord: prevRecord ? {
+                    part_id: prevRecord.part_id,
+                    session_id: prevRecord.session_id,
+                    message_id: prevRecord.message_id,
+                    content: prevRecord.content,
+                    time_created: prevRecord.time_created,
+                } : null,
+            });
+        }
+        return result;
     }
 }
 // ---------------------------------------------------------------------------

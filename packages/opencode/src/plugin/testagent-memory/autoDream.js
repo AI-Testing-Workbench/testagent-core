@@ -89,6 +89,7 @@ export async function runAutoDream(input) {
         }
         else {
             log.warn(`[autoDream] completed fail, response text is empty`);
+            await rollbackConsolidationLock(projectPath, priorMtime, LOCK_FILE_DREAM);
         }
     }
     catch (e) {

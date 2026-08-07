@@ -3,7 +3,7 @@
  *
  * Tokens are lowercased and filtered for stop words.
  */
-export declare function buildFtsTokens(raw: string, isQuery: boolean): string[];
+export declare function buildFtsTokens(raw: string, isQuery: boolean, keepDuplicates?: boolean): string[];
 /**
  * Multi-granularity Chinese tokenizer: words + bigrams + single characters.
  * Kept for vector embedding where dense token coverage improves hashing.

@@ -6,6 +6,30 @@ export declare function calcSubstringBonus(query: string, text: string, queryTok
 export declare function calcPrefixBonus(query: string, text: string, queryTokens: string[], textTokens: string[]): number;
 export declare function calcNgramBonus(query: string, text: string, queryTokens: string[], textTokens: string[]): number;
 export declare function calcTimeBonus(now: number, mtimeMs: number): number;
+/**
+ * 构建语料库统计信息（用于 BM25 计算）
+ * @param allDocTokens 所有文档的 token 列表
+ * @returns 语料库统计对象
+ */
+export declare function buildCorpusStats(allDocTokens: string[][]): {
+    docCount: number;
+    docFreq: Map<string, number>;
+    avgDocLength: number;
+};
+/**
+ * 计算 BM25 关键词匹配得分
+ * BM25 公式：score = IDF(q) * (TF(q) * (K1 + 1)) / (TF(q) + K1 * (1 - B + B * |doc|/avgdl))
+ *
+ * @param queryTokens 查询词的 token 列表
+ * @param textTokens 当前文档的 token 列表
+ * @param corpusStats 语料库统计信息（包含文档频率、平均文档长度等）
+ * @returns BM25 得分 [0, KEYWORD_BONUS]
+ */
+export declare function calcBm25KeywordBonus(queryTokens: string[], textTokens: string[], corpusStats?: {
+    docCount: number;
+    docFreq: Map<string, number>;
+    avgDocLength: number;
+}): number;
 export declare function vectorfilter(worktree: string, sessionID: string, query: string, alreadySurfaced: ReadonlySet<string> | undefined, topNum: number, minScore?: number): Promise<RecalledMemory[]>;
 export interface ClaudeProfileMatch {
     /** 章节名称，如"基本信息"、"偏好" */
