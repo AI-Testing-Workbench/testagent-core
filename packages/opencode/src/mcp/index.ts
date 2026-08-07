@@ -146,14 +146,12 @@ function convertMcpTool(clientName: string, mcpTool: MCPToolDef, client: MCPClie
   }
 
   // testagent_change start
-  const record = (attrs: Record<string, string>, failed: boolean, ms: number) => {
-    const updates = [
+  const record = (attrs: Record<string, string>, failed: boolean, ms: number) =>
+    Effect.all([
       Metric.update(Metric.withAttributes(mcpCallTotal, attrs), 1),
       Metric.update(Metric.withAttributes(mcpCallDuration, attrs), ms),
-    ]
-    if (failed) updates.push(Metric.update(Metric.withAttributes(mcpCallFailed, attrs), 1))
-    getOtelRt().runFork(Effect.all(updates))
-  }
+      failed ? Metric.update(Metric.withAttributes(mcpCallFailed, attrs), 1) : Effect.void,
+    ])
   // testagent_change end
 
   return dynamicTool({
@@ -179,12 +177,16 @@ function convertMcpTool(clientName: string, mcpTool: MCPToolDef, client: MCPClie
                   timeout,
                 },
               ),
-            catch: (err) => {
-              record(attrs, true, Date.now() - start)
-              return err
-            },
-          })
-          record(attrs, result.isError === true, Date.now() - start)
+            catch: (err) => err,
+          }).pipe(
+            Effect.catch((err) =>
+              Effect.gen(function* () {
+                yield* record(attrs, true, Date.now() - start)
+                return yield* Effect.fail(err)
+              }),
+            ),
+          )
+          yield* record(attrs, result.isError === true, Date.now() - start)
           return result
         }),
       )
