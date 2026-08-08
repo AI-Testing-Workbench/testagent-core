@@ -823,6 +823,8 @@ export const ShellTool = Tool.define(
           truncated: cut,
           ...(cut && file ? { outputPath: file } : {}),
           ...(input.background ? { background: true } : {}),
+          // testagent_change: Flag timeout so the webview can render a warning style
+          ...(expired ? { timeout: true } : {}),
         },
         output,
       }
