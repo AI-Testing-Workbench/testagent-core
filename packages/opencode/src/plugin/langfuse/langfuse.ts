@@ -24,11 +24,8 @@ import { homedir } from "os"
 const LANGFUSE_BASE_URL = decodeURIComponent(
   atob("aHR0cCUzQSUyRiUyRnRlc3RodWItYWdlbnQtdHJhY2UucGFhc3VhdC5jbWJjaGluYS5jbg=="),
 )
-const ENABLE_FINAL_BATCH_UPLOAD = false
-const LANGFUSE_FINAL_BATCH_UPLOAD_PATH = "/api/trpc/batchTrace.save"
-const VERSION = "1.0.2"
+const VERSION = "1.0.3"
 const LANGFUSE_FETCH_TIMEOUT_MS = 5000
-const LANGFUSE_FINAL_BATCH_UPLOAD_TIMEOUT_MS = 30000
 const LANGFUSE_KEY_LOOKUP_TIMEOUT_MS = 15000
 const TESTAGENT_DATA_DIR = join(homedir(), ".local", "share", "testagent")
 const LANGFUSE_KEY_CACHE_FILE = join(TESTAGENT_DATA_DIR, "langfuse-project-keys.json")
@@ -203,18 +200,6 @@ const MAX_BACKGROUND_INGESTION_EVENTS = 10000
 let backgroundIngestionEvents: any[] = []
 let backgroundIngestionDrainPromise: Promise<void> | null = null
 let backgroundIngestionDrainScheduled = false
-
-// 最终完整 trace 汇总上报到后端批处理接口，用于兼容 Kafka 消费完整数据的逻辑。
-const finalBatchUploads: any[] = []
-let retryingFinalBatchUploads = false
-let finalBatchUploadQueueFile = join(TESTAGENT_DATA_DIR, "langfuse-final-batch-upload-queue.json")
-let finalBatchUploadQueueLoaded = false
-const MAX_FINAL_BATCH_UPLOADS = 1000
-const BACKGROUND_FINAL_BATCH_UPLOAD_SIZE = 100
-const MAX_BACKGROUND_FINAL_BATCH_UPLOADS = 1000
-let backgroundFinalBatchUploads: any[] = []
-let backgroundFinalBatchDrainPromise: Promise<void> | null = null
-let backgroundFinalBatchDrainScheduled = false
 
 function getActiveParentId(): string | undefined {
   const activeSkill = skillStack[skillStack.length - 1]
@@ -492,7 +477,6 @@ const messageCounter = new Map<string, number>()
 // Langfuse credentials (will be updated from project keys)
 let publicKey: string
 let secretKey: string
-let currentBatchProjectId = "fallback_project"
 let userIdMetadata: string | null = null
 
 // ==================== 常量 ====================
@@ -649,7 +633,7 @@ function withEventBodyTags(event: any) {
   if (!event || typeof event !== "object" || !event.body) return event
   return {
     ...event,
-    body: withEventMetadataTags(event.body),
+    body: withEventMetadataTags(event.body, event.body?.metadata?.hookReceivedAt),
   }
 }
 
@@ -766,247 +750,7 @@ async function uploadToIngestionChunk(taggedEvents: any[]) {
   }
 }
 
-async function postJsonWithAuth(path: string, payload: any, timeoutMs = LANGFUSE_FETCH_TIMEOUT_MS) {
-  const credentials = btoa(`${publicKey}:${secretKey}`)
-  try {
-    const res = await fetchWithTimeout(`${LANGFUSE_BASE_URL}${path}`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Accept-Encoding": "identity",
-        Authorization: `Basic ${credentials}`,
-      },
-      body: JSON.stringify(payload),
-    }, timeoutMs)
-
-    if (res.ok) {
-      return { ok: true, body: null }
-    }
-
-    const text = await readResponseTextSafe(res)
-    return { ok: false, status: res.status, error: text }
-  } catch (e) {
-    const isTimeout = e instanceof Error && e.name === "AbortError"
-    return { ok: false, status: isTimeout ? 408 : 500, error: String(e), reason: isTimeout ? "timeout" : "exception" }
-  }
-}
-
-function buildFinalBatchUpload(batch: TraceBatch) {
-  if (!batch.output) {
-    const finalOutput = getFinalTraceOutput(batch.id, batch.sessionId) ?? getFinalTraceOutputFromBatch(batch)
-    if (finalOutput) batch.output = finalOutput
-  }
-
-  const events: any[] = [buildIngestionEvent("trace-create", traceEventBody(batch))]
-
-  const sortedGenerations = [...batch.generations].sort(
-    (a, b) => new Date(a.startTime).getTime() - new Date(b.startTime).getTime(),
-  )
-  const sortedSpans = [...batch.spans].sort((a, b) => new Date(a.startTime).getTime() - new Date(b.startTime).getTime())
-
-  for (const generation of sortedGenerations) {
-    events.push(buildIngestionEvent("generation-create", generationEventBody(generation), generation.startTime))
-  }
-
-  for (const span of sortedSpans) {
-    events.push(buildIngestionEvent("span-create", spanEventBody(span), span.startTime))
-  }
-
-  return events
-}
-
-function getFinalBatchUploadTraceId(item: any): string | undefined {
-  return item?.body?.traceId || item?.body?.id
-}
-
-function configureFinalBatchUploadQueue(projectKey: string) {
-  const safeProjectKey = projectKey.replace(/[^a-zA-Z0-9_-]/g, "_")
-  finalBatchUploadQueueFile = join(TESTAGENT_DATA_DIR, `langfuse-final-batch-upload-queue-${safeProjectKey}.json`)
-  finalBatchUploadQueueLoaded = false
-  finalBatchUploads.splice(0)
-}
-
-function persistFinalBatchUploads() {
-  try {
-    mkdirSync(dirname(finalBatchUploadQueueFile), { recursive: true })
-    const tmpFile = `${finalBatchUploadQueueFile}.tmp`
-    writeFileSync(tmpFile, JSON.stringify(finalBatchUploads, null, 2), "utf-8")
-    renameSync(tmpFile, finalBatchUploadQueueFile)
-  } catch (e) {
-    trackEvent("both", {
-      level: "error",
-      message: "持久化最终批次上传队列失败",
-      data: { error: String(e) },
-      metricName: "plugin.langfuse.persist.error",
-      metricValue: 1,
-      tags: { type: "finalBatchUpload", action: "persist", reason: "exception" },
-    })
-  }
-}
-
-function isValidFinalBatchUpload(item: any) {
-  return (
-    !!item &&
-    typeof item === "object" &&
-    typeof item.id === "string" &&
-    ["trace-create", "generation-create", "span-create"].includes(item.type) &&
-    !!item.body
-  )
-}
-
-function enqueueFinalBatchUploads(items: any[], options?: { persist?: boolean }) {
-  if (items.length === 0) return
-
-  const existingIds = new Set(finalBatchUploads.map((item) => item.id))
-  for (const item of items) {
-    if (!isValidFinalBatchUpload(item) || existingIds.has(item.id)) continue
-    finalBatchUploads.push(withEventBodyTags(item))
-    existingIds.add(item.id)
-  }
-
-  const maxQueueSize = Math.max(MAX_FINAL_BATCH_UPLOADS, items.length)
-  if (finalBatchUploads.length > maxQueueSize) {
-    finalBatchUploads.splice(0, finalBatchUploads.length - maxQueueSize)
-  }
-
-  if (options?.persist !== false) {
-    persistFinalBatchUploads()
-  }
-}
-
-function replaceFinalBatchUploads(items: any[]) {
-  finalBatchUploads.splice(0, finalBatchUploads.length, ...items)
-  persistFinalBatchUploads()
-}
-
-function takeNextFinalBatchUploadGroup(queue: any[]): any[] {
-  if (queue.length === 0) return []
-
-  const firstTraceId = getFinalBatchUploadTraceId(queue[0])
-  if (!firstTraceId) {
-    return queue.splice(0, BACKGROUND_FINAL_BATCH_UPLOAD_SIZE)
-  }
-
-  const group: any[] = []
-  for (let i = 0; i < queue.length; ) {
-    const item = queue[i]
-    if (getFinalBatchUploadTraceId(item) === firstTraceId) {
-      group.push(item)
-      queue.splice(i, 1)
-    } else {
-      i += 1
-    }
-  }
-
-  return group
-}
-
-function loadFinalBatchUploadsFromDisk() {
-  if (finalBatchUploadQueueLoaded) return
-  finalBatchUploadQueueLoaded = true
-  if (!existsSync(finalBatchUploadQueueFile)) {
-    trackEvent("metric", {
-      metricName: "plugin.langfuse.queue.load.success",
-      metricValue: 1,
-      tags: { type: "finalBatchUpload", status: "missing_file" },
-    })
-    return
-  }
-
-  try {
-    const raw = readFileSync(finalBatchUploadQueueFile, "utf-8")
-    const persistedItems = JSON.parse(raw)
-    if (!Array.isArray(persistedItems)) {
-      trackEvent("both", {
-        level: "warn",
-        message: "加载最终批次上传队列，数据格式异常",
-        data: { file: finalBatchUploadQueueFile },
-        metricName: "plugin.langfuse.load.error",
-        metricValue: 1,
-        tags: { type: "finalBatchUpload", reason: "invalid_format" },
-      })
-      return
-    }
-
-    enqueueFinalBatchUploads(persistedItems.filter(isValidFinalBatchUpload), { persist: false })
-    persistFinalBatchUploads()
-    trackEvent("metric", {
-      metricName: "plugin.langfuse.queue.load.success",
-      metricValue: 1,
-      tags: {
-        type: "finalBatchUpload",
-        status: "loaded",
-        itemCount: String(persistedItems.filter(isValidFinalBatchUpload).length),
-      },
-    })
-  } catch (e) {
-    trackEvent("both", {
-      level: "error",
-      message: "加载最终批次上传队列异常",
-      data: { error: String(e), file: finalBatchUploadQueueFile },
-      metricName: "plugin.langfuse.load.error",
-      metricValue: 1,
-      tags: { type: "finalBatchUpload", reason: "exception" },
-    })
-  }
-}
-
-async function uploadFinalBatchItems(items: any[]) {
-  if (items.length === 0) return []
-
-  const taggedItems = items.map(withEventBodyTags)
-  const result = await postJsonWithAuth(
-    LANGFUSE_FINAL_BATCH_UPLOAD_PATH,
-    { json: { [currentBatchProjectId]: taggedItems } },
-    LANGFUSE_FINAL_BATCH_UPLOAD_TIMEOUT_MS,
-  )
-  if(result.ok) {
-    trackEvent("metric", {
-      metricName: "plugin.langfuse.upload.final.success",
-      metricValue: 1,
-      tags: { itemCount: String(taggedItems.length) },
-    })
-  }else{
-    trackEvent("both", {
-      level: "error",
-      message: "最终批次上传失败",
-      data: { itemCount: taggedItems.length, error: result.error },
-      metricName: "plugin.langfuse.upload.final.error",
-      metricValue: 1,
-      tags: { itemCount: String(taggedItems.length), reason: result.reason ?? "request_failed", status: String(result.status ?? 0) },
-    })
-  }
-
-  return result.ok ? [] : taggedItems
-}
-
-async function retryFinalBatchUploads() {
-  if (!ENABLE_FINAL_BATCH_UPLOAD) return
-  loadFinalBatchUploadsFromDisk()
-  if (retryingFinalBatchUploads || finalBatchUploads.length === 0) return
-
-  retryingFinalBatchUploads = true
-  const items = [...finalBatchUploads]
-  try {
-    const failedItems = await uploadFinalBatchItems(items)
-    const failedIds = new Set(failedItems.map((item) => item.id))
-    replaceFinalBatchUploads(
-      finalBatchUploads.filter(
-        (item) => !items.some((attempted) => attempted.id === item.id) || failedIds.has(item.id),
-      ),
-    )
-  } finally {
-    retryingFinalBatchUploads = false
-  }
-}
-
-function uploadFinalTraceBatch(batch: TraceBatch) {
-  if (!ENABLE_FINAL_BATCH_UPLOAD) return
-  const items = buildFinalBatchUpload(batch)
-  scheduleBackgroundFinalBatchUpload(items)
-}
-
-function withEventMetadataTags(body: any) {
+function withEventMetadataTags(body: any, hookReceivedAt?: string) {
   if (!body || typeof body !== "object") return body
 
   return {
@@ -1014,17 +758,18 @@ function withEventMetadataTags(body: any) {
     tags: OBSERVATION_TAGS,
     metadata: {
       ...(body.metadata ?? {}),
+      ...(hookReceivedAt ? { hookReceivedAt } : {}),
       tags: OBSERVATION_TAGS,
     },
   }
 }
 
-function buildIngestionEvent(type: string, body: any, timestamp = new Date().toISOString()) {
+function buildIngestionEvent(type: string, body: any, timestamp = new Date().toISOString(), hookReceivedAt = new Date().toISOString()) {
   return {
     id: generateUUID(),
     timestamp,
     type,
-    body: withEventMetadataTags(body),
+    body: withEventMetadataTags(body, hookReceivedAt),
   }
 }
 
@@ -1263,70 +1008,8 @@ async function drainBackgroundIngestion() {
   return backgroundIngestionDrainPromise
 }
 
-function scheduleBackgroundFinalBatchUpload(items: any[]) {
-  if (!ENABLE_FINAL_BATCH_UPLOAD) return
-  if (items.length === 0) return
-
-  backgroundFinalBatchUploads.push(...items)
-  const maxQueueSize = Math.max(MAX_BACKGROUND_FINAL_BATCH_UPLOADS, items.length)
-  if (backgroundFinalBatchUploads.length > maxQueueSize) {
-    backgroundFinalBatchUploads.splice(0, backgroundFinalBatchUploads.length - maxQueueSize)
-  }
-
-  scheduleBackgroundFinalBatchDrain()
-}
-
-function scheduleBackgroundFinalBatchDrain() {
-  if (!ENABLE_FINAL_BATCH_UPLOAD) return
-  if (backgroundFinalBatchDrainPromise || backgroundFinalBatchDrainScheduled) return
-
-  backgroundFinalBatchDrainScheduled = true
-  setTimeout(() => {
-    backgroundFinalBatchDrainScheduled = false
-    void drainBackgroundFinalBatchUploads()
-  }, 0)
-}
-
-async function drainBackgroundFinalBatchUploads() {
-  if (!ENABLE_FINAL_BATCH_UPLOAD) return
-  if (backgroundFinalBatchDrainPromise) return backgroundFinalBatchDrainPromise
-
-  backgroundFinalBatchDrainPromise = (async () => {
-    try {
-      await retryFinalBatchUploads()
-      while (backgroundFinalBatchUploads.length > 0) {
-        const items = takeNextFinalBatchUploadGroup(backgroundFinalBatchUploads)
-        enqueueFinalBatchUploads(items)
-
-        const failedItems = await uploadFinalBatchItems(items)
-        if (failedItems.length === 0) {
-          const uploadedIds = new Set(items.map((item) => item.id))
-          replaceFinalBatchUploads(finalBatchUploads.filter((queuedItem) => !uploadedIds.has(queuedItem.id)))
-        }
-      }
-    } catch (e) {
-      trackEvent("both", {
-        level: "error",
-        message: "后台最终批次上传失败",
-        data: { error: String(e) },
-        metricName: "plugin.langfuse.upload.background.error",
-        metricValue: 1,
-        tags: { type: "backgroundFinalBatchUpload", reason: "exception" },
-      })
-    } finally {
-      backgroundFinalBatchDrainPromise = null
-      if (backgroundFinalBatchUploads.length > 0) {
-        scheduleBackgroundFinalBatchDrain()
-      }
-    }
-  })()
-
-  return backgroundFinalBatchDrainPromise
-}
-
 async function flushBackgroundUploads() {
   await drainBackgroundIngestion()
-  await drainBackgroundFinalBatchUploads()
 }
 
 function traceEventBody(batch: TraceBatch) {
@@ -1960,7 +1643,6 @@ async function finalizeGeneration(
     metadata: {
       spanKind: "LLM",
       model: buildLLMModelMetadata(g),
-      input: updatedInput,
       output: structuredOutput,
       ...(usage
         ? {
@@ -2015,7 +1697,6 @@ async function flushAllTraces() {
     await flushTrace(traceId)
   }
   await flushBackgroundUploads()
-  await retryFinalBatchUploads()
 }
 
 // testagent_change start - install process-level handlers only once across plugin instances
@@ -3123,7 +2804,6 @@ export const LangfusePlugin: Plugin = async (ctx) => {
       project_id = apiKeys.project_id
       publicKey = apiKeys.public_key
       secretKey = apiKeys.secret_key
-      currentBatchProjectId = apiKeys.project_id
       trackEvent("metric", {
         metricName: "plugin.langfuse.client.init.success",
         metricValue: 1,
@@ -3206,12 +2886,8 @@ export const LangfusePlugin: Plugin = async (ctx) => {
     m.source = "testagent"
     return m
   }
-  currentBatchProjectId = project_id || "fallback_project"
-
   configureFailedIngestionQueue(publicKey)
-  configureFinalBatchUploadQueue(publicKey)
   scheduleBackgroundIngestionDrain()
-  scheduleBackgroundFinalBatchDrain()
 
   installProcessHandlers() // testagent_change
 
@@ -3369,7 +3045,6 @@ export const LangfusePlugin: Plugin = async (ctx) => {
           selectedModel,
           resolvedModel,
         }),
-        input: llmInputDict,
         output: {},
         tags: OBSERVATION_TAGS,
         ...(commandMeta ? {commandData: commandMeta} : {}),
@@ -3718,7 +3393,6 @@ export const LangfusePlugin: Plugin = async (ctx) => {
         metadata: {
           spanKind: "LLM",
           model: buildLLMModelMetadata(g),
-          input: g.input,
           output: { text: output.text },
           tags: OBSERVATION_TAGS,
           ...baseMetadata(),
@@ -3933,13 +3607,7 @@ export const LangfusePlugin: Plugin = async (ctx) => {
           }
         }
 
-        const finalBatch = traceBatches.get(traceId)
-        if (finalBatch) {
-          uploadFinalTraceBatch(finalBatch)
-        }
-
         scheduleBackgroundIngestionDrain()
-        scheduleBackgroundFinalBatchDrain()
 
         traceBatches.delete(traceId)
         gens.delete(traceId)
