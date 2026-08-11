@@ -180,6 +180,44 @@ const activeGenerations = new Map<string, GenInfo[]>()
 // 记录用户在消息阶段选择的模型，避免网关降级后丢失原始选择
 const selectedModelsBySession = new Map<string, string>()
 
+const permissionStarts = new Map<string, { sessionId: string; start: number; callId?: string }>()
+const permissionWaits = new Map<string, number>()
+const permissionCalls = new Set<string>()
+const permissionCallWaits = new Map<string, number>()
+const questionStarts = new Map<string, { sessionId: string; start: number }>()
+const questionWaits = new Map<string, number>()
+const questionCallWaits = new Map<string, number>()
+
+function waits(traceId: string) {
+  const total = (values: Map<string, number>) =>
+    [...values].reduce((sum, [sessionId, duration]) => sum + (sessionToTrace.get(sessionId) === traceId ? duration : 0), 0)
+  return {
+    permissionWaitMs: total(permissionWaits),
+    questionWaitMs: total(questionWaits),
+  }
+}
+
+function settle(sessionId: string, end: number) {
+  for (const [id, pending] of permissionStarts) {
+    if (pending.sessionId !== sessionId) continue
+    const duration = Math.max(0, end - pending.start)
+    permissionWaits.set(sessionId, (permissionWaits.get(sessionId) ?? 0) + duration)
+    if (pending.callId) {
+      permissionCallWaits.set(pending.callId, (permissionCallWaits.get(pending.callId) ?? 0) + duration)
+      updateToolWait(pending.callId)
+    }
+    permissionStarts.delete(id)
+  }
+  for (const [id, pending] of questionStarts) {
+    if (pending.sessionId !== sessionId) continue
+    const duration = Math.max(0, end - pending.start)
+    questionWaits.set(sessionId, (questionWaits.get(sessionId) ?? 0) + duration)
+    questionCallWaits.set(id, duration)
+    updateToolWait(id)
+    questionStarts.delete(id)
+  }
+}
+
 // 当前活跃的 Trace ID
 let currentTraceId: string | null = null
 
@@ -590,6 +628,7 @@ function createTraceBatch(sessionId: string, input: string, ctx: any, traceId: s
       tags: OBSERVATION_TAGS,
       project: ctx.project?.name,
       directory: ctx.directory,
+      ...waits(traceId),
       ...baseMetadata(),
     },
     generations: [],
@@ -700,6 +739,20 @@ async function uploadToIngestionChunk(taggedEvents: any[]) {
     })
 
     if (res.ok) {
+      const updates = taggedEvents
+        .filter((event) => event.type === "trace-update")
+        .map((event) => ({
+          traceId: event.body?.id,
+          permissionWaitMs: event.body?.metadata?.permissionWaitMs,
+          questionWaitMs: event.body?.metadata?.questionWaitMs,
+        }))
+      if (updates.length > 0) {
+        trackEvent("log", {
+          level: "info",
+          message: "Langfuse trace-update accepted",
+          data: { updates },
+        })
+      }
       trackEvent("metric", {
         metricName: "plugin.langfuse.ingestion.success",
         metricValue: 1,
@@ -750,7 +803,7 @@ async function uploadToIngestionChunk(taggedEvents: any[]) {
   }
 }
 
-function withEventMetadataTags(body: any, hookReceivedAt?: string) {
+function withEventMetadataTags(body: any, hookReceivedAt?: string, traceId?: string) {
   if (!body || typeof body !== "object") return body
 
   return {
@@ -758,6 +811,7 @@ function withEventMetadataTags(body: any, hookReceivedAt?: string) {
     tags: OBSERVATION_TAGS,
     metadata: {
       ...(body.metadata ?? {}),
+      ...(traceId ? waits(traceId) : {}),
       ...(hookReceivedAt ? { hookReceivedAt } : {}),
       tags: OBSERVATION_TAGS,
     },
@@ -769,7 +823,7 @@ function buildIngestionEvent(type: string, body: any, timestamp = new Date().toI
     id: generateUUID(),
     timestamp,
     type,
-    body: withEventMetadataTags(body, hookReceivedAt),
+    body: withEventMetadataTags(body, hookReceivedAt, type === "trace-create" || type === "trace-update" ? body.id : undefined),
   }
 }
 
@@ -1028,8 +1082,33 @@ function traceEventBody(batch: TraceBatch) {
 
 function upsertTraceImmediately(batch: TraceBatch) {
   const type = uploadedTraceIds.has(batch.id) ? "trace-update" : "trace-create"
+  if (type === "trace-update") {
+    trackEvent("log", {
+      level: "info",
+      message: "Langfuse trace-update queued",
+      data: {
+        traceId: batch.id,
+        permissionWaitMs: batch.metadata.permissionWaitMs,
+        questionWaitMs: batch.metadata.questionWaitMs,
+      },
+    })
+  }
   scheduleBackgroundIngestion([buildIngestionEvent(type, traceEventBody(batch))])
   uploadedTraceIds.add(batch.id)
+}
+
+function updateWaits(sessionId: string) {
+  const traceId = sessionToTrace.get(sessionId)
+  const batch = traceId ? traceBatches.get(traceId) : undefined
+  if (!traceId || !batch) return
+
+  updateTraceBatch(traceId, {
+    metadata: {
+      ...batch.metadata,
+      ...waits(traceId),
+    },
+  })
+  upsertTraceImmediately(batch)
 }
 
 function generationEventBody(gen: GenerationData) {
@@ -1093,6 +1172,21 @@ function createSpanImmediately(span: SpanData) {
 
 function updateSpanImmediately(traceId: string, spanId: string, updates: Partial<SpanData>) {
   scheduleBackgroundIngestion([buildIngestionEvent("span-update", { id: spanId, traceId, ...updates })])
+}
+
+function updateToolWait(callId: string) {
+  const info = toolCallInfos.get(callId)
+  const batch = info ? traceBatches.get(info.traceId) : undefined
+  const span = batch?.spans.find((item) => item.id === info?.spanId)
+  if (!info || !span) return
+
+  const metadata = {
+    ...span.metadata,
+    ...(permissionCalls.has(callId) ? { permissionWaitMs: permissionCallWaits.get(callId) ?? 0 } : {}),
+    ...(info.toolName === "question" ? { questionWaitMs: questionCallWaits.get(callId) ?? 0 } : {}),
+  }
+  updateSpanInBatch(info.traceId, info.spanId, { metadata })
+  updateSpanImmediately(info.traceId, info.spanId, { metadata })
 }
 
 function hasOwn(obj: any, key: string) {
@@ -3131,6 +3225,10 @@ export const LangfusePlugin: Plugin = async (ctx) => {
       const traceId = getTraceIdForSession(sessionId)
       const rootSid = rootSessionId || sessionId
 
+      if (input.tool === "question" && !questionStarts.has(input.callID)) {
+        questionStarts.set(input.callID, { sessionId, start: Date.now() })
+      }
+
       const isSkill = input.tool === "skill"
       const isTask = input.tool === "task"
       const subagentType = output.args?.subagent_type
@@ -3162,6 +3260,7 @@ export const LangfusePlugin: Plugin = async (ctx) => {
             tool: input.tool,
             args: output.args,
           },
+          ...(input.tool === "question" ? { questionWaitMs: 0 } : {}),
           ...baseMetadata(),
         },
         tags: OBSERVATION_TAGS,
@@ -3289,6 +3388,21 @@ export const LangfusePlugin: Plugin = async (ctx) => {
       const spanId = callInfo?.spanId ?? toolSpanIds.get(input.callID)
       if (!spanId) return
 
+      if (input.tool === "question") {
+        const pending = questionStarts.get(input.callID)
+        if (pending) {
+          const duration = Date.now() - pending.start
+          questionWaits.set(
+            pending.sessionId,
+            (questionWaits.get(pending.sessionId) ?? 0) + duration,
+          )
+          questionCallWaits.set(input.callID, duration)
+          questionStarts.delete(input.callID)
+          updateToolWait(input.callID)
+          updateWaits(pending.sessionId)
+        }
+      }
+
       const traceId = callInfo?.traceId || sessionToTrace.get(input.sessionID) || currentTraceId
       if (!traceId) return
 
@@ -3362,6 +3476,10 @@ export const LangfusePlugin: Plugin = async (ctx) => {
           ...(fileContent && { fileContent }),
           ...(autoTestContent && { autoTestContent }),
           ...(autoTestFilePath && { autoTestFilePath }),
+          ...(permissionCalls.has(input.callID)
+            ? { permissionWaitMs: permissionCallWaits.get(input.callID) ?? 0 }
+            : {}),
+          ...(input.tool === "question" ? { questionWaitMs: questionCallWaits.get(input.callID) ?? 0 } : {}),
           ...baseMetadata(),
         },
       }
@@ -3440,6 +3558,39 @@ export const LangfusePlugin: Plugin = async (ctx) => {
             }
             // console.log("[langfuse] subagent session created:", sid, "parent:", parentId, "using trace:", inheritedTraceId)
           }
+        }
+      }
+
+      if (evt.type === "permission.asked") {
+        const requestId = evt.properties?.id
+        const sessionId = evt.properties?.sessionID
+        if (requestId && sessionId && !permissionStarts.has(requestId)) {
+          const callId = evt.properties?.tool?.callID
+          permissionStarts.set(requestId, { sessionId, start: Date.now(), callId })
+          if (callId) {
+            permissionCalls.add(callId)
+            updateToolWait(callId)
+          }
+        }
+      }
+
+      if (evt.type === "permission.replied") {
+        const requestId = evt.properties?.requestID
+        const pending = requestId ? permissionStarts.get(requestId) : undefined
+        if (requestId && pending) {
+          permissionWaits.set(
+            pending.sessionId,
+            (permissionWaits.get(pending.sessionId) ?? 0) + Date.now() - pending.start,
+          )
+          if (pending.callId) {
+            permissionCallWaits.set(
+              pending.callId,
+              (permissionCallWaits.get(pending.callId) ?? 0) + Date.now() - pending.start,
+            )
+            updateToolWait(pending.callId)
+          }
+          permissionStarts.delete(requestId)
+          updateWaits(pending.sessionId)
         }
       }
 
@@ -3558,6 +3709,8 @@ export const LangfusePlugin: Plugin = async (ctx) => {
         if (!traceId) return
 
         if (sessionId !== rootSessionId) {
+          settle(sessionId, Date.now())
+          updateWaits(sessionId)
           for (const g of allGenerations.filter(
             (gen) => gen.sessionId === sessionId && gen.traceId === traceId && !gen.finalOutput,
           )) {
@@ -3589,6 +3742,10 @@ export const LangfusePlugin: Plugin = async (ctx) => {
           return
         }
 
+        const end = Date.now()
+        for (const [sid, id] of sessionToTrace) {
+          if (id === traceId) settle(sid, end)
+        }
         for (const g of allGenerations) {
           if (!g.finalOutput) {
             await finalizeGeneration(g.sessionId || sessionId, g)
@@ -3596,15 +3753,21 @@ export const LangfusePlugin: Plugin = async (ctx) => {
         }
 
         const currentBatch = traceBatches.get(traceId)
+        updateTraceBatch(traceId, {
+          metadata: {
+            ...currentBatch?.metadata,
+            ...waits(traceId),
+          },
+        })
         const finalText =
           getFinalTraceOutput(traceId, rootSessionId) ??
           (currentBatch ? getFinalTraceOutputFromBatch(currentBatch) : undefined)
         if (finalText !== undefined) {
           updateTraceBatch(traceId, { output: finalText })
-          const batch = traceBatches.get(traceId)
-          if (batch) {
-            upsertTraceImmediately(batch)
-          }
+        }
+        const batch = traceBatches.get(traceId)
+        if (batch) {
+          upsertTraceImmediately(batch)
         }
 
         scheduleBackgroundIngestionDrain()
@@ -3627,6 +3790,13 @@ export const LangfusePlugin: Plugin = async (ctx) => {
         llmInputs.clear()
         systemPrompts.clear()
         trackedSessionIds.clear()
+        permissionStarts.clear()
+        permissionWaits.clear()
+        permissionCalls.clear()
+        permissionCallWaits.clear()
+        questionStarts.clear()
+        questionCallWaits.clear()
+        questionWaits.clear()
         sessionToAgentSpan.clear()
         pendingSubagents.clear()
         pendingSubagentSessions.clear()
@@ -3646,6 +3816,7 @@ export const LangfusePlugin: Plugin = async (ctx) => {
               metadata: {
                 ...traceBatches.get(traceId)?.metadata,
                 error: evt.error?.message,
+                ...waits(traceId),
               },
             })
             const batch = traceBatches.get(traceId)

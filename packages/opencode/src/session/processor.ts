@@ -822,7 +822,12 @@ export const layer: Layer.Layer<
           }).pipe(
             Effect.onInterrupt(() =>
               Effect.gen(function* () {
-                yield* Effect.logInfo(`Session ${ctx.sessionID} 会话中断`, { error: ctx.assistantMessage.error })
+                yield* Effect.logInfo(`Session ${ctx.sessionID} 会话中断`, {
+                  reason: "effect_interrupt",
+                  messageID: ctx.assistantMessage.id,
+                  hasError: Boolean(ctx.assistantMessage.error),
+                  context:ctx,
+                })
                 aborted = true
                 // testagent_change start - record partial LLM duration on interrupt
                 const partialElapsed = Date.now() - ctx.streamStartTime!
