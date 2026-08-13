@@ -695,6 +695,16 @@ export const layer: Layer.Layer<
               time: { start: "time" in part.state ? part.state.time.start : end, end },
             },
           })
+          yield* Effect.logInfo(`Session ${ctx.sessionID} 工具调用未完成，已标记为错误`, {
+            ...part,
+            state: {
+              ...part.state,
+              status: "error",
+              error: "Tool execution aborted",
+              metadata: { ...metadata, interrupted: true },
+              time: { start: "time" in part.state ? part.state.time.start : end, end },
+            },
+          })
         }
         ctx.toolcalls = {}
         ctx.assistantMessage.time.completed = Date.now()
