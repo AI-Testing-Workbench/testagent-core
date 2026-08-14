@@ -1,8 +1,11 @@
+import { Agent } from "@/agent/agent"
 import * as Log from "@opencode-ai/core/util/log"
 import { Effect } from "effect"
 import { HttpApiBuilder, HttpApiError } from "effect/unstable/httpapi" // testagent_change
 import { RootHttpApi } from "../api"
 import {
+  AgentOverrideClearPayload,
+  AgentOverridePayload,
   ApiEnvVarsConfigInvalidError,
   EnvVarBatchCreatePayload,
   EnvVarBatchDeletePayload,
@@ -114,6 +117,30 @@ export const testagentHandlers = HttpApiBuilder.group(RootHttpApi, "testagent", 
       return true
     })
 
+    // testagent_change start - per-stage subagent override handlers
+    const agentOverrideSet = Effect.fn("TestagentHttpApi.agentOverrideSet")(function* (ctx: {
+      payload: typeof AgentOverridePayload.Type
+    }) {
+      const agents = yield* Agent.Service
+      return yield* agents.setSessionOverride({
+        sessionID: ctx.payload.sessionID,
+        prompt: ctx.payload.prompt,
+        permission: ctx.payload.permission as any,
+        temperature: ctx.payload.temperature,
+        topP: ctx.payload.topP,
+        steps: ctx.payload.steps,
+      })
+    })
+
+    const agentOverrideClear = Effect.fn("TestagentHttpApi.agentOverrideClear")(function* (ctx: {
+      payload: typeof AgentOverrideClearPayload.Type
+    }) {
+      const agents = yield* Agent.Service
+      yield* agents.clearSessionOverride({ sessionID: ctx.payload.sessionID })
+      return true
+    })
+    // testagent_change end
+
     return handlers
       .handle("userSet", userSet)
       .handle("envVarsList", envVarsList)
@@ -121,5 +148,7 @@ export const testagentHandlers = HttpApiBuilder.group(RootHttpApi, "testagent", 
       .handle("customEnvVarBatchCreate", customEnvVarBatchCreate)
       .handle("customEnvVarBatchUpdate", customEnvVarBatchUpdate)
       .handle("customEnvVarBatchDelete", customEnvVarBatchDelete)
+      .handle("agentOverrideSet", agentOverrideSet) // testagent_change
+      .handle("agentOverrideClear", agentOverrideClear) // testagent_change
   }),
 )

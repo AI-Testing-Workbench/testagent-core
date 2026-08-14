@@ -3813,6 +3813,71 @@ export type TestagentCustomEnvVarsBatchUpdateResponses = {
 export type TestagentCustomEnvVarsBatchUpdateResponse =
   TestagentCustomEnvVarsBatchUpdateResponses[keyof TestagentCustomEnvVarsBatchUpdateResponses]
 
+export type AgentOverrideRule = {
+  permission: string
+  pattern: string
+  action: "allow" | "deny" | "ask"
+}
+
+export type TestagentAgentOverrideSetData = {
+  body?: {
+    sessionID: string
+    prompt?: string
+    permission?: Array<AgentOverrideRule>
+    temperature?: number
+    topP?: number
+    steps?: number
+  }
+  path?: never
+  query?: {
+    directory?: string
+    workspace?: string
+  }
+  url: "/testagent/agent/override"
+}
+
+export type TestagentAgentOverrideSetErrors = unknown
+
+export type TestagentAgentOverrideSetError = TestagentAgentOverrideSetErrors[keyof TestagentAgentOverrideSetErrors]
+
+export type TestagentAgentOverrideSetResponses = {
+  /**
+   * Override set successfully
+   */
+  200: {
+    applied: boolean
+  }
+}
+
+export type TestagentAgentOverrideSetResponse =
+  TestagentAgentOverrideSetResponses[keyof TestagentAgentOverrideSetResponses]
+
+export type TestagentAgentOverrideClearData = {
+  body?: {
+    sessionID: string
+  }
+  path?: never
+  query?: {
+    directory?: string
+    workspace?: string
+  }
+  url: "/testagent/agent/override"
+}
+
+export type TestagentAgentOverrideClearErrors = unknown
+
+export type TestagentAgentOverrideClearError = TestagentAgentOverrideClearErrors[keyof TestagentAgentOverrideClearErrors]
+
+export type TestagentAgentOverrideClearResponses = {
+  /**
+   * Override cleared successfully
+   */
+  200: boolean
+}
+
+export type TestagentAgentOverrideClearResponse =
+  TestagentAgentOverrideClearResponses[keyof TestagentAgentOverrideClearResponses]
+
 export type EventSubscribeData = {
   body?: never
   path?: never

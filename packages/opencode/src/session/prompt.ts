@@ -634,6 +634,13 @@ NOTE: At any point in time through this workflow you should feel free to ask the
 
       let error: Error | undefined
       const taskAbort = new AbortController()
+      // testagent_change start - resolve parent session override and consume it
+      // 一次性消费：读取后立即清除，避免泄漏到父会话自身的主循环（line 1513 会读取该 override）
+      const sessionOverride = yield* agents.getSessionOverride(sessionID)
+      if (sessionOverride) {
+        yield* agents.clearSessionOverride({ sessionID })
+      }
+      // testagent_change end
       const result = yield* taskTool
         .execute(taskArgs, {
           agent: task.agent,
@@ -641,7 +648,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           sessionID,
           abort: taskAbort.signal,
           callID: part.callID,
-          extra: { bypassAgentCheck: true, promptOps },
+          extra: { bypassAgentCheck: true, promptOps, override: sessionOverride },
           messages: msgs,
           metadata: (val: { title?: string; metadata?: Record<string, any> }) =>
             Effect.gen(function* () {
@@ -1510,14 +1517,30 @@ NOTE: At any point in time through this workflow you should feel free to ask the
             continue
           }
 
-          const agent = yield* agents.get(lastUser.agent)
-          if (!agent) {
+          const baseAgent = yield* agents.get(lastUser.agent)
+          if (!baseAgent) {
             const available = (yield* agents.list()).filter((a) => !a.hidden).map((a) => a.name)
             const hint = available.length ? ` Available agents: ${available.join(", ")}` : ""
             const error = new NamedError.Unknown({ message: `Agent not found: "${lastUser.agent}".${hint}` })
             yield* bus.publish(Session.Event.Error, { sessionID, error: error.toObject() })
             throw error
           }
+          // testagent_change start - apply session override prompt + permission merge
+          // 优先使用 override 中的 permission 规则（直接来自 overrideMap），
+          // 兜底合并 session.permission（经 setPermission 写入的权限）
+          const sessionOverride = yield* agents.getSessionOverride(sessionID)
+          const sessionPerm = sessionOverride?.permission
+            ? Permission.merge(baseAgent.permission, sessionOverride.permission)
+            : Permission.merge(baseAgent.permission, session.permission ?? [])
+          const agent = {
+            ...baseAgent,
+            prompt: sessionOverride?.prompt ?? baseAgent.prompt,
+            temperature: sessionOverride?.temperature ?? baseAgent.temperature,
+            topP: sessionOverride?.topP ?? baseAgent.topP,
+            steps: sessionOverride?.steps ?? baseAgent.steps,
+            permission: sessionPerm,
+          }
+          // testagent_change end
           const maxSteps = agent.steps ?? Infinity
           const isLastStep = step >= maxSteps
           msgs = yield* insertReminders({ messages: msgs, agent, session })

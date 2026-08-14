@@ -75,6 +75,31 @@ export const EnvVarBatchResponse = Schema.Struct({
 })
 // testagent_change end
 
+// testagent_change start - per-stage subagent override payloads
+export const AgentOverrideRule = Schema.Struct({
+  permission: Schema.String,
+  pattern: Schema.String,
+  action: Schema.Literals(["allow", "deny", "ask"]),
+})
+
+export const AgentOverridePayload = Schema.Struct({
+  sessionID: Schema.String,
+  prompt: Schema.optional(Schema.String),
+  permission: Schema.optional(Schema.Array(AgentOverrideRule)),
+  temperature: Schema.optional(Schema.Finite),
+  topP: Schema.optional(Schema.Finite),
+  steps: Schema.optional(Schema.Finite),
+})
+
+export const AgentOverrideClearPayload = Schema.Struct({
+  sessionID: Schema.String,
+})
+
+export const AgentOverrideResult = Schema.Struct({
+  applied: Schema.Boolean,
+})
+// testagent_change end
+
 export const TestagentPaths = {
   userSet: "/testagent/user",
   envVarsList: "/testagent/env-vars",
@@ -82,6 +107,8 @@ export const TestagentPaths = {
   envVarsCustomCreate: "/testagent/env-vars/custom",
   envVarsCustomUpdate: "/testagent/env-vars/custom",
   envVarsCustomDelete: "/testagent/env-vars/custom",
+  agentOverrideSet: "/testagent/agent/override",
+  agentOverrideClear: "/testagent/agent/override",
 } as const
 
 export const TestagentApi = HttpApi.make("testagent").add(
@@ -159,6 +186,32 @@ export const TestagentApi = HttpApi.make("testagent").add(
         }),
       ),
     )
+    // testagent_change start - per-stage subagent override endpoints
+    .add(
+      HttpApiEndpoint.post("agentOverrideSet", TestagentPaths.agentOverrideSet, {
+        payload: AgentOverridePayload,
+        success: described(AgentOverrideResult, "Override set successfully"),
+      }).annotateMerge(
+        OpenApi.annotations({
+          identifier: "testagent.agent.override.set",
+          summary: "Set per-stage subagent override for a session",
+          description: "Override the prompt and/or permission rules of the sdt subagent for the given session.",
+        }),
+      ),
+    )
+    .add(
+      HttpApiEndpoint.delete("agentOverrideClear", TestagentPaths.agentOverrideClear, {
+        payload: AgentOverrideClearPayload,
+        success: described(Schema.Boolean, "Override cleared successfully"),
+      }).annotateMerge(
+        OpenApi.annotations({
+          identifier: "testagent.agent.override.clear",
+          summary: "Clear per-stage subagent override for a session",
+          description: "Remove the transient override for the given session, restoring default sdt behavior.",
+        }),
+      ),
+    )
+    // testagent_change end
     .annotateMerge(
       OpenApi.annotations({
         title: "testagent",
