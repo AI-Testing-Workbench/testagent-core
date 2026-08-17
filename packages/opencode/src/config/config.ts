@@ -670,12 +670,7 @@ export const layer = Layer.effect(
         // File doesn't exist, write full template
         yield* fs
           .writeFileString(gitignore, requiredEntries.join("\n"))
-          .pipe(
-            Effect.catchIf(
-              (e) => e.reason._tag === "PermissionDenied",
-              () => Effect.void,
-            ),
-          )
+          .pipe(Effect.orElseSucceed(() => void 0))
         return
       }
 
@@ -689,12 +684,7 @@ export const layer = Layer.effect(
         const updated = existing + prefix + missing.join("\n") + "\n"
         yield* fs
           .writeFileString(gitignore, updated)
-          .pipe(
-            Effect.catchIf(
-              (e) => e.reason._tag === "PermissionDenied",
-              () => Effect.void,
-            ),
-          )
+          .pipe(Effect.orElseSucceed(() => void 0))
       }
     })
     // testagent_change end
