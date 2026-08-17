@@ -1391,6 +1391,18 @@ NOTE: At any point in time through this workflow you should feel free to ask the
 
     const prompt: (input: PromptInput) => Effect.Effect<MessageV2.WithParts> = Effect.fn("SessionPrompt.prompt")(
       function* (input: PromptInput) {
+        // testagent_change start - debug log: prompt entry
+        yield* elog.info("prompt 入口", {
+          sessionID: input.sessionID,
+          agent: input.agent,
+          model: input.model,
+          variant: input.variant,
+          messageID: input.messageID,
+          noReply: input.noReply,
+          thinkingEnabled: input.thinkingEnabled,
+          text: (input.parts ?? []).map((p) => (p.type === "text" ? p.text.slice(0, 80) : `[${p.type}]`)),
+        })
+        // testagent_change end
         if (input.thinkingEnabled !== undefined) {
           thinkingEnabledStore.set(input.sessionID, input.thinkingEnabled)
         }
@@ -1451,6 +1463,19 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           }
 
           if (!lastUser) throw new Error("No user message found in stream. This should never happen.")
+            
+          // testagent_change start - debug log: what the loop sees as last messages
+          yield* slog.info("loop 进入", {
+            step,
+            totalMsgs: msgs.length,
+            lastUserID: lastUser.id,
+            lastUserAgent: lastUser.agent,
+            lastUserModel: lastUser.model ? `${lastUser.model.providerID}/${lastUser.model.modelID}` : undefined,
+            lastAssistantID: lastAssistant?.id,
+            lastAssistantFinish: lastAssistant?.finish,
+            lastFinishedID: lastFinished?.id,
+          })
+          // testagent_change end
 
           const lastAssistantMsg = msgs.findLast(
             (msg) => msg.info.role === "assistant" && msg.info.id === lastAssistant?.id,
@@ -1466,9 +1491,23 @@ NOTE: At any point in time through this workflow you should feel free to ask the
             lastAssistant?.finish &&
             !["tool-calls"].includes(lastAssistant.finish) &&
             !hasToolCalls &&
-            lastUser.id < lastAssistant.id
+            // testagent_change start - 用真实创建时间判断顺序，避免消息 ID 时间戳回绕
+            // (48位时间戳约2.18年回绕一次)导致 lastUser.id < lastAssistant.id 误判
+            lastUser.time.created < lastAssistant.time.created
+            // testagent_change end
           ) {
-            yield* slog.info("exiting loop")
+            // testagent_change start - debug log: why loop exits immediately
+            yield* slog.info("exiting loop", {
+              lastUserID: lastUser.id,
+              lastAssistantID: lastAssistant.id,
+              lastUserBeforeAssistant: lastUser.time.created < lastAssistant.time.created,
+              lastUserCreated: lastUser.time.created,
+              lastAssistantCreated: lastAssistant.time.created,
+              finish: lastAssistant.finish,
+              hasToolCalls,
+              reason: "已存在的最后一条 assistant 已完成且新 user 消息在其之前",
+            })
+            // testagent_change end
             break
           }
 
@@ -1481,7 +1520,18 @@ NOTE: At any point in time through this workflow you should feel free to ask the
               history: msgs,
             }).pipe(Effect.ignore, Effect.forkIn(scope))
 
+          // testagent_change start - debug log: resolving model for last user message
+          yield* slog.info("getModel 调用", {
+            providerID: lastUser.model.providerID,
+            modelID: lastUser.model.modelID,
+            lastUserID: lastUser.id,
+            lastUserAgent: lastUser.agent,
+          })
+          // testagent_change end
           const model = yield* getModel(lastUser.model.providerID, lastUser.model.modelID, sessionID)
+          // testagent_change start - debug log: model resolved successfully
+          yield* slog.info("getModel 成功", { providerID: model.providerID, modelID: model.id, name: model.name })
+          // testagent_change end
           const task = tasks.pop()
 
           if (task?.type === "subtask") {
@@ -1511,6 +1561,13 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           }
 
           const agent = yield* agents.get(lastUser.agent)
+          // testagent_change start - debug log: agent resolution result
+          if (agent) {
+            yield* slog.info("agent 解析成功", { agentName: agent.name, steps: agent.steps })
+          } else {
+            yield* slog.warn("agent 解析失败", { requestedAgent: lastUser.agent })
+          }
+          // testagent_change end
           if (!agent) {
             const available = (yield* agents.list()).filter((a) => !a.hidden).map((a) => a.name)
             const hint = available.length ? ` Available agents: ${available.join(", ")}` : ""
@@ -1572,7 +1629,9 @@ NOTE: At any point in time through this workflow you should feel free to ask the
 
             if (step > 1 && lastFinished) {
               for (const m of msgs) {
-                if (m.info.role !== "user" || m.info.id <= lastFinished.id) continue
+                // testagent_change start - 同样用 time.created 判断先后，避免 ID 回绕误判
+                if (m.info.role !== "user" || m.info.time.created <= lastFinished.time.created) continue
+                // testagent_change end
                 for (const p of m.parts) {
                   if (p.type !== "text" || p.ignored || p.synthetic) continue
                   if (!p.text.trim()) continue
