@@ -644,6 +644,7 @@ export const layer: Layer.Layer<
         sessionID: userMsg.sessionID,
         type: "compaction",
         auto: false,
+        clear_context: true, // testagent_change - 标记由 clearContext 产生，toModelMessagesEffect 据此不生成 "What did we do so far?"
       })
       // Stub assistant with summary:true + finish so filterCompacted treats it as completed
       const stubAsst = yield* session.updateMessage({
@@ -651,7 +652,7 @@ export const layer: Layer.Layer<
         role: "assistant",
         parentID: userMsg.id,
         sessionID: input.sessionID,
-        mode: "compaction" as any,
+        mode: "clear_context", // testagent_change - 区分于 compaction；UI 据此显示"清空上下文"气泡，LLM 据此跳过整条 stub
         agent: "compaction" as any,
         summary: true,
         finish: "stop",
@@ -662,13 +663,14 @@ export const layer: Layer.Layer<
         providerID: ProviderID.make(""),
         time: { created: Date.now() },
       })
-      // Add a text part so toModelMessagesEffect doesn't skip the empty stub
+      // stub 的 text part 作为"清空上下文"气泡的正文（UI 用）。message-part 按 part 渲染气泡，0 part 则气泡不出现。
+      // toModelMessagesEffect 按 mode 跳过整条 stub，此文本不进 LLM。
       yield* session.updatePart({
         id: PartID.ascending(),
         messageID: stubAsst.id,
         sessionID: input.sessionID,
         type: "text",
-        text: "SDT框架会话已清理，上下文已清空。之前的对话记录不再可见。",
+        text: "会话上下文已清空，历史对话对LLM不可见",
         synthetic: true,
       })
       yield* bus.publish(Event.Compacted, { sessionID: input.sessionID })

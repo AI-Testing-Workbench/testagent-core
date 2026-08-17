@@ -219,6 +219,7 @@ export const CompactionPart = Schema.Struct({
   auto: Schema.Boolean,
   overflow: Schema.optional(Schema.Boolean),
   tail_start_id: Schema.optional(MessageID),
+  clear_context: Schema.optional(Schema.Boolean), // testagent_change - 标记 clearContext 产生的 compaction
 })
   .annotate({ identifier: "CompactionPart" })
   .pipe(withStatics((s) => ({ zod: zod(s) })))
@@ -1162,7 +1163,7 @@ export function get(input: { sessionID: SessionID; messageID: MessageID }): With
 }
 
 export function filterCompacted(msgs: Iterable<WithParts>) {
-  const result = [] as WithParts[]
+  let result = [] as WithParts[]
   const completed = new Set<string>()
   let retain: MessageID | undefined
   for (const msg of msgs) {
@@ -1185,6 +1186,25 @@ export function filterCompacted(msgs: Iterable<WithParts>) {
       completed.add(msg.info.parentID)
   }
   result.reverse()
+  // testagent_change start - clearContext: 丢弃 clear 标记对（user compaction part + stub assistant）及其之前的全部消息，
+  // 只保留最近一次 clear 之后的消息。在第一道过滤就剔除，避免下游（toModelMessagesEffect 或自定义转换器）看到 clear 对。
+  {
+    const clearIdx = result.findLastIndex(
+      (msg) =>
+        msg.info.role === "user" &&
+        msg.parts.some((item): item is CompactionPart => item.type === "compaction" && item.clear_context === true),
+    )
+    if (clearIdx >= 0) {
+      let dropThrough = clearIdx + 1
+      // clear 标记对的 stub assistant：parentID 指向 clear user 消息。按 parentID 识别最稳健（不依赖 mode 是否读回）。
+      const stub = result[dropThrough]
+      if (stub && stub.info.role === "assistant" && stub.info.parentID === result[clearIdx]!.info.id) {
+        dropThrough++
+      }
+      result = result.slice(dropThrough)
+    }
+  }
+  // testagent_change end
   const compactionIndex = result.findLastIndex(
     (msg) =>
       msg.info.role === "user" &&
