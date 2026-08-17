@@ -135,7 +135,7 @@ export const layer = Layer.effect(
 
     // testagent_change start - 透传前端传入的 idle reason
     const cancel = Effect.fn("SessionPrompt.cancel")(function* (sessionID: SessionID, reason?: IdleReason) {
-      yield* elog.info("cancel", { sessionID })
+      yield* elog.info("cancel", { sessionID, reason: reason ?? "completed" })
       yield* state.cancel(sessionID, reason)
     })
     // testagent_change end

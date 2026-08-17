@@ -695,6 +695,16 @@ export const layer: Layer.Layer<
               time: { start: "time" in part.state ? part.state.time.start : end, end },
             },
           })
+          yield* Effect.logInfo(`Session ${ctx.sessionID} 工具调用未完成，已标记为错误`, {
+            ...part,
+            state: {
+              ...part.state,
+              status: "error",
+              error: "Tool execution aborted",
+              metadata: { ...metadata, interrupted: true },
+              time: { start: "time" in part.state ? part.state.time.start : end, end },
+            },
+          })
         }
         ctx.toolcalls = {}
         ctx.assistantMessage.time.completed = Date.now()
@@ -822,7 +832,12 @@ export const layer: Layer.Layer<
           }).pipe(
             Effect.onInterrupt(() =>
               Effect.gen(function* () {
-                yield* Effect.logInfo(`Session ${ctx.sessionID} 会话中断`, { error: ctx.assistantMessage.error })
+                yield* Effect.logInfo(`Session ${ctx.sessionID} 会话中断`, {
+                  reason: "effect_interrupt",
+                  messageID: ctx.assistantMessage.id,
+                  hasError: Boolean(ctx.assistantMessage.error),
+                  context:ctx,
+                })
                 aborted = true
                 // testagent_change start - record partial LLM duration on interrupt
                 const partialElapsed = Date.now() - ctx.streamStartTime!

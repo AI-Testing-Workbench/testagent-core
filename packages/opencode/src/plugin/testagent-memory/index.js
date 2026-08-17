@@ -481,7 +481,7 @@ export const MemoryPlugin = async (params) => {
         //state.distilling = true;
         // 缓存满足判断
         // log.info(`[autoExtraction] buffer.size: ${buffer.size}`);
-        // if (buffer.size < config().memory.autoExtractBufferSize) {
+        // if (buffer.size < config().memory.autoExtractBatchSize) {
         //   state.distilling = false;
         //   return;
         // }

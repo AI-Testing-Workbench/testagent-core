@@ -237,12 +237,17 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
     })
 
     // testagent_change start - 接收前端传来的 idle reason
-    const abort = Effect.fn("SessionHttpApi.abort")(
-      function* (ctx: { params: { sessionID: SessionID }; payload: { reason?: "completed" | "user_abort" | "error" } }) {
-        yield* promptSvc.cancel(ctx.params.sessionID, ctx.payload.reason)
-        return true
-      },
-    )
+    const abort = Effect.fn("SessionHttpApi.abort")(function* (ctx: {
+      params: { sessionID: SessionID }
+      payload: { reason?: "completed" | "user_abort" | "error" }
+    }) {
+      yield* Effect.logInfo("session abort request", {
+        sessionID: ctx.params.sessionID,
+        reason: ctx.payload.reason ?? "completed",
+      })
+      yield* promptSvc.cancel(ctx.params.sessionID, ctx.payload.reason)
+      return true
+    })
     // testagent_change end
 
     const init = Effect.fn("SessionHttpApi.init")(function* (ctx: {

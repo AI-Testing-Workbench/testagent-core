@@ -45,7 +45,7 @@ export async function run(input) {
             const batchContent = batchRecords
                 .map((r) => `[${r.role}]: ${r.content}`)
                 .join("\n\n")
-                .slice(0, config().memory.autoExtractMaxLength);
+                .slice(0, config().memory.autoExtractBatchToken);
             const userContent = `## Recent conversation messages (batch ${i + 1}/${batches.length}, ${batchRecords.length} records)\n\n${batchContent}\n\nExtract memories from the messages above.`;
             const skillsDir = getSkillsDir(input.projectPath);
             const globalskillsDir = getGlobalSkillsDir();
@@ -68,7 +68,7 @@ export async function run(input) {
         const messageText = records
             .map((r) => `[${r.role}]: ${r.content}`)
             .join("\n\n")
-            .slice(0, config().memory.autoExtractMaxLength);
+            .slice(0, config().memory.autoExtractBatchToken);
         const userContent = `## Recent conversation messages (last ~${records.length})\n\n${messageText}\n\nExtract memories from the messages above.`;
         const skillsDir = getSkillsDir(input.projectPath);
         const globalskillsDir = getGlobalSkillsDir();
