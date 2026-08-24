@@ -1711,11 +1711,80 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       },
     )
 
+    // testagent_change start - 并发消费多个 subtask part
+    // 不改 runLoop 主体：收集最新 user 消息里全部 subtask part → Effect.all 并发跑各 handleSubtask
+    // （各建独立子 session、各自 Runner，无 coalesce）→ 再 yield* runLoop 交还后续 LLM step + exit
+    // （靠 lastFinished 跳过已处理 subtask）。一个批次共用同一 agent，入口预校验一次、fail-fast。
+    const runParallelSubtasks: (sessionID: SessionID) => Effect.Effect<MessageV2.WithParts> = Effect.fn(
+      "SessionPrompt.runParallelSubtasks",
+    )(function* (sessionID: SessionID) {
+      const session = yield* sessions.get(sessionID).pipe(Effect.orDie)
+      const msgs = yield* MessageV2.filterCompactedEffect(sessionID)
+
+      let lastUser: MessageV2.User | undefined
+      let lastUserMsg: MessageV2.WithParts | undefined
+      for (let i = msgs.length - 1; i >= 0; i--) {
+        const m = msgs[i]
+        if (m.info.role !== "user") continue
+        lastUserMsg = m
+        lastUser = m.info
+        break
+      }
+      if (!lastUser || !lastUserMsg) {
+        throw new Error("No user message found in stream. This should never happen.")
+      }
+      const subtasks = lastUserMsg.parts.filter(
+        (p): p is MessageV2.SubtaskPart => p.type === "subtask",
+      )
+
+      // 无 subtask 或仅 1 个（被误派发）：兜底直接交还 runLoop，行为同现状
+      if (subtasks.length <= 1) {
+        return yield* runLoop(sessionID)
+      }
+
+      const model = yield* getModel(lastUser.model.providerID, lastUser.model.modelID, sessionID)
+
+      // 入口预校验本批次涉及的全部 agent：任一不存在直接 fail-fast（配置错误，不进 Effect.all）。
+      const distinctAgents = Array.from(new Set(subtasks.map((t) => t.agent)))
+      for (const agentName of distinctAgents) {
+        const taskAgent = yield* agents.get(agentName)
+        if (!taskAgent) {
+          const available = (yield* agents.list()).filter((a) => !a.hidden).map((a) => a.name)
+          const hint = available.length ? ` Available agents: ${available.join(", ")}` : ""
+          const error = new NamedError.Unknown({ message: `Agent not found: "${agentName}".${hint}` })
+          yield* bus.publish(Session.Event.Error, { sessionID, error: error.toObject() })
+          throw error
+        }
+      }
+
+      // 并发消费全部 subtask；运行期失败已被 handleSubtask 的 catchCause 吞掉、不短路
+      yield* Effect.all(
+        subtasks.map((task) => handleSubtask({ task, model, lastUser, sessionID, session, msgs })),
+        { concurrency: "unbounded" },
+      )
+
+      // 交还 runLoop 跑后续 LLM step + exit
+      return yield* runLoop(sessionID)
+    })
+    // testagent_change end
+
+    // testagent_change start - loop 薄壳派发：最新 user 消息 subtask part >1 走并发，否则原 runLoop（N==1 行为不变）
     const loop: (input: LoopInput) => Effect.Effect<MessageV2.WithParts> = Effect.fn("SessionPrompt.loop")(function* (
       input: LoopInput,
     ) {
-      return yield* state.ensureRunning(input.sessionID, lastAssistant(input.sessionID), runLoop(input.sessionID))
+      let work: Effect.Effect<MessageV2.WithParts> = runLoop(input.sessionID)
+      const msgs = yield* MessageV2.filterCompactedEffect(input.sessionID)
+      for (let i = msgs.length - 1; i >= 0; i--) {
+        const m = msgs[i]
+        if (m.info.role !== "user") continue
+        if (m.parts.filter((p) => p.type === "subtask").length > 1) {
+          work = runParallelSubtasks(input.sessionID)
+        }
+        break
+      }
+      return yield* state.ensureRunning(input.sessionID, lastAssistant(input.sessionID), work)
     })
+    // testagent_change end
 
     // testagent_change start - 添加 resume 函数实现
     // "继续" 的正确语义：删掉指定的 assistant 消息，然后重新跑 loop。
