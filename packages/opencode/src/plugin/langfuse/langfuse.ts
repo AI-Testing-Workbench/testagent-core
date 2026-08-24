@@ -520,6 +520,44 @@ function injectTestcaseIds(text: string): string {
   })
 }
 
+// 检查 testcase_id 是否在指定位置包含 "testagent"
+// 调用方已通过正则保证格式: TC[a-z0-9]{32}
+function hasTestagentPattern(testcaseId: string): boolean {
+  const chars = testcaseId.slice(2) // 去掉 "TC" 前缀
+  const word = "testagent"
+  const indices = [2, 6, 9, 13, 16, 20, 23, 27, 30]
+  
+  // 检查特定位置是否包含 testagent 字符
+  return indices.every((idx, i) => chars[idx] === word[i])
+}
+
+// 生成符合 testagent 模式的新 testcase_id
+function generateTestagentTestcaseId(): string {
+  const uuid = generateUUID().replace(/-/g, "")
+  const chars = uuid.split("")
+  const word = "testagent"
+  const indices = [2, 6, 9, 13, 16, 20, 23, 27, 30]
+  
+  indices.forEach((idx, i) => {
+    if (idx < chars.length && i < word.length) {
+      chars[idx] = word[i]
+    }
+  })
+  
+  return `TC${chars.join("")}`
+}
+
+// 替换 YAML 中不符合 testagent 模式的 testcase_id
+function replaceNonTestagentTestcaseIds(text: string): string {
+  // 匹配 testcase_id: TC... 格式
+  return text.replace(/testcase_id:\s*(TC[a-z0-9]{32})/g, (match, testcaseId) => {
+    if (hasTestagentPattern(testcaseId)) {
+      return match // 保留符合模式的 testcase_id
+    }
+    return match.replace(testcaseId, generateTestagentTestcaseId())
+  })
+}
+
 function transformWriteArgs(tool: string, args: any) {
   if (
     tool === "write" &&
@@ -3239,6 +3277,20 @@ export const LangfusePlugin: Plugin = async (ctx) => {
             const injectedContent = injectTestcaseIds(raw)
             fileContent = injectedContent
             writeFileSync(filePath, injectedContent, "utf-8")
+          } else {
+            // 检查是否有任何 testcase_id 符合 testagent 模式
+            // 正则匹配: TC + 2个字符 + t + 3个字符 + e + 2个字符 + s + 3个字符 + t + 2个字符 + a + 3个字符 + g + 2个字符 + e + 3个字符 + n + 2个字符 + t + 1个字符
+            const testagentPattern = /testcase_id:\s*(TC[a-f0-9]{2}t[a-f0-9]{3}e[a-f0-9]{2}s[a-f0-9]{3}t[a-f0-9]{2}a[a-f0-9]{3}g[a-f0-9]{2}e[a-f0-9]{3}n[a-f0-9]{2}t[a-f0-9])/gi
+            const hasTestagentId = testagentPattern.test(raw)
+            
+            if (hasTestagentId) {
+              // 替换所有不符合 testagent 模式的 testcase_id
+              const updatedContent = replaceNonTestagentTestcaseIds(raw)
+              if (updatedContent !== raw) {
+                fileContent = updatedContent
+                writeFileSync(filePath, updatedContent, "utf-8")
+              }
+            }
           }
         } catch (e) {
           // 文件读写失败时静默忽略，不影响正常流程
@@ -3265,6 +3317,20 @@ export const LangfusePlugin: Plugin = async (ctx) => {
               const injectedContent = injectTestcaseIds(raw)
               fileContent = injectedContent
               writeFileSync(filePath, injectedContent, "utf-8")
+            } else {
+              // 检查是否有任何 testcase_id 符合 testagent 模式
+              // 正则匹配: TC + 2个字符 + t + 3个字符 + e + 2个字符 + s + 3个字符 + t + 2个字符 + a + 3个字符 + g + 2个字符 + e + 3个字符 + n + 2个字符 + t + 1个字符
+              const testagentPattern = /testcase_id:\s*(TC[a-f0-9]{2}t[a-f0-9]{3}e[a-f0-9]{2}s[a-f0-9]{3}t[a-f0-9]{2}a[a-f0-9]{3}g[a-f0-9]{2}e[a-f0-9]{3}n[a-f0-9]{2}t[a-f0-9])/gi
+              const hasTestagentId = testagentPattern.test(raw)
+              
+              if (hasTestagentId) {
+                // 替换所有不符合 testagent 模式的 testcase_id
+                const updatedContent = replaceNonTestagentTestcaseIds(raw)
+                if (updatedContent !== raw) {
+                  fileContent = updatedContent
+                  writeFileSync(filePath, updatedContent, "utf-8")
+                }
+              }
             }
           } catch (e) {
             // 文件读写失败时静默忽略
