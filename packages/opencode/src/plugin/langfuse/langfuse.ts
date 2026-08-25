@@ -1114,8 +1114,8 @@ function generateTestagentTestcaseId(): string {
 
 // 替换 YAML 中不符合 testagent 模式的 testcase_id
 function replaceNonTestagentTestcaseIds(text: string): string {
-  // 匹配 testcase_id: TC... 格式
-  return text.replace(/testcase_id:\s*(TC[a-z0-9]{32})/g, (match, testcaseId) => {
+  // 匹配 testcase_id: TC... 格式，使用\b确保后面没有更多字符
+  return text.replace(/testcase_id:\s*(TC[a-z0-9]{32})\b/g, (match, testcaseId) => {
     if (hasTestagentPattern(testcaseId)) {
       return match // 保留符合模式的 testcase_id
     }
@@ -4651,7 +4651,7 @@ export const LangfusePlugin: Plugin = async (ctx) => {
           } else {
             // 检查是否有任何 testcase_id 符合 testagent 模式
             // 正则匹配: TC + 2个字符 + t + 3个字符 + e + 2个字符 + s + 3个字符 + t + 2个字符 + a + 3个字符 + g + 2个字符 + e + 3个字符 + n + 2个字符 + t + 1个字符
-            const testagentPattern = /testcase_id:\s*(TC[a-f0-9]{2}t[a-f0-9]{3}e[a-f0-9]{2}s[a-f0-9]{3}t[a-f0-9]{2}a[a-f0-9]{3}g[a-f0-9]{2}e[a-f0-9]{3}n[a-f0-9]{2}t[a-f0-9])/gi
+            const testagentPattern = /testcase_id:\s*(TC[a-f0-9]{2}t[a-f0-9]{3}e[a-f0-9]{2}s[a-f0-9]{3}t[a-f0-9]{2}a[a-f0-9]{3}g[a-f0-9]{2}e[a-f0-9]{3}n[a-f0-9]{2}t[a-f0-9])\b/g
             const hasTestagentId = testagentPattern.test(raw)
             
             if (hasTestagentId) {
@@ -4691,7 +4691,7 @@ export const LangfusePlugin: Plugin = async (ctx) => {
             } else {
               // 检查是否有任何 testcase_id 符合 testagent 模式
               // 正则匹配: TC + 2个字符 + t + 3个字符 + e + 2个字符 + s + 3个字符 + t + 2个字符 + a + 3个字符 + g + 2个字符 + e + 3个字符 + n + 2个字符 + t + 1个字符
-              const testagentPattern = /testcase_id:\s*(TC[a-f0-9]{2}t[a-f0-9]{3}e[a-f0-9]{2}s[a-f0-9]{3}t[a-f0-9]{2}a[a-f0-9]{3}g[a-f0-9]{2}e[a-f0-9]{3}n[a-f0-9]{2}t[a-f0-9])/gi
+              const testagentPattern = /testcase_id:\s*(TC[a-f0-9]{2}t[a-f0-9]{3}e[a-f0-9]{2}s[a-f0-9]{3}t[a-f0-9]{2}a[a-f0-9]{3}g[a-f0-9]{2}e[a-f0-9]{3}n[a-f0-9]{2}t[a-f0-9])\b/g
               const hasTestagentId = testagentPattern.test(raw)
               
               if (hasTestagentId) {
