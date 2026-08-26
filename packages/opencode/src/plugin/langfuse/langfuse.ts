@@ -16,6 +16,7 @@ import type { Plugin, PluginInput } from "@opencode-ai/plugin"
 import { Effect, Schema } from "effect"
 import { User } from "@/testagent/user"
 import { readFileSync, existsSync, writeFileSync, mkdirSync, renameSync, chmodSync } from "fs"
+import { readdir, unlink } from "fs/promises"
 import { dirname, join, resolve } from "path"
 import { homedir } from "os"
 
@@ -24,15 +25,21 @@ import { homedir } from "os"
 const LANGFUSE_BASE_URL = decodeURIComponent(
   atob("aHR0cCUzQSUyRiUyRnRlc3RodWItYWdlbnQtdHJhY2UucGFhc3VhdC5jbWJjaGluYS5jbg=="),
 )
-const VERSION = "1.0.3"
-const LANGFUSE_FETCH_TIMEOUT_MS = 5000
+const VERSION = "1.0.4"
+const TESTAGENT_VERSION = "1.4.0"
+const LANGFUSE_FETCH_TIMEOUT_MS = 10_000
 const LANGFUSE_KEY_LOOKUP_TIMEOUT_MS = 15000
 const TESTAGENT_DATA_DIR = join(homedir(), ".local", "share", "testagent")
 const LANGFUSE_KEY_CACHE_FILE = join(TESTAGENT_DATA_DIR, "langfuse-project-keys.json")
-const MAX_INGESTION_BATCH_BYTES = 1024 * 1024
+const MAX_INGESTION_BATCH_BYTES = 900 * 1024
 const MAX_OBSERVED_TEXT_LENGTH = 10000
+const MAX_ERROR_DETAIL_LENGTH = 2000
+const PLUGIN_RUNTIME_ID = generateUUID()
+const MAX_DIAGNOSTIC_BATCH_EVENT_IDS = 50
+const MAX_DIAGNOSTIC_TAG_VALUE_LENGTH = 4000
 
 let baseMetadata: () => Record<string, string>
+let currentPluginInstanceId = "uninitialized"
 
 // ==================== 会话管理 ====================
 
@@ -42,6 +49,18 @@ const sessionToTrace = new Map<string, string>() // sessionId -> traceId
 const sessionToAgentSpan = new Map<string, string>() // subagent session -> agent span id
 const pendingSubagents = new Map<string, { traceId: string; agentSpanId: string }[]>() // parent session -> pending subagents
 const generatedTraceIds = new Set<string>() // trace ids generated as fallback before opencode messageID is available
+const idleSessionIds = new Set<string>() // sessions that have emitted session.idle and must not keep a trace open
+const createdSessionIds = new Set<string>()
+const sessionCreatedWaiters = new Map<string, (() => void)[]>()
+let sessionParentResolver: ((sessionId: string) => Promise<string | undefined>) | undefined
+// This wait is only used for a session whose creation event has not arrived;
+// it is intentionally per-session so concurrent top-level conversations are
+// never serialized. Child-session creation can lag hook callbacks noticeably.
+const SESSION_CREATED_WAIT_MS = 1000
+// Plugin events may be delivered out of order: session.idle can arrive just
+// before the final step-finish event that contains usage and finish reason.
+const SESSION_IDLE_FINALIZATION_WAIT_MS = 1000
+const pendingIdleFinalizations = new Set<string>()
 
 function generateSessionId(): string {
   return generateUUID()
@@ -127,6 +146,9 @@ interface GenInfo {
   modelName: string
   startTime: Date
   completionStartTime: Date | null
+  // The response can end before the late step-finish event that carries usage.
+  // Keep that boundary so finalization never stretches it to session.idle.
+  responseEndTime: Date | null
   stepNumber: number
   output: string
   parts: string[]
@@ -138,6 +160,8 @@ interface GenInfo {
   assistantMessageId?: string
   modelParameters: Record<string, any>
   input: any
+  generationData: GenerationData
+  pendingSequence: number
 }
 
 /**
@@ -149,6 +173,22 @@ interface SkillContext {
   gens: GenInfo[]
   parentSpanId?: string
   isSubagent: boolean
+}
+
+interface SkillInfo {
+  skillName: string
+  skillId?: string
+  skillSpanId: string
+}
+
+type ToolResultSnapshot = {
+  output: any
+  metadata?: any
+  title?: string
+  completedAt?: Date
+  toolStatus?: string
+  toolPartCompleted?: boolean
+  toolCompletionSource?: string
 }
 
 // ==================== 全局状态管理 ====================
@@ -163,19 +203,33 @@ const gens = new Map<string, GenInfo[]>()
 const toolSpanIds = new Map<string, string>()
 const toolCallInfos = new Map<string, { spanId: string; traceId: string; sessionId: string; toolName?: string }>()
 const sessionSpanIds = new Map<string, Set<string>>()
+const traceSkillInfos = new Map<string, SkillInfo[]>()
+const observationSkillInfoCounts = new Map<string, number>()
+// Fallback grouping parent for hooks that arrive before their session has been
+// associated. The session-scoped context below remains the primary source so
+// concurrent sessions on the same trace cannot overwrite one another.
+const activeSkillSpanByTrace = new Map<string, string>()
+const pendingSkillSpans = new Map<string, SpanData>()
 
 // 工具结果有时先出现在 message.part.updated，随后 tool.execute.after 的 output 仍为 null。
 // 按 callID 缓存已完成结果，用来回填同一个 TOOL span。
-const toolResultSnapshots = new Map<string, { output: any; metadata?: any; title?: string }>()
+const toolResultSnapshots = new Map<string, ToolResultSnapshot>()
 
-// LIFO 栈，维护嵌套 skill 调用链
-const skillStack: { callID: string; context: SkillContext }[] = []
+// The most recently invoked skill remains the grouping parent for its session
+// until another skill replaces it. Keep this session-scoped: a trace-wide slot
+// would leak ownership between concurrent sessions.
+const activeSkillContexts = new Map<string, { callID: string; context: SkillContext }>()
 
 // 全局 generation 列表
 const allGenerations: GenInfo[] = []
 
 // 当前活跃的 generation 队列（按 session 维护，避免主/子 agent 相互覆盖，也避免多 step 事件交错互相覆盖）
 const activeGenerations = new Map<string, GenInfo[]>()
+// chat.params has no assistant message ID and may be invoked for a request that
+// never produces a streamed response. Keep it pending until a concrete message
+// part proves that the LLM call exists.
+const pendingGenerations = new Map<string, GenInfo[]>()
+let pendingGenerationSequence = 0
 
 // 记录用户在消息阶段选择的模型，避免网关降级后丢失原始选择
 const selectedModelsBySession = new Map<string, string>()
@@ -186,28 +240,114 @@ let currentTraceId: string | null = null
 // 已经发起过 trace-create 的 trace，避免多轮 chat.message 重复创建同一条 trace。
 const uploadedTraceIds = new Set<string>()
 
-// 数据上报失败后写入本地 outbox，后续后台重试，避免正常成功路径频繁读写本地文件。
+// 数据上报失败后只保留在当前进程内存中；服务重启后不恢复历史失败数据。
 const failedIngestionEvents: any[] = []
 let retryingFailedIngestionEvents = false
-let failedIngestionQueueFile = join(TESTAGENT_DATA_DIR, "langfuse-ingestion-queue.json")
-let failedIngestionQueueLoaded = false
-const MAX_FAILED_INGESTION_EVENTS = 5000
+// const oversizedIngestionObservationKeys = new Set<string>()
+const MAX_FAILED_INGESTION_EVENTS = 500
+const MAX_FAILED_INGESTION_QUEUE_BYTES = 5 * 1024 * 1024
+const FAILED_INGESTION_RETRY_BASE_DELAY_MS = 1000
+const FAILED_INGESTION_RETRY_MAX_DELAY_MS = 60_000
+const MAX_FAILED_INGESTION_RETRY_ATTEMPTS = 3
+const BACKGROUND_BATCHES_BEFORE_FAILED_RETRY = 10
+const TRACE_UPSERT_DEBOUNCE_MS = 250
+const FLUSH_BACKGROUND_UPLOAD_TIMEOUT_MS = 1000
+const INGESTION_FAILURE_LOG_INTERVAL_MS = 60_000
 let handlersInstalled = false // testagent_change
 const BACKGROUND_INGESTION_BATCH_SIZE = 50
 const FAILED_INGESTION_RETRY_BATCH_SIZE = 50
-const FAILED_INGESTION_RETRY_DELAY_MS = 1000
+const FAILED_INGESTION_RETRY_ENABLED = true
 const MAX_BACKGROUND_INGESTION_EVENTS = 10000
+const MAX_BACKGROUND_INGESTION_BYTES = 5 * 1024 * 1024
 let backgroundIngestionEvents: any[] = []
+let backgroundIngestionHead = 0
+let backgroundIngestionBytes = 0
 let backgroundIngestionDrainPromise: Promise<void> | null = null
 let backgroundIngestionDrainScheduled = false
+let backgroundIngestionDrainTimer: ReturnType<typeof setTimeout> | null = null
+let backgroundIngestionDrainScheduledAt = 0
+let failedIngestionQueueBytes = 0
+let failedIngestionRetryAttempt = 0
+let failedIngestionNextRetryAt = 0
+let backgroundBatchesSinceFailedRetry = 0
+let lastIngestionFailureLogAt = 0
+let lastFailedIngestionQueueDropLogAt = 0
+const pendingTraceUpserts = new Map<string, TraceBatch>()
+const lastEnqueuedTraceSnapshots = new Map<string, string>()
+let traceUpsertTimer: ReturnType<typeof setTimeout> | null = null
+const pendingBackgroundUpdateEvents = new Map<string, number>()
+const failedIngestionUpdateEventIds = new Map<string, Set<string>>()
+const ingestionEventByteLengths = new WeakMap<object, number>()
+let shutdownFlushPromise: Promise<void> | null = null
+let shutdownFlushCompleted = false
 
-function getActiveParentId(): string | undefined {
-  const activeSkill = skillStack[skillStack.length - 1]
-  return activeSkill?.context.spanId
+function getCurrentSkillContext(sessionId?: string, traceId?: string): SkillContext | null {
+  if (!sessionId) return null
+  const entry = activeSkillContexts.get(sessionId)
+  if (!entry || (traceId && entry.context.traceId !== traceId)) return null
+  return entry.context
 }
 
-function getCurrentSkillContext(): SkillContext | null {
-  return skillStack[skillStack.length - 1]?.context ?? null
+function appendTraceSkillInfo(traceId: string, skillInfo: SkillInfo) {
+  const existing = traceSkillInfos.get(traceId) ?? []
+  traceSkillInfos.set(traceId, [...existing, skillInfo])
+}
+
+function updateTraceSkillInfo(traceId: string, skillSpanId: string, updates: { skillName?: string; skillId?: string }) {
+  const existing = traceSkillInfos.get(traceId)
+  if (!existing) return
+
+  const idx = existing.findIndex((item) => item.skillSpanId === skillSpanId)
+  if (idx === -1) return
+
+  const next = [...existing]
+  next[idx] = {
+    ...next[idx],
+    ...(updates.skillName ? { skillName: updates.skillName } : {}),
+    ...(updates.skillId ? { skillId: updates.skillId } : {}),
+  }
+  traceSkillInfos.set(traceId, next)
+}
+
+function getTraceSkillInfo(traceId: string, count?: number): SkillInfo[] | undefined {
+  const allSkillInfo = traceSkillInfos.get(traceId)
+  const skillInfo = count === undefined ? allSkillInfo : allSkillInfo?.slice(0, count)
+  return skillInfo && skillInfo.length > 0
+    ? skillInfo.map((item) => ({
+        skillName: item.skillName,
+        ...(item.skillId ? { skillId: item.skillId } : {}),
+        skillSpanId: item.skillSpanId,
+      }))
+    : undefined
+}
+
+function withTraceSkillInfo(traceId: string, metadata: Record<string, any> = {}) {
+  const skillInfo = getTraceSkillInfo(traceId)
+  return skillInfo ? { ...metadata, skillInfo } : metadata
+}
+
+function observationSkillInfoKey(traceId: string, observationId: string) {
+  return `${traceId}:${observationId}`
+}
+
+function rememberObservationSkillInfoCount(traceId: string, observationId: string) {
+  observationSkillInfoCounts.set(observationSkillInfoKey(traceId, observationId), traceSkillInfos.get(traceId)?.length ?? 0)
+}
+
+function withoutSkillInfo(metadata: Record<string, any> = {}) {
+  if (!metadata || !Object.prototype.hasOwnProperty.call(metadata, "skillInfo")) return metadata
+  const { skillInfo: _skillInfo, ...rest } = metadata
+  return rest
+}
+
+function withTraceSkillInfoForObservationUpdate(
+  traceId: string,
+  observationId: string,
+  metadata: Record<string, any> = {},
+) {
+  const count = observationSkillInfoCounts.get(observationSkillInfoKey(traceId, observationId))
+  const skillInfo = count === undefined ? undefined : getTraceSkillInfo(traceId, count)
+  return skillInfo && skillInfo.length > 0 ? { ...metadata, skillInfo } : withoutSkillInfo(metadata)
 }
 
 function getLatestActiveGeneration(sessionId: string): GenInfo | undefined {
@@ -236,9 +376,82 @@ function getActiveGenerationForPart(sessionId: string, part: any): GenInfo | und
       unbound.assistantMessageId = messageId
       return unbound
     }
+
+    // A part with an assistant message ID must never be assigned to a
+    // generation belonging to another assistant message.
+    return undefined
   }
 
   return part.type === "step-finish" ? getNextFinishingGeneration(sessionId) : getLatestActiveGeneration(sessionId)
+}
+
+function isGenerationPart(part: any) {
+  if (["step-start", "step-finish", "text", "reasoning"].includes(part?.type)) return true
+  // A running tool proves the LLM step exists. A completed tool can be a late
+  // event from a prior assistant message and must not activate a new request.
+  return part?.type === "tool" && part.state?.status === "running"
+}
+
+function activatePendingGeneration(
+  sessionId: string,
+  messageId?: string,
+  options?: { preferLatest?: boolean; startTime?: Date },
+): GenInfo | undefined {
+  const pending = pendingGenerations.get(sessionId)
+  const gen = options?.preferLatest ? pending?.pop() : pending?.shift()
+  if (!gen) return undefined
+  if (pending.length === 0) pendingGenerations.delete(sessionId)
+
+  // chat.params can be delivered ahead of preceding tool hooks. Do not retain
+  // its arrival time as the observation boundary: use the first concrete
+  // generation event (or a caller-provided fallback) immediately before the
+  // generation-create event is emitted.
+  const startTime = options?.startTime ?? new Date()
+  gen.startTime = startTime
+  gen.generationData.startTime = startTime.toISOString()
+
+  // chat.params only creates a pending candidate. A skill hook can be
+  // delivered after that callback but before this first concrete response
+  // part creates the generation. Bind to the skill that is active *now*, not
+  // to a stale skill parent captured by chat.params (notably for skill #2).
+  const currentSkill = getCurrentSkillContext(sessionId, gen.traceId)
+  const parentObservationId = currentSkill?.spanId ?? (!gen.parentObservationId ? getSessionObservationParent(sessionId) : undefined)
+  if (parentObservationId && parentObservationId !== gen.parentObservationId) {
+    gen.parentObservationId = parentObservationId
+    gen.generationData.parentObservationId = parentObservationId
+  }
+  if (currentSkill) {
+    gen.isSkillChild = true
+  }
+
+  if (messageId) gen.assistantMessageId = messageId
+  addGenerationToBatch(gen.traceId, gen.generationData)
+  createGenerationImmediately(gen.generationData)
+
+  const genList = gens.get(gen.traceId) || []
+  genList.push(gen)
+  gens.set(gen.traceId, genList)
+  allGenerations.push(gen)
+  addActiveGeneration(sessionId, gen)
+  return gen
+}
+
+function getOrActivateGenerationForPart(sessionId: string, part: any, eventTime?: any): GenInfo | undefined {
+  const active = getActiveGenerationForPart(sessionId, part)
+  if (active || !isGenerationPart(part)) return active
+
+  // Never let a delayed part from a completed assistant message create or bind
+  // the next pending LLM generation.
+  if (
+    part?.messageID &&
+    allGenerations.some(
+      (gen) => gen.sessionId === sessionId && gen.assistantMessageId === part.messageID && !!gen.finalOutput,
+    )
+  ) {
+    return undefined
+  }
+  const startTime = getPartTimestamp(part, "start") ?? getEventTimestamp(eventTime) ?? new Date()
+  return activatePendingGeneration(sessionId, part?.messageID, { startTime })
 }
 
 function addActiveGeneration(sessionId: string, gen: GenInfo) {
@@ -254,6 +467,60 @@ function deleteActiveGeneration(sessionId: string, gen: GenInfo) {
   const remaining = active.filter((item) => item.genId !== gen.genId)
   if (remaining.length === 0) activeGenerations.delete(sessionId)
   else activeGenerations.set(sessionId, remaining)
+}
+
+function markGenerationCompletionStarted(g: GenInfo, completionStartTime = new Date()) {
+  if (g.completionStartTime) return
+
+  g.completionStartTime = completionStartTime
+  const generationUpdates = { completionStartTime: g.completionStartTime.toISOString() }
+  updateGenerationInBatch(g.traceId, g.genId, generationUpdates)
+  updateGenerationImmediately(g.traceId, g.genId, generationUpdates)
+}
+
+function getEventTimestamp(value: any): Date | undefined {
+  if (value instanceof Date) return Number.isFinite(value.getTime()) ? value : undefined
+
+  if (typeof value === "string") {
+    const numeric = Number(value)
+    if (value.trim() !== "" && Number.isFinite(numeric)) return getEventTimestamp(numeric)
+    const parsed = new Date(value)
+    return Number.isFinite(parsed.getTime()) ? parsed : undefined
+  }
+
+  if (typeof value !== "number" || !Number.isFinite(value)) return undefined
+
+  // OpenCode emits epoch milliseconds; accept seconds and high-resolution
+  // values too so older event payloads remain compatible.
+  const milliseconds =
+    Math.abs(value) < 1e11 ? value * 1000 : Math.abs(value) > 1e17 ? value / 1e6 : Math.abs(value) > 1e14 ? value / 1e3 : value
+  const parsed = new Date(milliseconds)
+  return Number.isFinite(parsed.getTime()) ? parsed : undefined
+}
+
+function getPartTimestamp(part: any, kind: "start" | "end"): Date | undefined {
+  const candidates = [
+    part?.state?.time?.[kind],
+    part?.time?.[kind],
+    part?.info?.time?.[kind],
+    part?.metadata?.time?.[kind],
+    part?.[`${kind}Time`],
+    part?.[`${kind}At`],
+  ]
+  for (const candidate of candidates) {
+    const timestamp = getEventTimestamp(candidate)
+    if (timestamp) return timestamp
+  }
+  return undefined
+}
+
+function markGenerationResponseFinished(g: GenInfo, endTime = new Date()) {
+  if (g.responseEndTime) return
+
+  g.responseEndTime = endTime
+  const generationUpdates: Partial<GenerationData> = { endTime: endTime.toISOString() }
+  updateGenerationInBatch(g.traceId, g.genId, generationUpdates)
+  updateGenerationImmediately(g.traceId, g.genId, generationUpdates)
 }
 
 function normalizeModelSelection(model: any): string | undefined {
@@ -283,22 +550,39 @@ function buildLLMModelMetadata(
 }
 
 function migrateTraceId(oldTraceId: string, newTraceId: string) {
-  if (oldTraceId === newTraceId || traceBatches.has(newTraceId)) return
+  if (oldTraceId === newTraceId) return
+
+  migrateQueuedIngestionTraceId(oldTraceId, newTraceId)
 
   const batch = traceBatches.get(oldTraceId)
   if (batch) {
-    batch.id = newTraceId
-    for (const gen of batch.generations) gen.traceId = newTraceId
-    for (const span of batch.spans) span.traceId = newTraceId
+    const targetBatch = traceBatches.get(newTraceId)
+    if (targetBatch) {
+      if (!targetBatch.input && batch.input) targetBatch.input = batch.input
+      if (!targetBatch.output && batch.output) targetBatch.output = batch.output
+      for (const gen of batch.generations) {
+        gen.traceId = newTraceId
+        if (!targetBatch.generations.some((existing) => existing.id === gen.id)) targetBatch.generations.push(gen)
+      }
+      for (const span of batch.spans) {
+        span.traceId = newTraceId
+        if (!targetBatch.spans.some((existing) => existing.id === span.id)) targetBatch.spans.push(span)
+      }
+    } else {
+      batch.id = newTraceId
+      for (const gen of batch.generations) gen.traceId = newTraceId
+      for (const span of batch.spans) span.traceId = newTraceId
+      traceBatches.set(newTraceId, batch)
+    }
     traceBatches.delete(oldTraceId)
-    traceBatches.set(newTraceId, batch)
   }
 
   const genList = gens.get(oldTraceId)
   if (genList) {
     for (const gen of genList) gen.traceId = newTraceId
+    const targetGenList = gens.get(newTraceId)
     gens.delete(oldTraceId)
-    gens.set(newTraceId, genList)
+    gens.set(newTraceId, targetGenList ? [...targetGenList, ...genList] : genList)
   }
 
   const genIndex = currentGenIdx.get(oldTraceId)
@@ -307,16 +591,46 @@ function migrateTraceId(oldTraceId: string, newTraceId: string) {
     currentGenIdx.set(newTraceId, genIndex)
   }
 
+  const skillInfo = traceSkillInfos.get(oldTraceId)
+  if (skillInfo) {
+    const targetSkillInfo = traceSkillInfos.get(newTraceId)
+    traceSkillInfos.delete(oldTraceId)
+    traceSkillInfos.set(newTraceId, targetSkillInfo ? [...targetSkillInfo, ...skillInfo] : skillInfo)
+  }
+
+  const activeSkillSpanId = activeSkillSpanByTrace.get(oldTraceId)
+  if (activeSkillSpanId) {
+    activeSkillSpanByTrace.delete(oldTraceId)
+    if (!activeSkillSpanByTrace.has(newTraceId)) activeSkillSpanByTrace.set(newTraceId, activeSkillSpanId)
+  }
+
+  for (const [key, skillInfoCount] of [...observationSkillInfoCounts]) {
+    if (!key.startsWith(`${oldTraceId}:`)) continue
+    observationSkillInfoCounts.delete(key)
+    observationSkillInfoCounts.set(`${newTraceId}:${key.slice(oldTraceId.length + 1)}`, skillInfoCount)
+  }
+
   for (const gen of allGenerations) {
     if (gen.traceId === oldTraceId) gen.traceId = newTraceId
   }
   for (const active of activeGenerations.values()) {
     for (const gen of active) {
-      if (gen.traceId === oldTraceId) gen.traceId = newTraceId
+      if (gen.traceId === oldTraceId) {
+        gen.traceId = newTraceId
+        gen.generationData.traceId = newTraceId
+      }
     }
   }
-  for (const context of skillStack) {
-    if (context.context.traceId === oldTraceId) context.context.traceId = newTraceId
+  for (const pending of pendingGenerations.values()) {
+    for (const gen of pending) {
+      if (gen.traceId === oldTraceId) {
+        gen.traceId = newTraceId
+        gen.generationData.traceId = newTraceId
+      }
+    }
+  }
+  for (const entry of activeSkillContexts.values()) {
+    if (entry.context.traceId === oldTraceId) entry.context.traceId = newTraceId
   }
   for (const [parentSessionId, pending] of pendingSubagents) {
     pendingSubagents.set(
@@ -330,6 +644,9 @@ function migrateTraceId(oldTraceId: string, newTraceId: string) {
   for (const [callID, info] of toolCallInfos) {
     if (info.traceId === oldTraceId) toolCallInfos.set(callID, { ...info, traceId: newTraceId })
   }
+  for (const [callID, span] of pendingSkillSpans) {
+    if (span.traceId === oldTraceId) pendingSkillSpans.set(callID, { ...span, traceId: newTraceId })
+  }
   if (currentTraceId === oldTraceId) currentTraceId = newTraceId
   uploadedTraceIds.delete(oldTraceId)
   generatedTraceIds.delete(oldTraceId)
@@ -340,9 +657,9 @@ function getTraceIdForSession(sessionId: string, preferredTraceId?: string): str
   if (existing) {
     if (
       preferredTraceId &&
-      sessionId === rootSessionId &&
       existing !== preferredTraceId &&
-      generatedTraceIds.has(existing)
+      generatedTraceIds.has(existing) &&
+      !isSubagentSession(sessionId)
     ) {
       migrateTraceId(existing, preferredTraceId)
       return preferredTraceId
@@ -350,13 +667,22 @@ function getTraceIdForSession(sessionId: string, preferredTraceId?: string): str
     return existing
   }
 
+  // A child session may be announced before the parent emits its first chat
+  // event. Resolve through its parent instead of allocating a separate
+  // fallback trace; this keeps event-order races from splitting one task.
+  const parentSessionId = subagentParentBySession.get(sessionId)
+  if (parentSessionId) {
+    const parentTraceId = getTraceIdForSession(parentSessionId)
+    sessionToTrace.set(sessionId, parentTraceId)
+    return parentTraceId
+  }
+
   if (!rootSessionId) {
     rootSessionId = sessionId
   }
 
-  const rootTraceId = rootSessionId ? sessionToTrace.get(rootSessionId) : undefined
-  const traceId = rootTraceId ?? preferredTraceId ?? generateUUID()
-  if (!rootTraceId && !preferredTraceId) generatedTraceIds.add(traceId)
+  const traceId = preferredTraceId ?? generateUUID()
+  if (!preferredTraceId) generatedTraceIds.add(traceId)
 
   sessionToTrace.set(sessionId, traceId)
   if (sessionId === rootSessionId || !currentTraceId) {
@@ -364,6 +690,95 @@ function getTraceIdForSession(sessionId: string, preferredTraceId?: string): str
   }
 
   return traceId
+}
+
+/**
+ * `session.created` is forwarded to plugins asynchronously. A child session can
+ * otherwise reach chat.message before that event has associated it with its
+ * parent trace, causing an irreversible trace-create ingestion event for the
+ * child. Wait briefly for that specific event before allocating a trace so the
+ * parent/child mapping wins over fallback trace allocation.
+ */
+async function getTraceIdAfterSessionCreated(sessionId: string, preferredTraceId?: string): Promise<string> {
+  if (!createdSessionIds.has(sessionId)) {
+    await new Promise<void>((resolve) => {
+      const waiters = sessionCreatedWaiters.get(sessionId) ?? []
+      let timeout: ReturnType<typeof setTimeout> | undefined
+      const waiter = () => {
+        if (timeout) clearTimeout(timeout)
+        resolve()
+      }
+      timeout = setTimeout(() => {
+        const remaining = (sessionCreatedWaiters.get(sessionId) ?? []).filter((entry) => entry !== waiter)
+        if (remaining.length) sessionCreatedWaiters.set(sessionId, remaining)
+        else sessionCreatedWaiters.delete(sessionId)
+        resolve()
+      }, SESSION_CREATED_WAIT_MS)
+      waiters.push(waiter)
+      sessionCreatedWaiters.set(sessionId, waiters)
+    })
+  }
+
+  // A reused task session does not emit session.created again, and plugin event
+  // delivery may lag behind the first child LLM event. Ask the session API for
+  // its persisted parent before allocating a fallback trace. This only runs for
+  // the one session still missing its creation event, so independent top-level
+  // conversations retain their separate trace/session mapping.
+  if (!createdSessionIds.has(sessionId) && !sessionToTrace.has(sessionId)) {
+    const parentSessionId = await sessionParentResolver?.(sessionId)
+    if (parentSessionId) await associateSubagentSession(sessionId, parentSessionId)
+
+    // If OpenCode has not yet exposed parentID, but exactly one task call is
+    // waiting for its child session, the child can be linked without creating
+    // a fallback trace. Do not guess when more than one child is pending.
+    if (!sessionToTrace.has(sessionId)) {
+      const pendingParentSessionId = getUniquePendingSubagentParent()
+      if (pendingParentSessionId) await associateSubagentSession(sessionId, pendingParentSessionId)
+    }
+  }
+  return getTraceIdForSession(sessionId, preferredTraceId)
+}
+
+function markSessionCreated(sessionId: string) {
+  createdSessionIds.add(sessionId)
+  const waiters = sessionCreatedWaiters.get(sessionId)
+  if (!waiters) return
+
+  sessionCreatedWaiters.delete(sessionId)
+  for (const resolve of waiters) resolve()
+}
+
+function migrateQueuedIngestionTraceId(oldTraceId: string, newTraceId: string) {
+  const migrateEvent = (event: any) => {
+    if (!event?.body || typeof event.body !== "object") return event
+
+    const isTraceEvent = event.type === "trace-create" || event.type === "trace-update"
+    const migrateTraceId = event.body.traceId === oldTraceId
+    const migrateTraceEventId = isTraceEvent && event.body.id === oldTraceId
+    if (!migrateTraceId && !migrateTraceEventId) return event
+
+    const body = {
+      ...event.body,
+      ...(migrateTraceId ? { traceId: newTraceId } : {}),
+      ...(migrateTraceEventId ? { id: newTraceId } : {}),
+    }
+
+    ingestionEventByteLengths.delete(event)
+    return { ...event, body }
+  }
+
+  backgroundIngestionEvents = backgroundIngestionEvents.map((event, index) =>
+    index < backgroundIngestionHead ? event : migrateEvent(event),
+  )
+  backgroundIngestionBytes = backgroundIngestionEvents
+    .slice(backgroundIngestionHead)
+    .reduce((total, event) => total + getBackgroundIngestionEventByteLength(event), 0)
+  rebuildPendingBackgroundUpdateEvents()
+
+  const migratedFailedEvents = failedIngestionEvents.map(migrateEvent)
+  if (migratedFailedEvents.some((event, index) => event !== failedIngestionEvents[index])) {
+    replaceFailedIngestionEvents(migratedFailedEvents)
+  }
 }
 
 function getSessionObservationParent(
@@ -375,13 +790,27 @@ function getSessionObservationParent(
     if (activeGeneration) return activeGeneration.genId
   }
 
-  const agentSpanId = sessionToAgentSpan.get(sessionId)
-  if (agentSpanId) return agentSpanId
-
-  const skillContext = getCurrentSkillContext()
+  // Never borrow currentTraceId for an unassociated session. A concurrently
+  // started top-level session must not inherit the previous session's active
+  // skill parent before it receives its own trace mapping.
+  const traceId = sessionToTrace.get(sessionId)
+  const skillContext = getCurrentSkillContext(sessionId, traceId)
   if (skillContext) return skillContext.spanId
 
-  return getActiveParentId()
+  // A few hook sequences are delivered before session.created has associated
+  // the session. In that window use the trace-level skill parent, matching the
+  // original skill-stack behaviour and keeping following LLM/tool nodes under
+  // the skill that opened the group.
+  if (traceId) {
+    const activeSkillSpanId = activeSkillSpanByTrace.get(traceId)
+    if (activeSkillSpanId) return activeSkillSpanId
+  }
+
+  // A skill running inside a subagent is more specific than the subagent
+  // wrapper, so observations must nest under the skill first.
+  const agentSpanId = sessionToAgentSpan.get(sessionId)
+  if (agentSpanId) return agentSpanId
+  return undefined
 }
 
 async function queuePendingSubagent(parentSessionId: string, entry: { traceId: string; agentSpanId: string }) {
@@ -397,6 +826,36 @@ async function queuePendingSubagent(parentSessionId: string, entry: { traceId: s
   const queue = pendingSubagents.get(parentSessionId) ?? []
   queue.push(entry)
   pendingSubagents.set(parentSessionId, queue)
+}
+
+function getUniquePendingSubagentParent(): string | undefined {
+  let parentSessionId: string | undefined
+  let pendingCount = 0
+  for (const [parentId, entries] of pendingSubagents) {
+    pendingCount += entries.length
+    if (entries.length) parentSessionId = parentId
+    if (pendingCount > 1) return undefined
+  }
+  return pendingCount === 1 ? parentSessionId : undefined
+}
+
+async function associateSubagentSession(sessionId: string, parentSessionId: string) {
+  // The API fallback can associate a child before its delayed session.created
+  // event arrives. Do not consume the next pending task span a second time.
+  if (subagentParentBySession.get(sessionId) === parentSessionId) return
+
+  subagentParentBySession.set(sessionId, parentSessionId)
+  const pending = consumePendingSubagent(parentSessionId)
+  const inheritedTraceId = pending?.traceId || sessionToTrace.get(parentSessionId)
+  if (inheritedTraceId) {
+    sessionToTrace.set(sessionId, inheritedTraceId)
+    currentTraceId = inheritedTraceId
+  }
+  if (pending?.agentSpanId) {
+    await attachSubagentSession(sessionId, pending.traceId, pending.agentSpanId)
+    return
+  }
+  rememberPendingSubagentSession(parentSessionId, sessionId)
 }
 
 function consumePendingSubagent(parentSessionId: string) {
@@ -415,7 +874,15 @@ function rememberPendingSubagentSession(parentSessionId: string, sessionId: stri
   pendingSubagentSessions.set(parentSessionId, queue)
 }
 
+function isSubagentSession(sessionId: string): boolean {
+  return sessionToAgentSpan.has(sessionId) || subagentParentBySession.has(sessionId)
+}
+
 async function attachSubagentSession(sessionId: string, traceId: string, agentSpanId: string) {
+  const existingTraceId = sessionToTrace.get(sessionId)
+  if (existingTraceId && existingTraceId !== traceId) {
+    migrateTraceId(existingTraceId, traceId)
+  }
   sessionToTrace.set(sessionId, traceId)
   sessionToAgentSpan.set(sessionId, agentSpanId)
   currentTraceId = traceId
@@ -446,6 +913,103 @@ async function reparentSessionObservations(sessionId: string, traceId: string, a
   }
 }
 
+function getSessionsForTrace(traceId: string): string[] {
+  return [...sessionToTrace.entries()]
+    .filter(([, mappedTraceId]) => mappedTraceId === traceId)
+    .map(([sessionId]) => sessionId)
+}
+
+function hasActiveSessionsForTrace(traceId: string): boolean {
+  return getSessionsForTrace(traceId).some((sessionId) => !idleSessionIds.has(sessionId))
+}
+
+function cleanupTraceState(traceId: string, sessionIds: string[]) {
+  const sessionIdSet = new Set(sessionIds)
+
+  traceBatches.delete(traceId)
+  gens.delete(traceId)
+  traceSkillInfos.delete(traceId)
+  activeSkillSpanByTrace.delete(traceId)
+  for (const key of [...observationSkillInfoCounts.keys()]) {
+    if (key.startsWith(`${traceId}:`)) observationSkillInfoCounts.delete(key)
+  }
+
+  for (let i = allGenerations.length - 1; i >= 0; i--) {
+    if (allGenerations[i]?.traceId === traceId) allGenerations.splice(i, 1)
+  }
+
+  for (const [sessionId, entry] of [...activeSkillContexts]) {
+    if (entry.context.traceId === traceId) activeSkillContexts.delete(sessionId)
+  }
+
+  for (const [callID, info] of [...toolCallInfos]) {
+    if (info.traceId === traceId) {
+      toolCallInfos.delete(callID)
+      toolSpanIds.delete(callID)
+      toolResultSnapshots.delete(callID)
+    }
+  }
+  for (const [callID, span] of [...pendingSkillSpans]) {
+    if (span.traceId === traceId) pendingSkillSpans.delete(callID)
+  }
+  for (const [parentSessionId, pending] of [...pendingSubagents]) {
+    const remaining = pending.filter((entry) => entry.traceId !== traceId)
+    if (remaining.length) pendingSubagents.set(parentSessionId, remaining)
+    else pendingSubagents.delete(parentSessionId)
+  }
+
+  for (const sessionId of sessionIdSet) {
+    activeSkillContexts.delete(sessionId)
+    sessionIdMap.delete(sessionId)
+    activeGenerations.delete(sessionId)
+    pendingGenerations.delete(sessionId)
+    sessionSpanIds.delete(sessionId)
+    messageCounter.delete(sessionId)
+    userInputs.delete(sessionId)
+    sessionAssistantOutputs.delete(sessionId)
+    llmInputs.delete(sessionId)
+    systemPrompts.delete(sessionId)
+    selectedModelsBySession.delete(sessionId)
+    sessionToAgentSpan.delete(sessionId)
+    subagentParentBySession.delete(sessionId)
+    idleSessionIds.delete(sessionId)
+    createdSessionIds.delete(sessionId)
+    sessionCreatedWaiters.delete(sessionId)
+    trackedSessionIds.delete(sessionId)
+    sessionToTrace.delete(sessionId)
+    pendingSubagentSessions.delete(sessionId)
+  }
+
+  for (const [parentSessionId, waitingSessions] of [...pendingSubagentSessions]) {
+    const remaining = waitingSessions.filter((sessionId) => !sessionIdSet.has(sessionId))
+    if (remaining.length) pendingSubagentSessions.set(parentSessionId, remaining)
+    else pendingSubagentSessions.delete(parentSessionId)
+  }
+
+  uploadedTraceIds.delete(traceId)
+  lastEnqueuedTraceSnapshots.delete(traceId)
+  generatedTraceIds.delete(traceId)
+}
+
+function refreshCurrentSessionPointers(endedTraceId: string, endedSessionIds: string[]) {
+  const endedSessionIdSet = new Set(endedSessionIds)
+
+  if (currentTraceId === endedTraceId) {
+    currentTraceId =
+      (currentSessionId && sessionToTrace.get(currentSessionId)) ||
+      [...sessionToTrace.values()].find((traceId) => traceId !== endedTraceId) ||
+      null
+  }
+
+  if (currentSessionId && endedSessionIdSet.has(currentSessionId)) {
+    currentSessionId = [...trackedSessionIds].find((sessionId) => !endedSessionIdSet.has(sessionId)) || null
+  }
+
+  if (rootSessionId && endedSessionIdSet.has(rootSessionId)) {
+    rootSessionId = [...sessionToTrace.keys()].find((sessionId) => !endedSessionIdSet.has(sessionId)) || null
+  }
+}
+
 // 存储用户输入
 const userInputs = new Map<string, string>()
 
@@ -470,6 +1034,7 @@ const currentGenIdx = new Map<string, number>()
 // 跟踪的会话 ID 集合
 const trackedSessionIds = new Set<string>()
 const pendingSubagentSessions = new Map<string, string[]>()
+const subagentParentBySession = new Map<string, string>()
 
 // 消息计数器
 const messageCounter = new Map<string, number>()
@@ -517,6 +1082,44 @@ function injectTestcaseIds(text: string): string {
     })
     
     return `TC${chars.join("")}`
+  })
+}
+
+// 检查 testcase_id 是否在指定位置包含 "testagent"
+// 调用方已通过正则保证格式: TC[a-z0-9]{32}
+function hasTestagentPattern(testcaseId: string): boolean {
+  const chars = testcaseId.slice(2) // 去掉 "TC" 前缀
+  const word = "testagent"
+  const indices = [2, 6, 9, 13, 16, 20, 23, 27, 30]
+  
+  // 检查特定位置是否包含 testagent 字符
+  return indices.every((idx, i) => chars[idx] === word[i])
+}
+
+// 生成符合 testagent 模式的新 testcase_id
+function generateTestagentTestcaseId(): string {
+  const uuid = generateUUID().replace(/-/g, "")
+  const chars = uuid.split("")
+  const word = "testagent"
+  const indices = [2, 6, 9, 13, 16, 20, 23, 27, 30]
+  
+  indices.forEach((idx, i) => {
+    if (idx < chars.length && i < word.length) {
+      chars[idx] = word[i]
+    }
+  })
+  
+  return `TC${chars.join("")}`
+}
+
+// 替换 YAML 中不符合 testagent 模式的 testcase_id
+function replaceNonTestagentTestcaseIds(text: string): string {
+  // 匹配 testcase_id: TC... 格式，使用\b确保后面没有更多字符
+  return text.replace(/testcase_id:\s*(TC[a-z0-9]{32})\b/g, (match, testcaseId) => {
+    if (hasTestagentPattern(testcaseId)) {
+      return match // 保留符合模式的 testcase_id
+    }
+    return match.replace(testcaseId, generateTestagentTestcaseId())
   })
 }
 
@@ -614,6 +1217,47 @@ async function readResponseTextSafe(res: Response): Promise<string> {
   }
 }
 
+function truncateErrorDetail(value: unknown, maxLength = MAX_ERROR_DETAIL_LENGTH): string {
+  const text = typeof value === "string" ? value : JSON.stringify(value) ?? String(value)
+  if (text.length <= maxLength) return text
+  return `${text.slice(0, maxLength)}... [truncated ${text.length - maxLength} chars]`
+}
+
+function summarizeResponseBody(text: string): string {
+  if (!text) return ""
+
+  try {
+    const parsed = JSON.parse(text)
+    return truncateErrorDetail(parsed)
+  } catch {
+    return truncateErrorDetail(text)
+  }
+}
+
+function normalizeErrorDetail(error: unknown) {
+  if (error instanceof Error) {
+    const cause = (error as Error & { cause?: unknown }).cause
+    return {
+      name: error.name,
+      message: error.message,
+      stack: error.stack ? truncateErrorDetail(error.stack) : undefined,
+      cause: cause === undefined ? undefined : truncateErrorDetail(cause),
+    }
+  }
+
+  return {
+    name: typeof error,
+    message: truncateErrorDetail(error),
+  }
+}
+
+function shouldLogIngestionFailure() {
+  const now = Date.now()
+  if (now - lastIngestionFailureLogAt < INGESTION_FAILURE_LOG_INTERVAL_MS) return false
+  lastIngestionFailureLogAt = now
+  return true
+}
+
 async function fetchWithTimeout(
   input: Parameters<typeof fetch>[0],
   init?: RequestInit,
@@ -629,65 +1273,109 @@ async function fetchWithTimeout(
   }
 }
 
+function hasObservationTags(tags: unknown) {
+  return (
+    Array.isArray(tags) &&
+    tags.length === OBSERVATION_TAGS.length &&
+    OBSERVATION_TAGS.every((tag) => tags.includes(tag))
+  )
+}
+
 function withEventBodyTags(event: any) {
   if (!event || typeof event !== "object" || !event.body) return event
+  if (hasObservationTags(event.body.tags) && hasObservationTags(event.body.metadata?.tags)) return event
+
   return {
     ...event,
     body: withEventMetadataTags(event.body, event.body?.metadata?.hookReceivedAt),
   }
 }
 
+function toUploadIngestionEvent(event: any) {
+  if (!event || typeof event !== "object" || event.__langfuseRetryCount === undefined) return event
+  const { __langfuseRetryCount: _retryCount, ...ingestionEvent } = event
+  return ingestionEvent
+}
+
 function jsonByteLength(value: unknown): number {
   return Buffer.byteLength(JSON.stringify(value), "utf-8")
 }
 
-function splitIngestionEventsBySize(events: any[], maxBytes: number): any[][] {
-  const chunks: any[][] = []
-  let current: any[] = []
-  let currentBytes = jsonByteLength({ batch: [] })
-
-  for (const event of events) {
-    const eventBytes = jsonByteLength(event) + 1
-    if (current.length > 0 && currentBytes + eventBytes > maxBytes) {
-      chunks.push(current)
-      current = []
-      currentBytes = jsonByteLength({ batch: [] })
-    }
-
-    current.push(event)
-    currentBytes += eventBytes
-  }
-
-  if (current.length > 0) chunks.push(current)
-  return chunks
-}
-
-async function uploadToIngestion(events: any[]) {
+async function uploadToIngestion(events: any[], source: "background" | "retry") {
   if (events.length === 0) return { successes: [], errors: [] }
 
-  const taggedEvents = events.map(withEventBodyTags)
-  const chunks = splitIngestionEventsBySize(taggedEvents, MAX_INGESTION_BATCH_BYTES)
-  if (chunks.length > 1) {
-    const successes: any[] = []
-    const errors: any[] = []
-    for (const chunk of chunks) {
-      const result = await uploadToIngestionChunk(chunk)
-      successes.push(...(Array.isArray(result.successes) ? result.successes : []))
-      errors.push(...(Array.isArray(result.errors) ? result.errors : []))
-    }
-    return { successes, errors }
+  const successes: any[] = []
+  const errors: any[] = []
+  const emptyBatchBytes = Buffer.byteLength('{"batch":[]}', "utf-8")
+  let batchEvents: any[] = []
+  let serializedEvents: string[] = []
+  let batchBytes = emptyBatchBytes
+
+  const uploadCurrentBatch = async () => {
+    if (batchEvents.length === 0) return
+    const body = `{"batch":[${serializedEvents.join(",")}]}`
+    const result = await uploadToIngestionChunk(batchEvents, body, source)
+    successes.push(...(Array.isArray(result.successes) ? result.successes : []))
+    errors.push(...(Array.isArray(result.errors) ? result.errors : []))
+    batchEvents = []
+    serializedEvents = []
+    batchBytes = emptyBatchBytes
   }
 
-  return uploadToIngestionChunk(taggedEvents)
+  for (const event of events) {
+    const taggedEvent = toUploadIngestionEvent(event)
+    let serializedEvent: string
+    try {
+      serializedEvent = JSON.stringify(taggedEvent)
+      if (typeof serializedEvent !== "string") throw new TypeError("Ingestion event is not serializable")
+    } catch (e) {
+      const errorDetail = normalizeErrorDetail(e)
+      if (shouldLogIngestionFailure()) {
+        trackEvent("both", {
+          level: "error",
+          message: `数据上报序列化失败: ${errorDetail.name}${errorDetail.message ? ` - ${errorDetail.message}` : ""}`,
+          data: { error: errorDetail, eventId: event?.id },
+          metricName: "plugin.langfuse.ingestion.error",
+          metricValue: 1,
+          tags: { error: "serialization" },
+        })
+      }
+      errors.push({ id: event?.id, status: 500, error: String(e) })
+      continue
+    }
+
+    const serializedEventBytes = Buffer.byteLength(serializedEvent, "utf-8")
+    const separatorBytes = batchEvents.length > 0 ? 1 : 0
+    if (batchEvents.length > 0 && batchBytes + separatorBytes + serializedEventBytes > MAX_INGESTION_BATCH_BYTES) {
+      await uploadCurrentBatch()
+    }
+
+    batchEvents.push(taggedEvent)
+    serializedEvents.push(serializedEvent)
+    batchBytes += (batchEvents.length > 1 ? 1 : 0) + serializedEventBytes
+    if (batchBytes >= MAX_INGESTION_BATCH_BYTES) await uploadCurrentBatch()
+  }
+
+  await uploadCurrentBatch()
+  return { successes, errors }
 }
 
-async function uploadToIngestionChunk(taggedEvents: any[]) {
+async function uploadToIngestionChunk(taggedEvents: any[], body: string, source: "background" | "retry") {
   if (taggedEvents.length === 0) return { successes: [], errors: [] }
 
-  const body = JSON.stringify({ batch: taggedEvents })
   const credentials = btoa(`${publicKey}:${secretKey}`)
   const traceId = taggedEvents?.[0]?.body?.traceId || taggedEvents?.[0]?.body?.id
   const projectId = taggedEvents?.[0]?.body?.metadata?.projectId
+  trackEvent("metric", {
+    metricName: "plugin.langfuse.ingestion.attempt",
+    metricValue: 1,
+    tags: ingestionDiagnosticTags(taggedEvents, {
+      node: "ingestion",
+      action: "upload_batch",
+      status: "started",
+      source,
+    }),
+  })
   try {
     const res = await fetchWithTimeout(`${LANGFUSE_BASE_URL}/api/public/ingestion`, {
       method: "POST",
@@ -703,49 +1391,71 @@ async function uploadToIngestionChunk(taggedEvents: any[]) {
       trackEvent("metric", {
         metricName: "plugin.langfuse.ingestion.success",
         metricValue: 1,
-        tags: {
-          eventCount: String(taggedEvents.length),
-          ...(traceId ? { traceId } : {}),
+        tags: ingestionDiagnosticTags(taggedEvents, {
+          node: "ingestion",
+          action: "upload_batch",
+          status: "success",
+          source,
+          ...(traceId ? { firstTraceId: traceId } : {}),
           ...(projectId ? { projectId } : {}),
-        },
+        }),
       })
       return { successes: taggedEvents.map((event) => ({ id: event.id })), errors: [] }
     }
 
     const text = await readResponseTextSafe(res)
-    trackEvent("both", {
-      level: "error",
-      message: res.status === 413 ? "数据上报失败，请求体过大" : "数据上报失败",
-      data: {
-        status: res.status,
-        eventCount: taggedEvents.length,
-        traceId,
-        projectId,
-      },
-      metricName: "plugin.langfuse.ingestion.error",
-      metricValue: 1,
-      tags: {
-        status: String(res.status),
-        eventCount: String(taggedEvents.length),
-        reason: res.status === 413 ? "payload_too_large" : "request_failed",
-      },
-    })
+    const responseBody = summarizeResponseBody(text)
+    const reason = res.status === 413 ? "payload_too_large" : "request_failed"
+    const statusText = res.statusText || ""
+    if (shouldLogIngestionFailure()) {
+      trackEvent("both", {
+        level: "error",
+        message: `数据上报失败: HTTP ${res.status}${statusText ? ` ${statusText}` : ""}${responseBody ? ` - ${responseBody.slice(0, 300)}` : ""}`,
+        data: {
+          status: res.status,
+          statusText,
+          reason,
+          responseBody,
+          traceId,
+          projectId,
+        },
+        metricName: "plugin.langfuse.ingestion.error",
+        metricValue: 1,
+        tags: ingestionDiagnosticTags(taggedEvents, {
+          node: "ingestion",
+          action: "upload_batch",
+          status: "failed",
+          source,
+          httpStatus: String(res.status),
+          reason,
+        }),
+      })
+    }
     return { successes: [], errors: taggedEvents.map((event) => ({ id: event.id, status: res.status, error: text })) }
   } catch (e) {
-    trackEvent("both", {
-      level: "error",
-      message: "数据上报异常",
-      data: {
-        error: String(e),
-        traceId,
-        projectId,
-      },
-      metricName: "plugin.langfuse.ingestion.error",
-      metricValue: 1,
-      tags: {
-        error: "exception",
-      },
-    })
+    const errorDetail = normalizeErrorDetail(e)
+    const isTimeout = errorDetail.name === "AbortError"
+    if (shouldLogIngestionFailure()) {
+      trackEvent("both", {
+        level: "error",
+        message: `数据上报异常: ${errorDetail.name}${errorDetail.message ? ` - ${errorDetail.message}` : ""}`,
+        data: {
+          error: errorDetail,
+          reason: isTimeout ? "timeout" : "exception",
+          traceId,
+          projectId,
+        },
+        metricName: "plugin.langfuse.ingestion.error",
+        metricValue: 1,
+        tags: ingestionDiagnosticTags(taggedEvents, {
+          node: "ingestion",
+          action: "upload_batch",
+          status: "exception",
+          source,
+          error: isTimeout ? "timeout" : "exception",
+        }),
+      })
+    }
     return { successes: [], errors: taggedEvents.map((event) => ({ id: event.id, status: 500, error: String(e) })) }
   }
 }
@@ -769,7 +1479,10 @@ function buildIngestionEvent(type: string, body: any, timestamp = new Date().toI
     id: generateUUID(),
     timestamp,
     type,
-    body: withEventMetadataTags(body, hookReceivedAt),
+    body: {
+      ...withEventMetadataTags(body, hookReceivedAt),
+      release: TESTAGENT_VERSION,
+    },
   }
 }
 
@@ -793,6 +1506,31 @@ function getFailedEvents(events: any[], result: any): any[] {
   return events.filter((event) => errorIds.has(event.id))
 }
 
+function getOversizedIngestionEvents(events: any[], result: any): any[] {
+  const errors = Array.isArray(result?.errors) ? result.errors : []
+  if (errors.length === 0) return []
+
+  const successIds = new Set((Array.isArray(result?.successes) ? result.successes : []).map((s: any) => s?.id).filter(Boolean))
+  const batchOversized = errors.some((e: any) => e?.id === "batch" && Number(e?.status) === 413)
+  const oversizedIds = new Set(
+    errors
+      .map((e: any) => (Number(e?.status) === 413 ? e?.id : undefined))
+      .filter((id: string) => id && id !== "batch"),
+  )
+
+  if (batchOversized) return events.filter((event) => !successIds.has(event.id))
+  return events.filter((event) => oversizedIds.has(event.id))
+}
+
+function getIngestionObservationKey(event: any): string {
+  const type = typeof event?.type === "string" ? event.type : "unknown"
+  const observationType = type.split("-")[0] || "unknown"
+  const body = event?.body ?? {}
+  const observationId = body.id || body.traceId || event?.id
+  const traceId = body.traceId || (observationType === "trace" ? observationId : "unknown-trace")
+  return `${observationType}:${traceId}:${observationId}`
+}
+
 function isValidIngestionEvent(event: any) {
   return (
     !!event &&
@@ -803,117 +1541,218 @@ function isValidIngestionEvent(event: any) {
   )
 }
 
-function configureFailedIngestionQueue(projectKey: string) {
-  const safeProjectKey = projectKey.replace(/[^a-zA-Z0-9_-]/g, "_")
-  failedIngestionQueueFile = join(TESTAGENT_DATA_DIR, `langfuse-ingestion-queue-${safeProjectKey}.json`)
-  failedIngestionQueueLoaded = false
-  failedIngestionEvents.splice(0)
+function getIngestionUpdateKey(event: any): string | undefined {
+  if (!event?.type?.endsWith("-update") || !event?.body?.id) return
+  return `${event.type}:${event.body.id}`
 }
 
-function persistFailedIngestionEvents() {
-  try {
-    mkdirSync(dirname(failedIngestionQueueFile), { recursive: true })
-    const tmpFile = `${failedIngestionQueueFile}.tmp`
-    writeFileSync(tmpFile, JSON.stringify(failedIngestionEvents, null, 2), "utf-8")
-    renameSync(tmpFile, failedIngestionQueueFile)
-  } catch (e) {
-    trackEvent("both", {
-      level: "error",
-      message: "持久化数据上报重试队列失败",
-      data: { error: String(e) },
-      metricName: "plugin.langfuse.persist.error",
-      metricValue: 1,
-      tags: { type: "ingestionRetryQueue", action: "persist", reason: "exception" },
-    })
+function getBackgroundIngestionQueueSize() {
+  return backgroundIngestionEvents.length - backgroundIngestionHead
+}
+
+function rebuildPendingBackgroundUpdateEvents() {
+  pendingBackgroundUpdateEvents.clear()
+  for (let index = backgroundIngestionHead; index < backgroundIngestionEvents.length; index += 1) {
+    const updateKey = getIngestionUpdateKey(backgroundIngestionEvents[index])
+    if (updateKey) pendingBackgroundUpdateEvents.set(updateKey, index)
   }
 }
 
-function loadFailedIngestionEventsFromDisk() {
-  if (failedIngestionQueueLoaded) return
-  failedIngestionQueueLoaded = true
-  if (!existsSync(failedIngestionQueueFile)) {
-    trackEvent("metric", {
-      metricName: "plugin.langfuse.queue.load.success",
-      metricValue: 1,
-      tags: { type: "ingestionRetryQueue", status: "missing_file" },
-    })
+function compactBackgroundIngestionQueue() {
+  if (backgroundIngestionHead === 0) return
+  if (backgroundIngestionHead === backgroundIngestionEvents.length) {
+    backgroundIngestionEvents = []
+    backgroundIngestionHead = 0
+    pendingBackgroundUpdateEvents.clear()
     return
   }
+  if (backgroundIngestionHead < 1024 && backgroundIngestionHead * 2 < backgroundIngestionEvents.length) return
 
+  backgroundIngestionEvents = backgroundIngestionEvents.slice(backgroundIngestionHead)
+  backgroundIngestionHead = 0
+  rebuildPendingBackgroundUpdateEvents()
+}
+
+function removePendingBackgroundUpdateIndexes(start: number, end: number) {
+  for (let index = start; index < end; index += 1) {
+    const updateKey = getIngestionUpdateKey(backgroundIngestionEvents[index])
+    if (updateKey && pendingBackgroundUpdateEvents.get(updateKey) === index) {
+      pendingBackgroundUpdateEvents.delete(updateKey)
+    }
+  }
+}
+
+function rebuildFailedIngestionUpdateEventIds() {
+  failedIngestionUpdateEventIds.clear()
+  for (const event of failedIngestionEvents) {
+    const updateKey = getIngestionUpdateKey(event)
+    if (!updateKey) continue
+    const eventIds = failedIngestionUpdateEventIds.get(updateKey) ?? new Set<string>()
+    eventIds.add(event.id)
+    failedIngestionUpdateEventIds.set(updateKey, eventIds)
+  }
+}
+
+function removeSupersededFailedIngestionUpdates(events: any[], retainedEventIds = new Set<string>()) {
+  const updateKeys = new Set(events.map(getIngestionUpdateKey).filter(Boolean))
+  if (updateKeys.size === 0 || failedIngestionEvents.length === 0) return
+
+  const supersededEventIds = new Set<string>()
+  for (const updateKey of updateKeys) {
+    for (const eventId of failedIngestionUpdateEventIds.get(updateKey) ?? []) {
+      if (!retainedEventIds.has(eventId)) supersededEventIds.add(eventId)
+    }
+  }
+  if (supersededEventIds.size === 0) return
+
+  const remainingEvents = failedIngestionEvents.filter((event) => !supersededEventIds.has(event.id))
+  replaceFailedIngestionEvents(remainingEvents)
+  if (remainingEvents.length === 0) {
+    failedIngestionRetryAttempt = 0
+    failedIngestionNextRetryAt = 0
+    backgroundBatchesSinceFailedRetry = 0
+  }
+}
+
+function resetFailedIngestionQueue() {
+  failedIngestionEvents.splice(0)
+  failedIngestionQueueBytes = 0
+  failedIngestionRetryAttempt = 0
+  failedIngestionNextRetryAt = 0
+  backgroundBatchesSinceFailedRetry = 0
+  pendingBackgroundUpdateEvents.clear()
+  failedIngestionUpdateEventIds.clear()
+  // oversizedIngestionObservationKeys.clear()
+}
+
+async function deletePersistedFailedIngestionQueues() {
   try {
-    const raw = readFileSync(failedIngestionQueueFile, "utf-8")
-    const persistedEvents = JSON.parse(raw)
-    if (!Array.isArray(persistedEvents)) {
+    const entries = await readdir(TESTAGENT_DATA_DIR, { withFileTypes: true })
+    const queueFiles = entries.filter(
+      (entry) => entry.isFile() && /^langfuse-ingestion-queue(?:-.*)?\.json$/.test(entry.name),
+    )
+
+    const deletionResults = await Promise.allSettled(
+      queueFiles.map((entry) => unlink(join(TESTAGENT_DATA_DIR, entry.name))),
+    )
+    const failedFiles = queueFiles
+      .filter((_, index) => deletionResults[index]?.status === "rejected")
+      .map((entry) => entry.name)
+
+    if (failedFiles.length > 0) {
       trackEvent("both", {
         level: "warn",
-        message: "加载重试队列，数据格式异常",
-        data: { file: failedIngestionQueueFile },
-        metricName: "plugin.langfuse.load.error",
-        metricValue: 1,
-        tags: { type: "ingestionRetryQueue", reason: "invalid_format" },
+        message: "删除历史数据上报重试队列失败",
+        data: { failedFiles },
+        metricName: "plugin.langfuse.queue.cleanup.error",
+        metricValue: failedFiles.length,
+        tags: { type: "ingestionRetryQueue", action: "delete", reason: "exception" },
       })
-      return
     }
-
-    const validPersistedEvents = persistedEvents.filter(isValidIngestionEvent)
-    enqueueFailedIngestionEvents(validPersistedEvents, { persist: false })
-    if (validPersistedEvents.length !== persistedEvents.length) {
-      persistFailedIngestionEvents()
-    }
-    trackEvent("metric", {
-      metricName: "plugin.langfuse.queue.load.success",
-      metricValue: 1,
-      tags: {
-        type: "ingestionRetryQueue",
-        status: "loaded",
-        eventCount: String(validPersistedEvents.length),
-      },
-    })
-  } catch (e) {
+  } catch (e: any) {
+    if (e?.code === "ENOENT") return
     trackEvent("both", {
-      level: "error",
-      message: "加载重试队列异常",
-      data: { error: String(e), file: failedIngestionQueueFile },
-      metricName: "plugin.langfuse.load.error",
+      level: "warn",
+      message: "扫描历史数据上报重试队列失败",
+      data: { error: String(e), directory: TESTAGENT_DATA_DIR },
+      metricName: "plugin.langfuse.queue.cleanup.error",
       metricValue: 1,
-      tags: { type: "ingestionRetryQueue", reason: "exception" },
+      tags: { type: "ingestionRetryQueue", action: "scan", reason: "exception" },
     })
   }
 }
 
-function enqueueFailedIngestionEvents(events: any[], options?: { persist?: boolean }) {
-  if (events.length === 0) return
+function getIngestionEventByteLength(event: any): number | undefined {
+  try {
+    if (event && typeof event === "object") {
+      const cached = ingestionEventByteLengths.get(event)
+      if (cached !== undefined) return cached
+      const byteLength = jsonByteLength(event)
+      ingestionEventByteLengths.set(event, byteLength)
+      return byteLength
+    }
+    return jsonByteLength(event)
+  } catch {
+    return undefined
+  }
+}
+
+function getBackgroundIngestionEventByteLength(event: any) {
+  return getIngestionEventByteLength(event) ?? 0
+}
+
+function removeBackgroundIngestionEvents(end: number) {
+  const start = backgroundIngestionHead
+  const events = backgroundIngestionEvents.slice(start, end)
+  for (const event of events) {
+    backgroundIngestionBytes = Math.max(0, backgroundIngestionBytes - getBackgroundIngestionEventByteLength(event))
+  }
+  removePendingBackgroundUpdateIndexes(start, end)
+  backgroundIngestionHead = end
+  compactBackgroundIngestionQueue()
+  return events
+}
+
+function enqueueFailedIngestionEvents(events: any[]) {
+  if (events.length === 0) return []
 
   const existingIds = new Set(failedIngestionEvents.map((event) => event.id))
+  const acceptedEvents: any[] = []
+  let droppedCount = 0
   for (const event of events) {
     if (!isValidIngestionEvent(event) || existingIds.has(event.id)) continue
-    failedIngestionEvents.push(withEventBodyTags(event))
+    const taggedEvent = withEventBodyTags(event)
+    const eventBytes = getIngestionEventByteLength(taggedEvent)
+    if (
+      eventBytes === undefined ||
+      failedIngestionEvents.length >= MAX_FAILED_INGESTION_EVENTS ||
+      failedIngestionQueueBytes + eventBytes > MAX_FAILED_INGESTION_QUEUE_BYTES
+    ) {
+      droppedCount += 1
+      continue
+    }
+
+    failedIngestionEvents.push(taggedEvent)
+    acceptedEvents.push(taggedEvent)
+    failedIngestionQueueBytes += eventBytes
     existingIds.add(event.id)
+    const updateKey = getIngestionUpdateKey(taggedEvent)
+    if (updateKey) {
+      const eventIds = failedIngestionUpdateEventIds.get(updateKey) ?? new Set<string>()
+      eventIds.add(taggedEvent.id)
+      failedIngestionUpdateEventIds.set(updateKey, eventIds)
+    }
   }
 
-  if (failedIngestionEvents.length > MAX_FAILED_INGESTION_EVENTS) {
+  if (droppedCount > 0 && Date.now() - lastFailedIngestionQueueDropLogAt >= INGESTION_FAILURE_LOG_INTERVAL_MS) {
+    lastFailedIngestionQueueDropLogAt = Date.now()
     trackEvent("both", {
       level: "warn",
-      message: "数据上报重试队列超过建议上限，暂不裁剪以避免数据丢失",
-      data: { queueSize: failedIngestionEvents.length, maxQueueSize: MAX_FAILED_INGESTION_EVENTS },
-      metricName: "plugin.langfuse.queue.size.warning",
-      metricValue: 1,
-      tags: {
-        type: "ingestionRetryQueue",
-        queueSize: String(failedIngestionEvents.length),
-        maxQueueSize: String(MAX_FAILED_INGESTION_EVENTS),
+      message: "数据上报重试队列已达上限，丢弃新增事件",
+      data: {
+        droppedCount,
+        queueSize: failedIngestionEvents.length,
+        queueBytes: failedIngestionQueueBytes,
+        maxQueueSize: MAX_FAILED_INGESTION_EVENTS,
+        maxQueueBytes: MAX_FAILED_INGESTION_QUEUE_BYTES,
       },
+      metricName: "plugin.langfuse.queue.drop",
+      metricValue: droppedCount,
+      tags: { type: "ingestionRetryQueue", reason: "queue_limit" },
     })
   }
 
-  if (options?.persist !== false) {
-    persistFailedIngestionEvents()
+  // Keep an older failed update until its replacement is safely in the in-memory retry queue.
+  if (acceptedEvents.length > 0) {
+    removeSupersededFailedIngestionUpdates(acceptedEvents, new Set(acceptedEvents.map((event) => event.id)))
   }
+  return acceptedEvents
 }
 
 function replaceFailedIngestionEvents(events: any[]) {
   failedIngestionEvents.splice(0, failedIngestionEvents.length, ...events)
-  persistFailedIngestionEvents()
+  failedIngestionQueueBytes = events.reduce((total, event) => total + (getIngestionEventByteLength(event) ?? 0), 0)
+  rebuildFailedIngestionUpdateEventIds()
 }
 
 function markIngestionEventsAttempted(events: any[], failedEvents: any[]) {
@@ -925,16 +1764,124 @@ function markIngestionEventsAttempted(events: any[], failedEvents: any[]) {
   replaceFailedIngestionEvents(remainingEvents)
 }
 
+function getRetryableFailedIngestionEvents(events: any[], result: any): any[] {
+  const failedEvents = getFailedEvents(events, result)
+  const oversizedEvents = getOversizedIngestionEvents(events, result)
+  const oversizedIds = new Set(oversizedEvents.map((event) => event.id))
+  if (oversizedEvents.length > 0) {
+    trackEvent("both", {
+      level: "warn",
+      message: "数据上报内容过大，已丢弃且不会重试",
+      data: { droppedCount: oversizedEvents.length },
+      metricName: "plugin.langfuse.queue.drop",
+      metricValue: oversizedEvents.length,
+      tags: { type: "ingestionRetryQueue", reason: "payload_too_large" },
+    })
+  }
+  return failedEvents.filter((event) => !oversizedIds.has(event.id))
+}
+
+function applyFailedIngestionRetryLimit(events: any[], options?: { countRetryAttempt?: boolean }): any[] {
+  const retryableEvents: any[] = []
+  let droppedCount = 0
+  const countRetryAttempt = options?.countRetryAttempt !== false
+
+  for (const event of events) {
+    const retryCount = Number(event.__langfuseRetryCount ?? 0) + (countRetryAttempt ? 1 : 0)
+    if (retryCount >= MAX_FAILED_INGESTION_RETRY_ATTEMPTS && countRetryAttempt) {
+      droppedCount += 1
+      continue
+    }
+    if (countRetryAttempt) {
+      event.__langfuseRetryCount = retryCount
+      ingestionEventByteLengths.delete(event)
+    }
+    retryableEvents.push(event)
+  }
+
+  if (droppedCount > 0) {
+    trackEvent("both", {
+      level: "warn",
+      message: "数据上报重试次数已达上限，丢弃事件",
+      data: { droppedCount, maxRetryAttempts: MAX_FAILED_INGESTION_RETRY_ATTEMPTS },
+      metricName: "plugin.langfuse.queue.drop",
+      metricValue: droppedCount,
+      tags: { type: "ingestionRetryQueue", reason: "retry_attempts_exhausted" },
+    })
+  }
+
+  return retryableEvents
+}
+
+function recordIngestionAttemptOutcome(retryableFailureCount: number) {
+  if (retryableFailureCount === 0) {
+    failedIngestionRetryAttempt = 0
+    failedIngestionNextRetryAt = 0
+    return
+  }
+
+  failedIngestionRetryAttempt += 1
+  failedIngestionNextRetryAt = Date.now() + getFailedIngestionRetryDelayMs()
+}
+
+function getFailedIngestionRetryDelayMs() {
+  if (failedIngestionRetryAttempt === 0) return 0
+
+  const exponentialDelay = Math.min(
+    FAILED_INGESTION_RETRY_BASE_DELAY_MS * 2 ** Math.max(0, failedIngestionRetryAttempt - 1),
+    FAILED_INGESTION_RETRY_MAX_DELAY_MS,
+  )
+  return exponentialDelay + Math.round(exponentialDelay * Math.random() * 0.25)
+}
+
+function scheduleInitialFailedIngestionRetry() {
+  if (failedIngestionNextRetryAt > 0) return
+  failedIngestionRetryAttempt = Math.max(1, failedIngestionRetryAttempt)
+  failedIngestionNextRetryAt = Date.now() + getFailedIngestionRetryDelayMs()
+}
+
+function isFailedIngestionRetryDue() {
+  return failedIngestionNextRetryAt === 0 || Date.now() >= failedIngestionNextRetryAt
+}
+
+function getFailedIngestionRetryWaitMs() {
+  return Math.max(0, failedIngestionNextRetryAt - Date.now())
+}
+
 async function retryFailedIngestionEvents() {
-  loadFailedIngestionEventsFromDisk()
-  if (retryingFailedIngestionEvents || failedIngestionEvents.length === 0) return
+  if (retryingFailedIngestionEvents || failedIngestionEvents.length === 0 || !isFailedIngestionRetryDue()) return
 
   retryingFailedIngestionEvents = true
   const events = failedIngestionEvents.slice(0, FAILED_INGESTION_RETRY_BATCH_SIZE)
+  trackEvent("metric", {
+    metricName: "plugin.langfuse.queue.retry.attempt",
+    metricValue: 1,
+    tags: ingestionDiagnosticTags(events, {
+      node: "ingestionRetryQueue",
+      action: "retry_upload",
+      status: "started",
+      queueSizeBefore: String(failedIngestionEvents.length),
+    }),
+  })
   try {
-    const result = await uploadToIngestion(events)
-    const failedEvents = getFailedEvents(events, result)
-    markIngestionEventsAttempted(events, failedEvents)
+    const result = await uploadToIngestion(events, "retry")
+    const retryableFailedEvents = getRetryableFailedIngestionEvents(events, result)
+    const retainedFailedEvents = applyFailedIngestionRetryLimit(retryableFailedEvents)
+    markIngestionEventsAttempted(events, retainedFailedEvents)
+    trackEvent("metric", {
+      metricName: "plugin.langfuse.queue.retry.result",
+      metricValue: 1,
+      tags: ingestionDiagnosticTags(events, {
+        node: "ingestionRetryQueue",
+        action: "retry_upload",
+        status: retainedFailedEvents.length === 0 ? "all_removed" : "partially_retained",
+        attemptedCount: String(events.length),
+        retainedCount: String(retainedFailedEvents.length),
+        queueSizeAfter: String(failedIngestionEvents.length),
+      }),
+    })
+    recordIngestionAttemptOutcome(retainedFailedEvents.length)
+    backgroundBatchesSinceFailedRetry = 0
   } finally {
     retryingFailedIngestionEvents = false
   }
@@ -943,49 +1890,132 @@ async function retryFailedIngestionEvents() {
 async function ingestEvents(events: any[], options?: { queueOnFailure?: boolean }) {
   if (events.length === 0) return { successes: [], errors: [] }
 
-  const shouldPersistOutbox = options?.queueOnFailure !== false
-  const result = await uploadToIngestion(events)
-  const failedEvents = getFailedEvents(events, result)
+  const shouldQueueForRetry = options?.queueOnFailure !== false
+  const result = await uploadToIngestion(events, "background")
+  const succeededIds = new Set((Array.isArray(result.successes) ? result.successes : []).map((event: any) => event?.id))
+  const succeededUpdateEvents = events.filter((event) => succeededIds.has(event.id) && getIngestionUpdateKey(event))
+  if (succeededUpdateEvents.length > 0) {
+    removeSupersededFailedIngestionUpdates(succeededUpdateEvents)
+  }
+  const retryableFailedEvents = getRetryableFailedIngestionEvents(events, result)
+  const retainedFailedEvents = applyFailedIngestionRetryLimit(retryableFailedEvents, { countRetryAttempt: false })
 
-  if (shouldPersistOutbox && failedEvents.length > 0) {
-    enqueueFailedIngestionEvents(failedEvents)
+  if (shouldQueueForRetry && retainedFailedEvents.length > 0) {
+    enqueueFailedIngestionEvents(retainedFailedEvents)
   }
 
-  return result
+  return { ...result, retryableFailureCount: retainedFailedEvents.length }
 }
 
 function scheduleBackgroundIngestion(events: any[]) {
   if (events.length === 0) return
 
-  backgroundIngestionEvents.push(...events)
-  if (backgroundIngestionEvents.length > MAX_BACKGROUND_INGESTION_EVENTS) {
-    const overflowEvents = backgroundIngestionEvents.splice(0, backgroundIngestionEvents.length - MAX_BACKGROUND_INGESTION_EVENTS)
-    enqueueFailedIngestionEvents(overflowEvents)
+  for (const event of events) {
+    const updateKey = getIngestionUpdateKey(event)
+    const existingIndex = updateKey ? pendingBackgroundUpdateEvents.get(updateKey) : undefined
+    if (existingIndex !== undefined) {
+      if (existingIndex >= backgroundIngestionHead) {
+        backgroundIngestionBytes = Math.max(
+          0,
+          backgroundIngestionBytes - getBackgroundIngestionEventByteLength(backgroundIngestionEvents[existingIndex]),
+        )
+        backgroundIngestionEvents[existingIndex] = event
+        backgroundIngestionBytes += getBackgroundIngestionEventByteLength(event)
+        pendingBackgroundUpdateEvents.set(updateKey!, existingIndex)
+        continue
+      }
+      pendingBackgroundUpdateEvents.delete(updateKey!)
+    }
+
+    backgroundIngestionEvents.push(event)
+    backgroundIngestionBytes += getBackgroundIngestionEventByteLength(event)
+    if (updateKey) pendingBackgroundUpdateEvents.set(updateKey, backgroundIngestionEvents.length - 1)
   }
 
+  if (
+    getBackgroundIngestionQueueSize() > MAX_BACKGROUND_INGESTION_EVENTS ||
+    backgroundIngestionBytes > MAX_BACKGROUND_INGESTION_BYTES
+  ) {
+    let remainingCount = getBackgroundIngestionQueueSize()
+    let remainingBytes = backgroundIngestionBytes
+    let overflowEnd = backgroundIngestionHead
+    while (
+      overflowEnd < backgroundIngestionEvents.length &&
+      (remainingCount > MAX_BACKGROUND_INGESTION_EVENTS || remainingBytes > MAX_BACKGROUND_INGESTION_BYTES)
+    ) {
+      remainingCount -= 1
+      remainingBytes = Math.max(0, remainingBytes - getBackgroundIngestionEventByteLength(backgroundIngestionEvents[overflowEnd]))
+      overflowEnd += 1
+    }
+    removeBackgroundIngestionEvents(overflowEnd)
+    // 排查期间丢弃后台队列溢出的 event，不转入失败重试队列。
+  }
+
+  trackEvent("metric", {
+    metricName: "plugin.langfuse.ingestion.queue.enqueued",
+    metricValue: events.length,
+    tags: ingestionDiagnosticTags(events, {
+      node: "backgroundIngestionQueue",
+      action: "enqueue",
+      status: "scheduled",
+      queueSize: String(getBackgroundIngestionQueueSize()),
+      queueBytes: String(backgroundIngestionBytes),
+    }),
+  })
   scheduleBackgroundIngestionDrain()
 }
 
 function scheduleBackgroundIngestionDrain(delayMs = 0) {
-  if (backgroundIngestionDrainPromise || backgroundIngestionDrainScheduled) return
+  if (backgroundIngestionDrainPromise) return
+
+  const scheduledAt = Date.now() + delayMs
+  if (backgroundIngestionDrainScheduled && backgroundIngestionDrainScheduledAt <= scheduledAt) return
+  if (backgroundIngestionDrainTimer) clearTimeout(backgroundIngestionDrainTimer)
 
   backgroundIngestionDrainScheduled = true
-  setTimeout(() => {
+  backgroundIngestionDrainScheduledAt = scheduledAt
+
+  backgroundIngestionDrainTimer = setTimeout(() => {
+    backgroundIngestionDrainTimer = null
     backgroundIngestionDrainScheduled = false
+    backgroundIngestionDrainScheduledAt = 0
     void drainBackgroundIngestion()
-  }, delayMs)
+  }, Math.max(0, delayMs))
+  if (delayMs > 0) backgroundIngestionDrainTimer.unref?.()
 }
 
-async function drainBackgroundIngestion() {
+async function drainBackgroundIngestion(options?: { retryFailed?: boolean }) {
   if (backgroundIngestionDrainPromise) return backgroundIngestionDrainPromise
 
   backgroundIngestionDrainPromise = (async () => {
+    // Ensure the promise is assigned before an empty queue can reach finally.
+    await Promise.resolve()
+    const allowFailedRetry = FAILED_INGESTION_RETRY_ENABLED && options?.retryFailed !== false
     try {
-      while (backgroundIngestionEvents.length > 0) {
-        const events = backgroundIngestionEvents.splice(0, BACKGROUND_INGESTION_BATCH_SIZE)
-        await ingestEvents(events, { queueOnFailure: true })
+      while (getBackgroundIngestionQueueSize() > 0) {
+        if (
+          allowFailedRetry &&
+          failedIngestionEvents.length > 0 &&
+          backgroundBatchesSinceFailedRetry >= BACKGROUND_BATCHES_BEFORE_FAILED_RETRY &&
+          isFailedIngestionRetryDue()
+        ) {
+          await retryFailedIngestionEvents()
+        }
+
+        const batchEnd = Math.min(
+          backgroundIngestionHead + BACKGROUND_INGESTION_BATCH_SIZE,
+          backgroundIngestionEvents.length,
+        )
+        const events = removeBackgroundIngestionEvents(batchEnd)
+        const result = await ingestEvents(events, { queueOnFailure: true })
+        if (result.retryableFailureCount > 0 && failedIngestionRetryAttempt === 0) {
+          scheduleInitialFailedIngestionRetry()
+        }
+        backgroundBatchesSinceFailedRetry += 1
       }
-      await retryFailedIngestionEvents()
+      if (allowFailedRetry && failedIngestionEvents.length > 0 && isFailedIngestionRetryDue()) {
+        await retryFailedIngestionEvents()
+      }
     } catch (e) {
       trackEvent("both", {
         level: "error",
@@ -997,10 +2027,10 @@ async function drainBackgroundIngestion() {
       })
     } finally {
       backgroundIngestionDrainPromise = null
-      if (backgroundIngestionEvents.length > 0) {
+      if (getBackgroundIngestionQueueSize() > 0) {
         scheduleBackgroundIngestionDrain()
-      } else if (failedIngestionEvents.length > 0) {
-        scheduleBackgroundIngestionDrain(FAILED_INGESTION_RETRY_DELAY_MS)
+      } else if (FAILED_INGESTION_RETRY_ENABLED && failedIngestionEvents.length > 0) {
+        scheduleBackgroundIngestionDrain(getFailedIngestionRetryWaitMs())
       }
     }
   })()
@@ -1009,7 +2039,23 @@ async function drainBackgroundIngestion() {
 }
 
 async function flushBackgroundUploads() {
-  await drainBackgroundIngestion()
+  const drainPromise = drainBackgroundIngestion({ retryFailed: false })
+  let timeout: ReturnType<typeof setTimeout> | null = null
+  const drained = await Promise.race([
+    drainPromise.then(() => true),
+    new Promise<boolean>((resolve) => {
+      timeout = setTimeout(() => resolve(false), FLUSH_BACKGROUND_UPLOAD_TIMEOUT_MS)
+    }),
+  ])
+  if (timeout) clearTimeout(timeout)
+
+  if (!drained && getBackgroundIngestionQueueSize() > 0) {
+    backgroundIngestionEvents = []
+    backgroundIngestionHead = 0
+    backgroundIngestionBytes = 0
+    pendingBackgroundUpdateEvents.clear()
+    // 退出时直接丢弃尚未上传的 event，避免下次启动重传。
+  }
 }
 
 function traceEventBody(batch: TraceBatch) {
@@ -1026,10 +2072,62 @@ function traceEventBody(batch: TraceBatch) {
   }
 }
 
-function upsertTraceImmediately(batch: TraceBatch) {
+function enqueueTraceUpsert(batch: TraceBatch) {
+  const body = traceEventBody(batch)
+  const snapshot = JSON.stringify(body)
+  if (lastEnqueuedTraceSnapshots.get(batch.id) === snapshot) return
+
   const type = uploadedTraceIds.has(batch.id) ? "trace-update" : "trace-create"
-  scheduleBackgroundIngestion([buildIngestionEvent(type, traceEventBody(batch))])
+  const event = buildIngestionEvent(type, body)
+  trackEvent("metric", {
+    metricName: "plugin.langfuse.trace.ingestion.enqueued",
+    metricValue: 1,
+    tags: ingestionDiagnosticTags([event], {
+      node: "traceUpsert",
+      action: "enqueue_ingestion_event",
+      status: "scheduled",
+      sessionId: batch.sessionId,
+      traceId: batch.id,
+    }),
+  })
+  scheduleBackgroundIngestion([event])
+  lastEnqueuedTraceSnapshots.set(batch.id, snapshot)
   uploadedTraceIds.add(batch.id)
+}
+
+function flushPendingTraceUpsert(traceId: string) {
+  const batch = pendingTraceUpserts.get(traceId)
+  if (!batch) return
+
+  pendingTraceUpserts.delete(traceId)
+  enqueueTraceUpsert(batch)
+}
+
+function flushAllPendingTraceUpserts() {
+  if (traceUpsertTimer) {
+    clearTimeout(traceUpsertTimer)
+    traceUpsertTimer = null
+  }
+
+  for (const traceId of [...pendingTraceUpserts.keys()]) {
+    flushPendingTraceUpsert(traceId)
+  }
+}
+
+function upsertTraceImmediately(batch: TraceBatch, immediate = false) {
+  pendingTraceUpserts.set(batch.id, batch)
+  if (immediate) {
+    flushPendingTraceUpsert(batch.id)
+    return
+  }
+  if (traceUpsertTimer) return
+
+  traceUpsertTimer = setTimeout(() => {
+    traceUpsertTimer = null
+    for (const traceId of [...pendingTraceUpserts.keys()]) {
+      flushPendingTraceUpsert(traceId)
+    }
+  }, TRACE_UPSERT_DEBOUNCE_MS)
 }
 
 function generationEventBody(gen: GenerationData) {
@@ -1055,19 +2153,36 @@ function generationEventBody(gen: GenerationData) {
 }
 
 function createGenerationImmediately(gen: GenerationData) {
+  gen.metadata = withTraceSkillInfo(gen.traceId, gen.metadata)
+  rememberObservationSkillInfoCount(gen.traceId, gen.id)
   scheduleBackgroundIngestion([buildIngestionEvent("generation-create", generationEventBody(gen), gen.startTime)])
 }
 
 function updateGenerationImmediately(traceId: string, genId: string, updates: Partial<GenerationData>) {
+  const normalizedUpdates =
+    updates.metadata !== undefined
+      ? { ...updates, metadata: withTraceSkillInfoForObservationUpdate(traceId, genId, updates.metadata) }
+      : updates
+  // A generation can be updated again after it has completed (for example when
+  // a subagent is reparented). Preserve the terminal time in every later
+  // update: some ingestion implementations otherwise use the event timestamp
+  // as the end boundary for an update that omits endTime.
+  const existingGeneration = traceBatches.get(traceId)?.generations.find((generation) => generation.id === genId)
+  const endTime = normalizedUpdates.endTime ?? existingGeneration?.endTime
   const modelMetadata = updates.metadata?.model ?? {}
   scheduleBackgroundIngestion([
-    buildIngestionEvent("generation-update", {
-      id: genId,
-      traceId,
-      selectedModel: modelMetadata.selectedModel,
-      resolvedModel: modelMetadata.resolvedModel,
-      ...updates,
-    }),
+    buildIngestionEvent(
+      "generation-update",
+      {
+        id: genId,
+        traceId,
+        selectedModel: modelMetadata.selectedModel,
+        resolvedModel: modelMetadata.resolvedModel,
+        ...normalizedUpdates,
+        ...(endTime ? { endTime } : {}),
+      },
+      endTime,
+    ),
   ])
 }
 
@@ -1088,15 +2203,37 @@ function spanEventBody(span: SpanData) {
 }
 
 function createSpanImmediately(span: SpanData) {
+  span.metadata = withTraceSkillInfo(span.traceId, span.metadata)
+  rememberObservationSkillInfoCount(span.traceId, span.id)
   scheduleBackgroundIngestion([buildIngestionEvent("span-create", spanEventBody(span), span.startTime)])
 }
 
 function updateSpanImmediately(traceId: string, spanId: string, updates: Partial<SpanData>) {
-  scheduleBackgroundIngestion([buildIngestionEvent("span-update", { id: spanId, traceId, ...updates })])
+  const normalizedUpdates =
+    updates.metadata !== undefined
+      ? { ...updates, metadata: withTraceSkillInfoForObservationUpdate(traceId, spanId, updates.metadata) }
+      : updates
+  // Do not let a late metadata/parent update reopen a completed tool span.
+  // Keep both the body endTime and ingestion timestamp on the original end.
+  const existingSpan = traceBatches.get(traceId)?.spans.find((span) => span.id === spanId)
+  const endTime = normalizedUpdates.endTime ?? existingSpan?.endTime
+  scheduleBackgroundIngestion([
+    buildIngestionEvent(
+      "span-update",
+      { id: spanId, traceId, ...normalizedUpdates, ...(endTime ? { endTime } : {}) },
+      endTime,
+    ),
+  ])
 }
 
 function hasOwn(obj: any, key: string) {
   return obj != null && Object.prototype.hasOwnProperty.call(obj, key)
+}
+
+function getToolPartCompletedAt(part: any, eventTime?: any): Date {
+  // Message-part events carry the server-side event timestamp. Prefer it over
+  // handler time: the plugin's async event queue can be delayed by a long run.
+  return getPartTimestamp(part, "end") ?? getEventTimestamp(eventTime) ?? new Date()
 }
 
 function stringifyToolOutput(output: any) {
@@ -1174,22 +2311,24 @@ function findUnresolvedToolSpan(
   return undefined
 }
 
-async function updateToolSpanOutput(
-  traceId: string,
-  spanId: string,
-  endTime: Date,
-  snapshot: { output: any; metadata?: any; title?: string },
-) {
+async function updateToolSpanOutput(traceId: string, spanId: string, endTime: Date, snapshot: ToolResultSnapshot) {
   const existingSpan = traceBatches.get(traceId)?.spans.find((span) => span.id === spanId)
   const spanOutput = toSpanOutput(snapshot.output)
   const spanUpdates: Partial<SpanData> = {
     ...(spanOutput !== undefined ? { output: spanOutput } : {}),
-    endTime: endTime.toISOString(),
+    // A completed tool result can be observed more than once: first from the
+    // message part and again when its result is included in the next LLM input.
+    // Keep the first completion time so a delayed duplicate does not inflate the
+    // tool duration.
+    endTime: existingSpan?.endTime ?? endTime.toISOString(),
     level: snapshot.output === null ? "ERROR" : "DEFAULT",
     metadata: {
       ...(existingSpan?.metadata || {}),
       spanKind: "TOOL",
       nodeType: existingSpan?.metadata?.nodeType || "tool",
+      ...(snapshot.toolStatus ? { toolStatus: snapshot.toolStatus } : {}),
+      ...(snapshot.toolPartCompleted !== undefined ? { toolPartCompleted: snapshot.toolPartCompleted } : {}),
+      ...(snapshot.toolCompletionSource ? { toolCompletionSource: snapshot.toolCompletionSource } : {}),
       tags: OBSERVATION_TAGS,
       output: {
         title: snapshot.title,
@@ -1217,12 +2356,15 @@ async function captureToolResultsFromMessages(messages: any[]) {
         output: part.state.output,
         metadata: part.metadata,
         title: part.title,
+        toolStatus: "completed",
+        toolPartCompleted: true,
+        toolCompletionSource: "message.part.updated",
       }
       toolResultSnapshots.set(callID, snapshot)
       await updateToolSpanOutputFromSnapshot(
         callID,
         sessionId ? sessionToTrace.get(sessionId) : currentTraceId,
-        new Date(),
+        snapshot.completedAt,
         snapshot,
       )
     }
@@ -1253,6 +2395,7 @@ async function captureToolResultsFromLLMInputMessages(messages: any[], sessionId
       output: message.content,
       metadata: { source: "llm-input-message" },
       title: toolName,
+      completedAt: callID ? toolResultSnapshots.get(callID)?.completedAt : undefined,
     }
     if (callID) {
       toolResultSnapshots.set(callID, snapshot)
@@ -1277,14 +2420,14 @@ async function updateToolSpanOutputFromSnapshot(
   callID: string,
   traceId: string | undefined,
   endTime: Date,
-  snapshot: { output: any; metadata?: any; title?: string },
+  snapshot: ToolResultSnapshot,
 ) {
   const callInfo = toolCallInfos.get(callID)
   const spanId = callInfo?.spanId ?? toolSpanIds.get(callID)
   const resolvedTraceId = callInfo?.traceId ?? traceId
   if (!spanId || !resolvedTraceId) return false
 
-  await updateToolSpanOutput(resolvedTraceId, spanId, endTime, snapshot)
+  await updateToolSpanOutput(resolvedTraceId, spanId, snapshot.completedAt ?? endTime, snapshot)
   return true
 }
 
@@ -1573,7 +2716,7 @@ async function finalizeGeneration(
   g: GenInfo,
   options?: { tokens?: any; endTime?: Date; removeActive?: boolean; finishReason?: string },
 ) {
-  const endTime = options?.endTime ?? new Date()
+  const endTime = g.responseEndTime ?? options?.endTime ?? new Date()
 
   if (!g.completionStartTime) {
     g.completionStartTime = endTime
@@ -1586,7 +2729,10 @@ async function finalizeGeneration(
   const normalizedUsage = normalizeUsage(options?.tokens)
   const usage = normalizedUsage
     ? { input: normalizedUsage.input, output: normalizedUsage.output, total: normalizedUsage.total }
-    : undefined
+    : { input: 0, output: 0, total: 0 }
+  // session.idle is a valid terminal event but does not carry the provider's
+  // finish reason. Keep the field present for downstream completion checks.
+  const finishReason = options?.finishReason || "unknown"
 
   const toolCallsOutput = g.toolCalls.map((tc) => ({
     type: "function",
@@ -1598,9 +2744,10 @@ async function finalizeGeneration(
 
   const structuredOutput = {
     text: fullText,
-    tool_calls: toolCallsOutput.length > 0 ? toolCallsOutput : undefined,
+    // Keep the response schema stable for text-only completions as well.
+    tool_calls: toolCallsOutput,
     usage: toOutputUsage(usage),
-    finish_reason: options?.finishReason,
+    finish_reason: finishReason,
   }
 
   const cachedMessages = llmInputs.get(sessionId)
@@ -1633,29 +2780,25 @@ async function finalizeGeneration(
   const generationUpdates: Partial<GenerationData> = {
     endTime: endTime.toISOString(),
     completionStartTime: g.completionStartTime?.toISOString(),
-    ...(usage ? { usage } : {}),
+    usage,
     output: JSON.stringify(structuredOutput, null, 2),
     modelParameters: {
       ...g.modelParameters,
-      ...(options?.finishReason ? { finish_reason: options.finishReason } : {}),
+      finish_reason: finishReason,
     },
-    tags: [...OBSERVATION_TAGS, ...(options?.finishReason ? [`finish_reason:${options.finishReason}`] : [])],
+    tags: [...OBSERVATION_TAGS, `finish_reason:${finishReason}`],
     metadata: {
       spanKind: "LLM",
       model: buildLLMModelMetadata(g),
       output: structuredOutput,
-      ...(usage
-        ? {
-            usage: {
-              unit: "tokens",
-              scope: "generation",
-              note:
-                "Langfuse generation usage is per LLM call. Input includes uncached input plus cache read/write; output includes visible output plus reasoning.",
-              ...(normalizedUsage?.details ? { details: normalizedUsage.details } : {}),
-              ...usage,
-            },
-          }
-        : {}),
+      finish_reason: finishReason,
+      usage: {
+        unit: "tokens",
+        scope: "generation",
+        note: "Langfuse generation usage is per LLM call. Input includes uncached input plus cache read/write; output includes visible output plus reasoning.",
+        ...(normalizedUsage?.details ? { details: normalizedUsage.details } : {}),
+        ...usage,
+      },
       tags: OBSERVATION_TAGS,
       ...baseMetadata(),
     },
@@ -1665,7 +2808,8 @@ async function finalizeGeneration(
   updateGenerationImmediately(g.traceId, g.genId, generationUpdates)
 
   g.finalOutput = structuredOutput
-  g.hasUsage = !!usage
+  g.responseEndTime = endTime
+  g.hasUsage = !!normalizedUsage
   if (options?.removeActive !== false) {
     deleteActiveGeneration(sessionId, g)
   }
@@ -1682,7 +2826,7 @@ async function flushTrace(traceId: string) {
   }
 
   try {
-    upsertTraceImmediately(batch)
+    upsertTraceImmediately(batch, true)
   } catch (e) {
     // console.error("[langfuse] Failed to flush trace", { traceId, error: e })
   }
@@ -1696,7 +2840,19 @@ async function flushAllTraces() {
   for (const traceId of traceBatches.keys()) {
     await flushTrace(traceId)
   }
+  flushAllPendingTraceUpserts()
   await flushBackgroundUploads()
+}
+
+function flushAllTracesOnce() {
+  if (shutdownFlushCompleted) return Promise.resolve()
+  if (shutdownFlushPromise) return shutdownFlushPromise
+
+  shutdownFlushPromise = flushAllTraces().finally(() => {
+    shutdownFlushCompleted = true
+    shutdownFlushPromise = null
+  })
+  return shutdownFlushPromise
 }
 
 // testagent_change start - install process-level handlers only once across plugin instances
@@ -1705,7 +2861,7 @@ function installProcessHandlers() {
   handlersInstalled = true
 
   const flush = async () => {
-    await flushAllTraces()
+    await flushAllTracesOnce()
   }
 
   process.on("beforeExit", flush)
@@ -1720,7 +2876,7 @@ function installProcessHandlers() {
       metricValue: 1,
       tags: { type: "uncaughtException", reason: "process_error" },
     })
-    await flushAllTraces()
+    await flushAllTracesOnce()
     process.exit(1)
   })
   process.on("unhandledRejection", async (reason) => {
@@ -1732,7 +2888,7 @@ function installProcessHandlers() {
       metricValue: 1,
       tags: { type: "unhandledRejection", reason: "process_error" },
     })
-    await flushAllTraces()
+    await flushAllTracesOnce()
   })
 }
 // testagent_change end
@@ -1743,6 +2899,8 @@ function installProcessHandlers() {
 function addGenerationToBatch(traceId: string, gen: GenerationData) {
   const batch = traceBatches.get(traceId)
   if (batch) {
+    gen.metadata = withTraceSkillInfo(traceId, gen.metadata)
+    rememberObservationSkillInfoCount(traceId, gen.id)
     batch.generations.push(gen)
   }
 }
@@ -1753,6 +2911,8 @@ function addGenerationToBatch(traceId: string, gen: GenerationData) {
 function addSpanToBatch(traceId: string, span: SpanData) {
   const batch = traceBatches.get(traceId)
   if (batch) {
+    span.metadata = withTraceSkillInfo(traceId, span.metadata)
+    rememberObservationSkillInfoCount(traceId, span.id)
     batch.spans.push(span)
   }
 }
@@ -1766,7 +2926,11 @@ function updateGenerationInBatch(traceId: string, genId: string, updates: Partia
 
   const idx = batch.generations.findIndex((g) => g.id === genId)
   if (idx !== -1) {
-    batch.generations[idx] = { ...batch.generations[idx], ...updates } as GenerationData
+    const normalizedUpdates =
+      updates.metadata !== undefined
+        ? { ...updates, metadata: withTraceSkillInfoForObservationUpdate(traceId, genId, updates.metadata) }
+        : updates
+    batch.generations[idx] = { ...batch.generations[idx], ...normalizedUpdates } as GenerationData
   }
 }
 
@@ -1779,7 +2943,11 @@ function updateSpanInBatch(traceId: string, spanId: string, updates: Partial<Spa
 
   const idx = batch.spans.findIndex((s) => s.id === spanId)
   if (idx !== -1) {
-    batch.spans[idx] = { ...batch.spans[idx], ...updates } as SpanData
+    const normalizedUpdates =
+      updates.metadata !== undefined
+        ? { ...updates, metadata: withTraceSkillInfoForObservationUpdate(traceId, spanId, updates.metadata) }
+        : updates
+    batch.spans[idx] = { ...batch.spans[idx], ...normalizedUpdates } as SpanData
   }
 }
 
@@ -2754,6 +3922,33 @@ type MetricTrackOptions = {
 type BothTrackOptions = LogTrackOptions & MetricTrackOptions
 type TrackOptions = LogTrackOptions | MetricTrackOptions | BothTrackOptions
 
+function diagnosticTagValue(values: string[]) {
+  const distinctValues = [...new Set(values.filter(Boolean))]
+  const value = distinctValues.join(",")
+  return value.length <= MAX_DIAGNOSTIC_TAG_VALUE_LENGTH ? value : value.slice(0, MAX_DIAGNOSTIC_TAG_VALUE_LENGTH)
+}
+
+function ingestionDiagnosticTags(
+  events: any[],
+  tags: Record<string, string | number | boolean> = {},
+): Record<string, string | number | boolean> {
+  const limitedEvents = events.slice(0, MAX_DIAGNOSTIC_BATCH_EVENT_IDS)
+  const traceIds = limitedEvents.map((event) => String(event?.body?.traceId || event?.body?.id || ""))
+  const eventIds = limitedEvents.map((event) => String(event?.id || ""))
+  const eventTypes = limitedEvents.map((event) => String(event?.type || "unknown"))
+  return {
+    ...tags,
+    runtimeId: PLUGIN_RUNTIME_ID,
+    pluginInstanceId: currentPluginInstanceId,
+    eventCount: String(events.length),
+    traceCount: String(new Set(traceIds.filter(Boolean)).size),
+    traceIds: diagnosticTagValue(traceIds),
+    eventIds: diagnosticTagValue(eventIds),
+    eventTypes: diagnosticTagValue(eventTypes),
+    eventListTruncated: events.length > limitedEvents.length,
+  }
+}
+
 /**
  * 共用埋点方法
  * @param type - 埋点类型：'log' | 'metric' | 'both'
@@ -2787,14 +3982,108 @@ function trackEvent(type: TrackType, options: TrackOptions): void {
   }
 }
 
+function scheduleSessionIdleFinalization(sessionId: string, traceId: string) {
+  if (pendingIdleFinalizations.has(sessionId)) return
+  pendingIdleFinalizations.add(sessionId)
+
+  setTimeout(() => {
+    pendingIdleFinalizations.delete(sessionId)
+    void finalizeSessionIdle(sessionId, traceId)
+  }, SESSION_IDLE_FINALIZATION_WAIT_MS)
+}
+
+async function finalizeSessionIdle(sessionId: string, traceId: string) {
+  if (!traceBatches.has(traceId)) return
+
+  if (sessionId !== rootSessionId && isSubagentSession(sessionId)) {
+    for (const g of allGenerations.filter(
+      (gen) => gen.sessionId === sessionId && gen.traceId === traceId && !gen.finalOutput,
+    )) {
+      await finalizeGeneration(sessionId, g)
+    }
+
+    const agentSpanId = sessionToAgentSpan.get(sessionId)
+    if (agentSpanId) {
+      const childGenerations = allGenerations.filter(
+        (g) => g.parentObservationId === agentSpanId && g.traceId === traceId,
+      )
+      const lastChildGeneration = childGenerations[childGenerations.length - 1]
+      const spanUpdates: Partial<SpanData> = {
+        endTime: new Date().toISOString(),
+        output: lastChildGeneration?.finalOutput?.text || userInputs.get(sessionId),
+      }
+      updateSpanInBatch(traceId, agentSpanId, spanUpdates)
+      updateSpanImmediately(traceId, agentSpanId, spanUpdates)
+      sessionToAgentSpan.delete(sessionId)
+    }
+
+    if (hasActiveSessionsForTrace(traceId)) {
+      activeGenerations.delete(sessionId)
+      pendingGenerations.delete(sessionId)
+      sessionSpanIds.delete(sessionId)
+      llmInputs.delete(sessionId)
+      systemPrompts.delete(sessionId)
+      userInputs.delete(sessionId)
+      sessionAssistantOutputs.delete(sessionId)
+      messageCounter.delete(sessionId)
+      sessionToTrace.delete(sessionId)
+      subagentParentBySession.delete(sessionId)
+      idleSessionIds.delete(sessionId)
+      trackedSessionIds.delete(sessionId)
+      pendingSubagentSessions.delete(sessionId)
+      return
+    }
+  }
+
+  if (hasActiveSessionsForTrace(traceId)) return
+
+  for (const g of allGenerations.filter((gen) => gen.traceId === traceId)) {
+    if (!g.finalOutput) await finalizeGeneration(g.sessionId || sessionId, g)
+  }
+
+  const currentBatch = traceBatches.get(traceId)
+  const traceOwnerSessionId = currentBatch?.sessionId || sessionId
+  const finalText =
+    getFinalTraceOutput(traceId, traceOwnerSessionId) ??
+    (currentBatch ? getFinalTraceOutputFromBatch(currentBatch) : undefined)
+  if (finalText !== undefined) {
+    updateTraceBatch(traceId, { output: finalText })
+    const batch = traceBatches.get(traceId)
+    if (batch) upsertTraceImmediately(batch, true)
+  }
+
+  scheduleBackgroundIngestionDrain()
+
+  const endedSessionIds = getSessionsForTrace(traceId)
+  cleanupTraceState(traceId, endedSessionIds)
+  refreshCurrentSessionPointers(traceId, endedSessionIds)
+  if (traceBatches.size === 0) {
+    skillCache.clear()
+    allToolDefs.clear()
+  }
+}
+
 // ==================== 插件主逻辑 ====================
 
 export const LangfusePlugin: Plugin = async (ctx) => {
+  currentPluginInstanceId = generateUUID()
+  shutdownFlushPromise = null
+  shutdownFlushCompleted = false
   const extendedCtx = ctx as unknown as ExtendedPluginInput
   pluginLog = extendedCtx.log
   pluginMetric = extendedCtx.metric
+  await deletePersistedFailedIngestionQueues()
+  sessionParentResolver = async (sessionId) => {
+    const result = await ctx.client.session.get({ path: { id: sessionId } })
+    return result.data?.parentID
+  }
 
   const user = User.get()
+  // const user = {
+  //   userId: "80295981",
+  //   userName: "张丹",
+  //   pathName: "总行/信息技术部/测试中心/测试技术团队/测试技术一室(成都)/测试技术二组",
+  // }
   let project_id: string | null = null
   publicKey = "pk-lf-d89067e9-5eb3-42cc-b947-2d82a1a9e181"
   secretKey = "sk-lf-773528e2-aa24-48d0-9791-b7f795cbfb9a"
@@ -2807,7 +4096,15 @@ export const LangfusePlugin: Plugin = async (ctx) => {
       trackEvent("metric", {
         metricName: "plugin.langfuse.client.init.success",
         metricValue: 1,
-        tags: { source, projectId: apiKeys.project_id },
+        tags: {
+          node: "pluginInitialization",
+          action: "resolve_project_api_keys",
+          status: "success",
+          source,
+          projectId: apiKeys.project_id,
+          runtimeId: PLUGIN_RUNTIME_ID,
+          pluginInstanceId: currentPluginInstanceId,
+        },
       })
     }
     const refreshProjectApiKeys = async (allowCreateOnNotFound: boolean) => {
@@ -2886,7 +4183,7 @@ export const LangfusePlugin: Plugin = async (ctx) => {
     m.source = "testagent"
     return m
   }
-  configureFailedIngestionQueue(publicKey)
+  resetFailedIngestionQueue()
   scheduleBackgroundIngestionDrain()
 
   installProcessHandlers() // testagent_change
@@ -2897,13 +4194,61 @@ export const LangfusePlugin: Plugin = async (ctx) => {
      */
     "chat.message": async (input, output) => {
       const sessionId = getSessionId(input.sessionID)
+      trackEvent("metric", {
+        metricName: "plugin.langfuse.chat.message.received",
+        metricValue: 1,
+        tags: {
+          node: "chatMessageHook",
+          action: "receive",
+          status: "received",
+          runtimeId: PLUGIN_RUNTIME_ID,
+          pluginInstanceId: currentPluginInstanceId,
+          sessionId,
+          messageId: input.messageID || "",
+        },
+      })
       trackedSessionIds.add(sessionId)
+      idleSessionIds.delete(sessionId)
 
       if (!rootSessionId) {
         rootSessionId = sessionId
       }
 
-      const traceId = getTraceIdForSession(sessionId, sessionId === rootSessionId ? input.messageID : undefined)
+      let traceId: string
+      try {
+        traceId = await getTraceIdAfterSessionCreated(sessionId, input.messageID)
+      } catch (e) {
+        trackEvent("both", {
+          level: "error",
+          message: "新对话解析 Trace ID 失败，未进入 Langfuse 上报队列",
+          data: { error: String(e), sessionId, messageId: input.messageID },
+          metricName: "plugin.langfuse.chat.trace.resolve.error",
+          metricValue: 1,
+          tags: {
+            node: "chatMessageHook",
+            action: "resolve_trace_id",
+            status: "error",
+            runtimeId: PLUGIN_RUNTIME_ID,
+            pluginInstanceId: currentPluginInstanceId,
+            sessionId,
+          },
+        })
+        return
+      }
+      trackEvent("metric", {
+        metricName: "plugin.langfuse.chat.trace.resolve.success",
+        metricValue: 1,
+        tags: {
+          node: "chatMessageHook",
+          action: "resolve_trace_id",
+          status: "success",
+          runtimeId: PLUGIN_RUNTIME_ID,
+          pluginInstanceId: currentPluginInstanceId,
+          sessionId,
+          messageId: input.messageID || "",
+          traceId,
+        },
+      })
       const textContent = output.parts
         .filter((p: any) => p?.type === "text" && typeof p?.text === "string")
         .map((p: any) => p.text)
@@ -2919,30 +4264,26 @@ export const LangfusePlugin: Plugin = async (ctx) => {
       const count = (messageCounter.get(sessionId) || 0) + 1
       messageCounter.set(sessionId, count)
 
-      const batch = createTraceBatch(rootSessionId, textContent || "message", ctx, traceId)
-      if (isAssistantMessage && sessionId === rootSessionId) {
+      const batch = createTraceBatch(sessionId, textContent || "message", ctx, traceId)
+      if (isAssistantMessage) {
         const finalText = stripThinkTags(assistantOutput)
         if (finalText) batch.output = finalText
       }
       updateTraceBatch(traceId, {
-        ...(isAssistantMessage && sessionId === rootSessionId && stripThinkTags(assistantOutput)
+        ...(isAssistantMessage && stripThinkTags(assistantOutput)
           ? { output: stripThinkTags(assistantOutput) }
           : {}),
         metadata: {
           ...batch.metadata,
           messageID: input.messageID,
           messageIndex: count,
-          isSubagent: sessionId !== rootSessionId,
+          isSubagent: isSubagentSession(sessionId),
           input: {
             sessionID: input.sessionID,
             agent: input.agent,
             model: input.model,
             messageID: input.messageID,
             variant: input.variant,
-          },
-          output: {
-            message: output.message,
-            parts: output.parts,
           },
         },
       })
@@ -2990,24 +4331,27 @@ export const LangfusePlugin: Plugin = async (ctx) => {
      * 处理聊天参数事件，创建 LLM generation
      */
     "chat.params": async (input, output) => {
-      const messageMetadata = (input.message as any)?.metadata
-      const inputMetadata = (input as any)?.metadata
-      const pastToolCalls = messageMetadata?.PasttoolCalls ?? inputMetadata?.PasttoolCalls ?? []
-      if (Array.isArray(pastToolCalls) && pastToolCalls.length > 0) {
-        const hasSkillCall = pastToolCalls.some((tc: any) => tc?.name === "skill" || tc?.tool === "skill")
-        if (hasSkillCall && skillStack.length > 0) {
-          const popped = skillStack.pop()
-          if (popped) {
-            toolSpanIds.delete(popped.callID)
-            toolCallInfos.delete(popped.callID)
-            toolResultSnapshots.delete(popped.callID)
-          }
-        }
-      }
-
       const sessionId = getSessionId(input.sessionID)
-      const traceId = getTraceIdForSession(sessionId)
+      trackEvent("metric", {
+        metricName: "plugin.langfuse.opencode.chat.params.received",
+        metricValue: 1,
+        tags: {
+          node: "opencodeChatParamsHook",
+          action: "receive",
+          status: "received",
+          runtimeId: PLUGIN_RUNTIME_ID,
+          pluginInstanceId: currentPluginInstanceId,
+          sessionId,
+          providerId: input.model?.providerID || "unknown",
+          modelId: input.model?.id || "unknown",
+        },
+      })
+      // Snapshot ownership before any await. Session association can pause this
+      // handler while a later skill changes the active context.
       const parentObservationId = getSessionObservationParent(sessionId)
+      const isSkillChild = !!getCurrentSkillContext(sessionId, sessionToTrace.get(sessionId) || currentTraceId)
+      const pendingSequence = ++pendingGenerationSequence
+      const traceId = await getTraceIdAfterSessionCreated(sessionId)
 
       const providerId = input.model?.providerID || "unknown"
       const modelId = input.model?.id || "unknown"
@@ -3024,6 +4368,8 @@ export const LangfusePlugin: Plugin = async (ctx) => {
       const llmInputDict = builtInput.dict
       await captureToolResultsFromLLMInputMessages((llmInputDict as any).messages || [], sessionId, traceId)
 
+      // This is only a pending placeholder. activatePendingGeneration replaces
+      // it with the first concrete message-part timestamp before ingestion.
       const startTime = new Date()
       const genId = generateUUID()
 
@@ -3051,7 +4397,8 @@ export const LangfusePlugin: Plugin = async (ctx) => {
         ...baseMetadata(),
       }
 
-      // 添加 generation 数据到批次
+      // Keep the request pending until a message part confirms that this LLM
+      // call actually started. chat.params itself has no assistant message ID.
       const genData: GenerationData = {
         id: genId,
         traceId,
@@ -3065,10 +4412,6 @@ export const LangfusePlugin: Plugin = async (ctx) => {
         tags: OBSERVATION_TAGS,
       }
 
-      addGenerationToBatch(traceId, genData)
-      createGenerationImmediately(genData)
-
-      // 记录 GenInfo
       const genInfo: GenInfo = {
         traceId,
         genId,
@@ -3077,25 +4420,28 @@ export const LangfusePlugin: Plugin = async (ctx) => {
         selectedModel,
         resolvedModel,
         modelName,
+        apiId,
         startTime,
         completionStartTime: null,
-        stepNumber: (gens.get(traceId)?.length || 0) + 1,
+        responseEndTime: null,
+        stepNumber: (gens.get(traceId)?.length || 0) + (pendingGenerations.get(sessionId)?.length || 0) + 1,
         output: "",
         parts: [],
         toolCalls: [],
-        isSkillChild: !!getCurrentSkillContext(),
+        isSkillChild,
         hasUsage: false,
         finalOutput: null,
         modelParameters,
         input: llmInputDict,
+        generationData: genData,
+        pendingSequence,
       }
 
-      const genList = gens.get(traceId) || []
-      genList.push(genInfo)
-      gens.set(traceId, genList)
-
-      allGenerations.push(genInfo)
-      addActiveGeneration(sessionId, genInfo)
+      const pending = pendingGenerations.get(sessionId) ?? []
+      const insertionIndex = pending.findIndex((entry) => entry.pendingSequence > genInfo.pendingSequence)
+      if (insertionIndex === -1) pending.push(genInfo)
+      else pending.splice(insertionIndex, 0, genInfo)
+      pendingGenerations.set(sessionId, pending)
     },
 
     /**
@@ -3125,27 +4471,73 @@ export const LangfusePlugin: Plugin = async (ctx) => {
     "tool.execute.before": async (input, output) => {
       // transformWriteArgs(input.tool, output.args)
 
+      // Keep the start boundary stable if this handler later waits for session
+      // association. The hook payload timestamp remains preferred when present.
+      const toolObservedAt = new Date()
+      const reportedToolStartTime =
+        getPartTimestamp(output, "start") ?? getPartTimestamp(input, "start")
+
       const sessionId = input.sessionID || currentSessionId || [...trackedSessionIds].pop()
       if (!sessionId) return
 
-      const traceId = getTraceIdForSession(sessionId)
-      const rootSid = rootSessionId || sessionId
+      // Activate the LLM that issued this tool call before changing skill
+      // ownership. Otherwise a still-pending caller generation could be
+      // incorrectly attached to the skill it is about to invoke.
+      const toolStartTime = reportedToolStartTime ?? toolObservedAt
+      const precedingGeneration =
+        getLatestActiveGeneration(sessionId) ?? activatePendingGeneration(sessionId, undefined, { startTime: toolStartTime })
+      if (precedingGeneration) markGenerationResponseFinished(precedingGeneration, toolStartTime)
 
       const isSkill = input.tool === "skill"
-      const isTask = input.tool === "task"
-      const subagentType = output.args?.subagent_type
-      const toolParentObservationId = getSessionObservationParent(sessionId)
-      const agentParentObservationId = getSessionObservationParent(sessionId)
+      const skillSpanId = isSkill ? generateUUID() : undefined
+      // A new skill starts a new grouping root for this session. Clear the
+      // previous skill before taking its parent snapshot, so sequential skills
+      // are siblings (or children of the subagent), not nested under each other.
+      const knownTraceId = sessionToTrace.get(sessionId) || currentTraceId
+      if (isSkill) {
+        activeSkillContexts.delete(sessionId)
+        if (knownTraceId) activeSkillSpanByTrace.delete(knownTraceId)
+      }
 
+      // Preserve the caller's ownership before session resolution yields. The
+      // trace-wide state may advance to a later skill while this hook waits.
+      const toolParentObservationId = getSessionObservationParent(sessionId)
+      const agentParentObservationId = toolParentObservationId
+      if (isSkill && skillSpanId) {
+        const provisionalTraceId = sessionToTrace.get(sessionId) || currentTraceId || getTraceIdForSession(sessionId)
+        activeSkillSpanByTrace.set(provisionalTraceId, skillSpanId)
+        activeSkillContexts.set(sessionId, {
+          callID: input.callID,
+          context: {
+            spanId: skillSpanId,
+            traceId: provisionalTraceId,
+            gens: [],
+            parentSpanId: toolParentObservationId,
+            isSubagent: true,
+          },
+        })
+      }
+      const traceId = await getTraceIdAfterSessionCreated(sessionId)
+      const startTime = toolStartTime
+
+      const isTask = input.tool === "task"
+      // OpenCode has exposed the target agent on both input and transformed
+      // args across versions. A task always launches a child session, so keep
+      // a stable fallback rather than skipping its trace association.
+      const subagentType =
+        output.args?.subagent_type ||
+        input.args?.subagent_type ||
+        output.args?.agent ||
+        input.args?.agent ||
+        (input.tool === "task" ? "subagent" : undefined)
       if (!traceBatches.has(traceId)) {
-        const batch = createTraceBatch(rootSid, userInputs.get(rootSid) || "tool execution", ctx, traceId)
+        const batch = createTraceBatch(sessionId, userInputs.get(sessionId) || "tool execution", ctx, traceId)
         upsertTraceImmediately(batch)
       }
 
-      const spanId = generateUUID()
+      const spanId = skillSpanId ?? generateUUID()
       const skillName = output.args?.name || output.args?.skill || "skill"
       const spanName = isSkill ? `skill:${skillName}` : `tool:${input.tool}`
-      const startTime = new Date()
 
       const spanData: SpanData = {
         id: spanId,
@@ -3167,8 +4559,22 @@ export const LangfusePlugin: Plugin = async (ctx) => {
         tags: OBSERVATION_TAGS,
       }
 
-      addSpanToBatch(traceId, spanData)
-      createSpanImmediately(spanData)
+      if (isSkill) {
+        appendTraceSkillInfo(traceId, { skillName, skillSpanId: spanId })
+        // Keep this skill as the parent of every following LLM/tool node until
+        // the next skill starts. The next skill clears this slot above first,
+        // which makes sibling skill spans pop back to the same parent level.
+        activeSkillSpanByTrace.set(traceId, spanId)
+        pendingSkillSpans.set(input.callID, spanData)
+        // The skill span must exist before any LLM/tool node that follows it.
+        // Keep the existing skillInfo snapshot timing, but do not defer its
+        // span-create event until tool.execute.after.
+        addSpanToBatch(traceId, spanData)
+        createSpanImmediately(spanData)
+      } else {
+        addSpanToBatch(traceId, spanData)
+        createSpanImmediately(spanData)
+      }
       toolSpanIds.set(input.callID, spanId)
       toolCallInfos.set(input.callID, { spanId, traceId, sessionId, toolName: input.tool })
       recordSessionSpan(sessionId, spanId)
@@ -3210,15 +4616,18 @@ export const LangfusePlugin: Plugin = async (ctx) => {
       }
 
       if (isSkill) {
-        const currentParentId = getActiveParentId()
         const skillContext: SkillContext = {
           spanId,
           traceId,
           gens: [],
-          parentSpanId: currentParentId, // 记录父 span，用于嵌套
+          parentSpanId: toolParentObservationId,
           isSubagent: true, // 标记为 subagent
         }
-        skillStack.push({ callID: input.callID, context: skillContext })
+        // A later skill can begin while this handler is awaiting session
+        // association. Do not let the older handler take ownership back.
+        if (activeSkillContexts.get(sessionId)?.callID === input.callID) {
+          activeSkillContexts.set(sessionId, { callID: input.callID, context: skillContext })
+        }
       }
     },
 
@@ -3239,6 +4648,20 @@ export const LangfusePlugin: Plugin = async (ctx) => {
             const injectedContent = injectTestcaseIds(raw)
             fileContent = injectedContent
             writeFileSync(filePath, injectedContent, "utf-8")
+          } else {
+            // 检查是否有任何 testcase_id 符合 testagent 模式
+            // 正则匹配: TC + 2个字符 + t + 3个字符 + e + 2个字符 + s + 3个字符 + t + 2个字符 + a + 3个字符 + g + 2个字符 + e + 3个字符 + n + 2个字符 + t + 1个字符
+            const testagentPattern = /testcase_id:\s*(TC[a-f0-9]{2}t[a-f0-9]{3}e[a-f0-9]{2}s[a-f0-9]{3}t[a-f0-9]{2}a[a-f0-9]{3}g[a-f0-9]{2}e[a-f0-9]{3}n[a-f0-9]{2}t[a-f0-9])\b/g
+            const hasTestagentId = testagentPattern.test(raw)
+            
+            if (hasTestagentId) {
+              // 替换所有不符合 testagent 模式的 testcase_id
+              const updatedContent = replaceNonTestagentTestcaseIds(raw)
+              if (updatedContent !== raw) {
+                fileContent = updatedContent
+                writeFileSync(filePath, updatedContent, "utf-8")
+              }
+            }
           }
         } catch (e) {
           // 文件读写失败时静默忽略，不影响正常流程
@@ -3265,6 +4688,20 @@ export const LangfusePlugin: Plugin = async (ctx) => {
               const injectedContent = injectTestcaseIds(raw)
               fileContent = injectedContent
               writeFileSync(filePath, injectedContent, "utf-8")
+            } else {
+              // 检查是否有任何 testcase_id 符合 testagent 模式
+              // 正则匹配: TC + 2个字符 + t + 3个字符 + e + 2个字符 + s + 3个字符 + t + 2个字符 + a + 3个字符 + g + 2个字符 + e + 3个字符 + n + 2个字符 + t + 1个字符
+              const testagentPattern = /testcase_id:\s*(TC[a-f0-9]{2}t[a-f0-9]{3}e[a-f0-9]{2}s[a-f0-9]{3}t[a-f0-9]{2}a[a-f0-9]{3}g[a-f0-9]{2}e[a-f0-9]{3}n[a-f0-9]{2}t[a-f0-9])\b/g
+              const hasTestagentId = testagentPattern.test(raw)
+              
+              if (hasTestagentId) {
+                // 替换所有不符合 testagent 模式的 testcase_id
+                const updatedContent = replaceNonTestagentTestcaseIds(raw)
+                if (updatedContent !== raw) {
+                  fileContent = updatedContent
+                  writeFileSync(filePath, updatedContent, "utf-8")
+                }
+              }
             }
           } catch (e) {
             // 文件读写失败时静默忽略
@@ -3314,16 +4751,17 @@ export const LangfusePlugin: Plugin = async (ctx) => {
         }
       }
 
-      let skillName = "skill"
+      let skillName = input.args?.name || input.args?.skill || "skill"
       let skillDesc = ""
+      let skillId = input.args?.id || input.args?.skillId || input.args?.skill_id
       if (skillYamlInfo) {
-        skillName = skillYamlInfo.name
         skillDesc = skillYamlInfo.description
+        skillId = skillYamlInfo.id || skillId
       }
-      const endTime = new Date()
-
       const toolDef = allToolDefs.get(input.tool)
       const cachedResult = toolResultSnapshots.get(input.callID)
+      const endTime =
+        getPartTimestamp(output, "end") ?? getPartTimestamp(input, "end") ?? cachedResult?.completedAt ?? new Date()
       const effectiveOutput =
         (output.output === null || output.output === undefined) && cachedResult?.output != null
           ? cachedResult.output
@@ -3331,15 +4769,28 @@ export const LangfusePlugin: Plugin = async (ctx) => {
       const effectiveTitle = output.title ?? cachedResult?.title
       const effectiveMetadata = output.metadata ?? cachedResult?.metadata
 
+      const existingSpan = traceBatches.get(traceId)?.spans.find((span) => span.id === spanId)
+      const toolPartCompleted = cachedResult?.toolPartCompleted === true || existingSpan?.metadata?.toolPartCompleted === true
+      const toolStatus = cachedResult?.toolStatus ?? existingSpan?.metadata?.toolStatus
+      const toolCompletionSource =
+        cachedResult?.toolCompletionSource ?? existingSpan?.metadata?.toolCompletionSource ?? "tool.execute.after"
       const spanOutput = toSpanOutput(effectiveOutput)
 
       const spanUpdates: Partial<SpanData> = {
         ...(spanOutput !== undefined ? { output: spanOutput } : {}),
-        endTime: endTime.toISOString(),
+        // The tool result may already have completed through message.part.updated.
+        // tool.execute.after can arrive later, so it may enrich the span but must
+        // not move its end time forward.
+        endTime: existingSpan?.endTime ?? endTime.toISOString(),
         level: effectiveOutput === null ? "ERROR" : "DEFAULT",
         metadata: {
+          ...(existingSpan?.metadata || {}),
           spanKind: "TOOL",
           nodeType: isSkill ? "skill" : "tool",
+          toolAfterReceived: true,
+          toolPartCompleted,
+          toolCompletionSource,
+          ...(toolStatus ? { toolStatus } : {}),
           tags: OBSERVATION_TAGS,
           output: {
             title: effectiveTitle,
@@ -3366,10 +4817,24 @@ export const LangfusePlugin: Plugin = async (ctx) => {
         },
       }
 
-      updateSpanInBatch(traceId, spanId, spanUpdates)
-      updateSpanImmediately(traceId, spanId, spanUpdates)
+      if (isSkill) {
+        updateTraceSkillInfo(traceId, spanId, { skillId })
+        const finalSpanUpdates: Partial<SpanData> = {
+          name: `skill:${skillName}`,
+          ...spanUpdates,
+        }
+        updateSpanInBatch(traceId, spanId, finalSpanUpdates)
+        updateSpanImmediately(traceId, spanId, finalSpanUpdates)
+        pendingSkillSpans.delete(input.callID)
+        toolSpanIds.delete(input.callID)
+        toolCallInfos.delete(input.callID)
+        toolResultSnapshots.delete(input.callID)
+      } else {
+        updateSpanInBatch(traceId, spanId, spanUpdates)
+        updateSpanImmediately(traceId, spanId, spanUpdates)
+      }
 
-      if (!isSkill && effectiveOutput !== null && effectiveOutput !== undefined) {
+      if (!isSkill && effectiveOutput !== null && effectiveOutput !== undefined && toolPartCompleted) {
         toolSpanIds.delete(input.callID)
         toolCallInfos.delete(input.callID)
         toolResultSnapshots.delete(input.callID)
@@ -3383,17 +4848,45 @@ export const LangfusePlugin: Plugin = async (ctx) => {
       const sessionId = input.sessionID || currentSessionId
       if (!sessionId) return
 
-      const g = getLatestActiveGeneration(sessionId)
+      // Some providers only emit this completion callback, without a streamed
+      // message part. It proves the request ran, so activate the pending
+      // generation; its terminal handler will write the canonical structured
+      // output (text, tool_calls, usage, and finish_reason).
+      // text.complete has the concrete assistant message ID. Do not use the
+      // newest active generation here: a late step-finish from a preceding
+      // tool-call step can leave two generations active briefly, causing this
+      // response text to be written onto the wrong LLM node while the current
+      // node still receives its own usage from step-finish.
+      const g = getOrActivateGenerationForPart(sessionId, {
+        type: "text",
+        messageID: input.messageID,
+      }, getPartTimestamp(output, "start") ?? getPartTimestamp(input, "start"))
       if (!g) return
 
-      g.output = output.text
+      g.output = typeof output.text === "string" ? output.text : ""
+      markGenerationResponseFinished(
+        g,
+        getPartTimestamp(output, "end") ?? getPartTimestamp(input, "end") ?? new Date(),
+      )
+
+      // Preserve Langfuse's output contract even during the short interval
+      // before a late step-finish supplies provider usage and finish reason.
+      const partialOutput = {
+        text: buildGenerationText(g),
+        tool_calls: g.toolCalls.map((tc) => ({
+          type: "function",
+          function: { name: tc.name, arguments: tc.args || {} },
+        })),
+        usage: toOutputUsage({ input: 0, output: 0, total: 0 }),
+        finish_reason: "unknown",
+      }
 
       const generationUpdates: Partial<GenerationData> = {
-        output: output.text,
+        output: JSON.stringify(partialOutput, null, 2),
         metadata: {
           spanKind: "LLM",
           model: buildLLMModelMetadata(g),
-          output: { text: output.text },
+          output: partialOutput,
           tags: OBSERVATION_TAGS,
           ...baseMetadata(),
         },
@@ -3412,34 +4905,49 @@ export const LangfusePlugin: Plugin = async (ctx) => {
 
       // 服务器实例销毁时，刷新所有数据
       if (evt.type === "server.instance.disposed") {
-        await flushAllTraces()
+        await flushAllTracesOnce()
         return
       }
 
       // 会话创建时，建立主从session关系
       if (evt.type === "session.created") {
-        const sid = evt.properties?.info?.id
-        const parentId = evt.properties?.info?.parentID
+        const sessionInfo = evt.properties?.info || evt.properties?.session || evt.properties || {}
+        const sid = sessionInfo.id || evt.sessionID || evt.properties?.sessionID
+        const parentId =
+          sessionInfo.parentID ||
+          sessionInfo.parentId ||
+          evt.properties?.parentID ||
+          evt.properties?.parentId
         if (sid) {
+          trackEvent("metric", {
+            metricName: "plugin.langfuse.opencode.session.created.received",
+            metricValue: 1,
+            tags: {
+              node: "opencodeEventHook",
+              action: "receive_session_created",
+              status: "received",
+              runtimeId: PLUGIN_RUNTIME_ID,
+              pluginInstanceId: currentPluginInstanceId,
+              sessionId: sid,
+              parentSessionId: parentId || "",
+            },
+          })
           trackedSessionIds.add(sid)
-          if (!rootSessionId) {
+          idleSessionIds.delete(sid)
+          // If events begin with a child, wait for its parent instead of
+          // permanently treating the child as the trace root.
+          if (!rootSessionId && !parentId) {
             rootSessionId = sid
           }
 
           if (parentId) {
-            const pending = consumePendingSubagent(parentId)
-            const inheritedTraceId = pending?.traceId || sessionToTrace.get(parentId) || currentTraceId
-            if (inheritedTraceId) {
-              sessionToTrace.set(sid, inheritedTraceId)
-              currentTraceId = inheritedTraceId
-            }
-            if (pending?.agentSpanId) {
-              await attachSubagentSession(sid, pending.traceId, pending.agentSpanId)
-            } else {
-              rememberPendingSubagentSession(parentId, sid)
-            }
+            await associateSubagentSession(sid, parentId)
             // console.log("[langfuse] subagent session created:", sid, "parent:", parentId, "using trace:", inheritedTraceId)
           }
+          // Wake child hooks only after the trace/agent parent association is
+          // installed. Otherwise their first chat event can race ahead and
+          // allocate a fallback trace for the newly-created subagent session.
+          markSessionCreated(sid)
         }
       }
 
@@ -3447,51 +4955,56 @@ export const LangfusePlugin: Plugin = async (ctx) => {
         const part = evt.properties.part
         const sessionId = part.sessionID || currentSessionId
         if (!sessionId) return
+        trackEvent("metric", {
+          metricName: "plugin.langfuse.opencode.message.part.updated.received",
+          metricValue: 1,
+          tags: {
+            node: "opencodeEventHook",
+            action: "receive_message_part_updated",
+            status: "received",
+            runtimeId: PLUGIN_RUNTIME_ID,
+            pluginInstanceId: currentPluginInstanceId,
+            sessionId,
+            traceId: sessionToTrace.get(sessionId) || "",
+            partType: part.type || "unknown",
+            partStatus: part.state?.status || "",
+            messageId: part.messageID || "",
+          },
+        })
 
         if (part.type === "tool" && part.callID && part.state?.status === "completed" && hasOwn(part.state, "output")) {
           const snapshot = {
             output: part.state.output,
             metadata: part.metadata,
             title: part.title,
+            completedAt: getToolPartCompletedAt(part, evt.properties?.time),
+            toolStatus: "completed",
+            toolPartCompleted: true,
+            toolCompletionSource: "message.part.updated",
           }
           toolResultSnapshots.set(part.callID, snapshot)
 
           await updateToolSpanOutputFromSnapshot(
             part.callID,
             sessionToTrace.get(sessionId) || currentTraceId,
-            new Date(),
+            snapshot.completedAt,
             snapshot,
           )
         }
 
-        const g = getActiveGenerationForPart(sessionId, part)
+        const g = getOrActivateGenerationForPart(sessionId, part, evt.properties?.time)
 
         if (g && part.type !== "step-finish") {
           if (part.type === "text" && part.text) {
-            if (!g.completionStartTime) {
-              g.completionStartTime = new Date()
-              const generationUpdates = { completionStartTime: g.completionStartTime.toISOString() }
-              updateGenerationInBatch(g.traceId, g.genId, generationUpdates)
-              updateGenerationImmediately(g.traceId, g.genId, generationUpdates)
-            }
+            markGenerationCompletionStarted(g, getEventTimestamp(evt.properties?.time) ?? new Date())
             g.parts.push(part.text)
           }
           if (part.type === "reasoning" && part.text) {
-            if (!g.completionStartTime) {
-              g.completionStartTime = new Date()
-              const generationUpdates = { completionStartTime: g.completionStartTime.toISOString() }
-              updateGenerationInBatch(g.traceId, g.genId, generationUpdates)
-              updateGenerationImmediately(g.traceId, g.genId, generationUpdates)
-            }
+            markGenerationCompletionStarted(g, getEventTimestamp(evt.properties?.time) ?? new Date())
             g.parts.push(`Reasoning: ${part.text}`)
           }
           if (part.type === "tool" && part.state?.status === "running") {
-            if (!g.completionStartTime) {
-              g.completionStartTime = new Date()
-              const generationUpdates = { completionStartTime: g.completionStartTime.toISOString() }
-              updateGenerationInBatch(g.traceId, g.genId, generationUpdates)
-              updateGenerationImmediately(g.traceId, g.genId, generationUpdates)
-            }
+            markGenerationCompletionStarted(g, getEventTimestamp(evt.properties?.time) ?? new Date())
             const toolName = part.tool
             const toolArgs = part.state?.input ?? {}
             const toolStr = `Tool Call: ${toolName}(${JSON.stringify(toolArgs)?.substring(0, 500)})`
@@ -3529,18 +5042,9 @@ export const LangfusePlugin: Plugin = async (ctx) => {
         }
 
         if (part.type === "step-finish" && g) {
-          if (part.reason !== "tool-calls" && skillStack.length > 0) {
-            const popped = skillStack.pop()
-            if (popped) {
-              toolSpanIds.delete(popped.callID)
-              toolCallInfos.delete(popped.callID)
-              toolResultSnapshots.delete(popped.callID)
-            }
-          }
-
           await finalizeGeneration(sessionId, g, {
             tokens: part.tokens,
-            endTime: new Date(),
+            endTime: getPartTimestamp(part, "end") ?? getEventTimestamp(evt.properties?.time) ?? g.responseEndTime ?? new Date(),
             finishReason: part.reason,
           })
         }
@@ -3548,8 +5052,13 @@ export const LangfusePlugin: Plugin = async (ctx) => {
 
       if (evt.type === "session.idle") {
         const idleSessionId = evt.sessionID ?? evt.properties?.sessionID
-        const sessionId = idleSessionId || currentSessionId || [...trackedSessionIds].pop()
+        const sessionId = idleSessionId
         if (!sessionId) return
+
+        // Ignore a duplicate idle event from a child session that was already
+        // detached after it completed; falling back to currentTraceId here could
+        // otherwise finalize an unrelated concurrent trace.
+        if (!sessionToTrace.has(sessionId) && !trackedSessionIds.has(sessionId)) return
 
         const traceId =
           sessionToTrace.get(sessionId) ||
@@ -3557,84 +5066,11 @@ export const LangfusePlugin: Plugin = async (ctx) => {
           (rootSessionId ? sessionToTrace.get(rootSessionId) : undefined)
         if (!traceId) return
 
-        if (sessionId !== rootSessionId) {
-          for (const g of allGenerations.filter(
-            (gen) => gen.sessionId === sessionId && gen.traceId === traceId && !gen.finalOutput,
-          )) {
-            await finalizeGeneration(sessionId, g)
-          }
-
-          const agentSpanId = sessionToAgentSpan.get(sessionId)
-          if (agentSpanId) {
-            const childGenerations = allGenerations.filter(
-              (g) => g.parentObservationId === agentSpanId && g.traceId === traceId,
-            )
-            const lastChildGeneration = childGenerations[childGenerations.length - 1]
-            const spanUpdates: Partial<SpanData> = {
-              endTime: new Date().toISOString(),
-              output: lastChildGeneration?.finalOutput?.text || userInputs.get(sessionId),
-            }
-            updateSpanInBatch(traceId, agentSpanId, spanUpdates)
-            updateSpanImmediately(traceId, agentSpanId, spanUpdates)
-            sessionToAgentSpan.delete(sessionId)
-          }
-
-          activeGenerations.delete(sessionId)
-          sessionSpanIds.delete(sessionId)
-          llmInputs.delete(sessionId)
-          systemPrompts.delete(sessionId)
-          userInputs.delete(sessionId)
-          sessionAssistantOutputs.delete(sessionId)
-          messageCounter.delete(sessionId)
-          return
-        }
-
-        for (const g of allGenerations) {
-          if (!g.finalOutput) {
-            await finalizeGeneration(g.sessionId || sessionId, g)
-          }
-        }
-
-        const currentBatch = traceBatches.get(traceId)
-        const finalText =
-          getFinalTraceOutput(traceId, rootSessionId) ??
-          (currentBatch ? getFinalTraceOutputFromBatch(currentBatch) : undefined)
-        if (finalText !== undefined) {
-          updateTraceBatch(traceId, { output: finalText })
-          const batch = traceBatches.get(traceId)
-          if (batch) {
-            upsertTraceImmediately(batch)
-          }
-        }
-
-        scheduleBackgroundIngestionDrain()
-
-        traceBatches.delete(traceId)
-        gens.delete(traceId)
-        skillStack.length = 0
-        skillCache.clear()
-        sessionIdMap.clear()
-        activeGenerations.clear()
-        toolSpanIds.clear()
-        toolCallInfos.clear()
-        toolResultSnapshots.clear()
-        sessionSpanIds.clear()
-        allGenerations.length = 0
-        allToolDefs.clear()
-        messageCounter.clear()
-        userInputs.clear()
-        sessionAssistantOutputs.clear()
-        llmInputs.clear()
-        systemPrompts.clear()
-        trackedSessionIds.clear()
-        sessionToAgentSpan.clear()
-        pendingSubagents.clear()
-        pendingSubagentSessions.clear()
-        uploadedTraceIds.delete(traceId)
-        currentTraceId = null
-        rootSessionId = null
-        sessionToTrace.clear()
-        generatedTraceIds.clear()
+        idleSessionIds.add(sessionId)
+        // Do not await here: plugin events can be dispatched serially, in which
+        // case awaiting would prevent the queued step-finish event from running.
+        scheduleSessionIdleFinalization(sessionId, traceId)
+        return
       }
 
       if (evt.type === "session.error") {
@@ -3642,6 +5078,16 @@ export const LangfusePlugin: Plugin = async (ctx) => {
         if (sessionId) {
           const traceId = sessionToTrace.get(sessionId) || currentTraceId
           if (traceId) {
+            // An error can occur before any message part is emitted. Record the
+            // in-flight call as an errored generation instead of leaving a
+            // pending candidate to be silently discarded at trace cleanup.
+            const erroredGeneration =
+              getLatestActiveGeneration(sessionId) ??
+              activatePendingGeneration(sessionId, undefined, { preferLatest: true })
+            if (erroredGeneration && !erroredGeneration.finalOutput) {
+              await finalizeGeneration(sessionId, erroredGeneration, { finishReason: "error" })
+            }
+
             updateTraceBatch(traceId, {
               metadata: {
                 ...traceBatches.get(traceId)?.metadata,
