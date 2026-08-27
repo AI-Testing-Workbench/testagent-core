@@ -2,6 +2,7 @@ import * as Log from "@opencode-ai/core/util/log"
 import { Effect } from "effect"
 import { HttpApiBuilder, HttpApiError } from "effect/unstable/httpapi" // testagent_change
 import { RootHttpApi } from "../api"
+import { Bus } from "@/bus" // testagent_change
 import {
   ApiEnvVarsConfigInvalidError,
   EnvVarBatchCreatePayload,
@@ -9,6 +10,8 @@ import {
   EnvVarBatchQueryPayload,
   EnvVarBatchUpdatePayload,
   TestagentUserPayload,
+  ZhAnswerTogglePayload, // testagent_change
+  ZhAnswerToggled, // testagent_change
 } from "../groups/testagent" // testagent_change
 import type { StoredToken } from "@/external-auth"
 import { EnvVarsConfigInvalidError } from "@/testagent/env-vars" // testagent_change
@@ -114,6 +117,37 @@ export const testagentHandlers = HttpApiBuilder.group(RootHttpApi, "testagent", 
       return true
     })
 
+    // testagent_change start - zh-answer toggle endpoint
+    const ZH_ANSWER_ENV_KEY = "TESTAGENT_ZH_ANSWER_ENABLED"
+
+    const zhAnswerSet = Effect.fn("TestagentHttpApi.zhAnswerSet")(function* (ctx: {
+      payload: typeof ZhAnswerTogglePayload.Type
+    }) {
+      const enabled = ctx.payload.enabled
+      const { EnvVars } = yield* Effect.promise(() => import("@/testagent/env-vars"))
+
+      // 持久化开关状态（系统注入的标记不写自定义存储，云端重启后仍默认开启）
+      yield* Effect.promise(async () => {
+        try {
+          const groups = await EnvVars.query([ZH_ANSWER_ENV_KEY])
+          if (!groups.system[ZH_ANSWER_ENV_KEY]) {
+            const entry = { key: ZH_ANSWER_ENV_KEY, value: enabled ? "1" : "0" }
+            if (groups.custom[ZH_ANSWER_ENV_KEY]) await EnvVars.batchUpdate([entry])
+            else await EnvVars.batchCreate([entry])
+          }
+          await EnvVars.syncToProcessEnv()
+        } catch (err) {
+          log.warn("failed to persist zh answer toggle", { error: String(err) })
+        }
+      })
+
+      const bus = yield* Bus.Service
+      yield* bus.publish(ZhAnswerToggled, { enabled })
+      log.info("ZH answer toggled", { enabled })
+      return true
+    })
+    // testagent_change end
+
     return handlers
       .handle("userSet", userSet)
       .handle("envVarsList", envVarsList)
@@ -121,5 +155,6 @@ export const testagentHandlers = HttpApiBuilder.group(RootHttpApi, "testagent", 
       .handle("customEnvVarBatchCreate", customEnvVarBatchCreate)
       .handle("customEnvVarBatchUpdate", customEnvVarBatchUpdate)
       .handle("customEnvVarBatchDelete", customEnvVarBatchDelete)
+      .handle("zhAnswerSet", zhAnswerSet) // testagent_change
   }),
 )
