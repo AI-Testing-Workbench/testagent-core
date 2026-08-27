@@ -1517,8 +1517,8 @@ NOTE: At any point in time through this workflow you should feel free to ask the
             continue
           }
 
-          const baseAgent = yield* agents.get(lastUser.agent)
-          if (!baseAgent) {
+          let agent = yield* agents.get(lastUser.agent)
+          if (!agent) {
             const available = (yield* agents.list()).filter((a) => !a.hidden).map((a) => a.name)
             const hint = available.length ? ` Available agents: ${available.join(", ")}` : ""
             const error = new NamedError.Unknown({ message: `Agent not found: "${lastUser.agent}".${hint}` })
@@ -1530,14 +1530,14 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           // 兜底合并 session.permission（经 setPermission 写入的权限）
           const sessionOverride = yield* agents.getSessionOverride(sessionID)
           const sessionPerm = sessionOverride?.permission
-            ? Permission.merge(baseAgent.permission, sessionOverride.permission)
-            : Permission.merge(baseAgent.permission, session.permission ?? [])
-          const agent = {
-            ...baseAgent,
-            prompt: sessionOverride?.prompt ?? baseAgent.prompt,
-            temperature: sessionOverride?.temperature ?? baseAgent.temperature,
-            topP: sessionOverride?.topP ?? baseAgent.topP,
-            steps: sessionOverride?.steps ?? baseAgent.steps,
+            ? Permission.merge(agent.permission, sessionOverride.permission)
+            : Permission.merge(agent.permission, session.permission ?? [])
+          agent = {
+            ...agent,
+            prompt: sessionOverride?.prompt ?? agent.prompt,
+            temperature: sessionOverride?.temperature ?? agent.temperature,
+            topP: sessionOverride?.topP ?? agent.topP,
+            steps: sessionOverride?.steps ?? agent.steps,
             permission: sessionPerm,
           }
           // testagent_change end
