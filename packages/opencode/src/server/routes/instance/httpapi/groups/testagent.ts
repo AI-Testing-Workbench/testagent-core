@@ -1,16 +1,6 @@
 import { Schema } from "effect"
 import { HttpApi, HttpApiEndpoint, HttpApiError, HttpApiGroup, OpenApi } from "effect/unstable/httpapi" // testagent_change
-import { BusEvent } from "@/bus/bus-event" // testagent_change
 import { described } from "./metadata"
-
-// testagent_change start - zh-answer toggle bus event
-export const ZhAnswerToggled = BusEvent.define(
-  "zh.answer.toggled",
-  Schema.Struct({
-    enabled: Schema.Boolean,
-  }),
-)
-// testagent_change end
 
 export const ZhAnswerTogglePayload = Schema.Struct({
   enabled: Schema.Boolean,

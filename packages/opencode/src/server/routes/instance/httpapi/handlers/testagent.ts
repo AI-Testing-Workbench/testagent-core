@@ -2,7 +2,7 @@ import * as Log from "@opencode-ai/core/util/log"
 import { Effect } from "effect"
 import { HttpApiBuilder, HttpApiError } from "effect/unstable/httpapi" // testagent_change
 import { RootHttpApi } from "../api"
-import { Bus } from "@/bus" // testagent_change
+import { GlobalBus } from "@/bus/global" // testagent_change
 import {
   ApiEnvVarsConfigInvalidError,
   EnvVarBatchCreatePayload,
@@ -11,7 +11,6 @@ import {
   EnvVarBatchUpdatePayload,
   TestagentUserPayload,
   ZhAnswerTogglePayload, // testagent_change
-  ZhAnswerToggled, // testagent_change
 } from "../groups/testagent" // testagent_change
 import type { StoredToken } from "@/external-auth"
 import { EnvVarsConfigInvalidError } from "@/testagent/env-vars" // testagent_change
@@ -117,32 +116,19 @@ export const testagentHandlers = HttpApiBuilder.group(RootHttpApi, "testagent", 
       return true
     })
 
-    // testagent_change start - zh-answer toggle endpoint
-    const ZH_ANSWER_ENV_KEY = "TESTAGENT_ZH_ANSWER_ENABLED"
-
+    // testagent_change start - zh-answer toggle endpoint（按钮仅运行时切换，不写环境变量）
     const zhAnswerSet = Effect.fn("TestagentHttpApi.zhAnswerSet")(function* (ctx: {
       payload: typeof ZhAnswerTogglePayload.Type
     }) {
       const enabled = ctx.payload.enabled
-      const { EnvVars } = yield* Effect.promise(() => import("@/testagent/env-vars"))
 
-      // 持久化开关状态（系统注入的标记不写自定义存储，云端重启后仍默认开启）
-      yield* Effect.promise(async () => {
-        try {
-          const groups = await EnvVars.query([ZH_ANSWER_ENV_KEY])
-          if (!groups.system[ZH_ANSWER_ENV_KEY]) {
-            const entry = { key: ZH_ANSWER_ENV_KEY, value: enabled ? "1" : "0" }
-            if (groups.custom[ZH_ANSWER_ENV_KEY]) await EnvVars.batchUpdate([entry])
-            else await EnvVars.batchCreate([entry])
-          }
-          await EnvVars.syncToProcessEnv()
-        } catch (err) {
-          log.warn("failed to persist zh answer toggle", { error: String(err) })
-        }
+      // 按钮与 TESTAGENT_ZH_ANSWER_ENABLED 环境变量是两个独立的激活方式：
+      // 环境变量仅在启动时生效（扩展/云端注入）；按钮只发进程级全局事件热切换，不落环境变量。
+      // 注意：/testagent/* 属于 root 路由，无 per-instance 目录上下文，不能走 per-directory 的 Bus
+      // （会因取不到实例上下文而失败），必须用 GlobalBus 进程级广播，插件在模块级监听 zh.answer.toggled。
+      GlobalBus.emit("event", {
+        payload: { type: "zh.answer.toggled", properties: { enabled } },
       })
-
-      const bus = yield* Bus.Service
-      yield* bus.publish(ZhAnswerToggled, { enabled })
       log.info("ZH answer toggled", { enabled })
       return true
     })
