@@ -415,6 +415,25 @@ export const layer: Layer.Layer<
         toolOutputMaxChars: TOOL_OUTPUT_MAX_CHARS,
       })
       const beforeTokens = yield* estimate({ messages: input.messages, model })  //testagent_change - estimate tokens before compaction for metrics
+      // testagent_change start - 压缩前诊断日志：记录触发信息、可用窗口与 token 估算
+      yield* Effect.logInfo("compaction 开始", {
+        sessionID: input.sessionID,
+        compactionID: input.parentID,
+        auto: input.auto,
+        overflow: input.overflow,
+        model: `${model.providerID}/${model.id}`,
+        contextLimit: model.limit.context,
+        inputLimit: model.limit.input,
+        usable: usable({ cfg, model }),
+        beforeTokens,
+        totalMessages: input.messages.length,
+        tailTurns: cfg.compaction?.tail_turns,
+        preserveRecentTokens: cfg.compaction?.preserve_recent_tokens,
+        reserved: cfg.compaction?.reserved,
+        thresholdPercent: cfg.compaction?.threshold_percent,
+        tailStartID: selected.tail_start_id,
+      })
+      // testagent_change end
       const ctx = yield* InstanceState.context
       const msg: MessageV2.Assistant = {
         id: MessageID.ascending(),
@@ -590,6 +609,18 @@ export const layer: Layer.Layer<
         const compAttrs = { sessionID: input.sessionID, compactionID: input.parentID, modelID: model.id, providerID: model.providerID }
         yield* Metric.update(Metric.withAttributes(compactionTokensBefore, compAttrs), beforeTokens)
         yield* Metric.update(Metric.withAttributes(compactionTokensAfter, compAttrs), afterTokens)
+        // testagent_change start - 压缩后诊断日志：对比压缩前后 token，便于分析连续压缩
+        const summaryTokens = summary ? Token.estimate(summary) : 0
+        yield* Effect.logInfo("compaction 完成", {
+          sessionID: input.sessionID,
+          compactionID: input.parentID,
+          result,
+          beforeTokens,
+          afterTokens,
+          summaryTokens,
+          tailTokens: afterTokens - summaryTokens,
+        })
+        // testagent_change end
         //testagent_change end
       }
       return result

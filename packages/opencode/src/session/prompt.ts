@@ -12,6 +12,8 @@ import { ModelID, ProviderID } from "../provider/schema"
 import { type Tool as AITool, tool, jsonSchema, type ToolExecutionOptions, asSchema } from "ai"
 import type { JSONSchema7 } from "@ai-sdk/provider"
 import { SessionCompaction } from "./compaction"
+import { usable } from "./overflow"
+import { Token } from "@/util/token"
 import { Bus } from "../bus"
 import { ProviderTransform } from "@/provider/transform"
 import { SystemPrompt } from "./system"
@@ -1442,6 +1444,40 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         let step = 0
         const session = yield* sessions.get(sessionID).pipe(Effect.orDie)
 
+        // testagent_change start - 估算下一次请求将发送的完整上下文（system + messages + tools）
+        const estimateContext = Effect.fn("SessionPrompt.estimateContext")(function* (input: {
+          agent: Agent.Info
+          model: Provider.Model
+          messages: MessageV2.WithParts[]
+        }) {
+          const [skills, env, instructions, modelMsgs] = yield* Effect.all([
+            sys.skills(input.agent),
+            sys.environment(input.model),
+            instruction.system().pipe(Effect.orDie),
+            MessageV2.toModelMessagesEffect(input.messages, input.model),
+          ])
+          const system = [...env, ...instructions, ...(skills ? [skills] : [])]
+          const systemTokens = Token.estimate(JSON.stringify(system))
+          const messagesTokens = Token.estimate(JSON.stringify(modelMsgs))
+          const toolDefs = yield* registry.tools({
+            modelID: ModelID.make(input.model.api.id),
+            providerID: input.model.providerID,
+            agent: input.agent,
+          })
+          const toolsTokens = Token.estimate(
+            JSON.stringify(
+              toolDefs.map((t) => ({
+                id: t.id,
+                description: t.description,
+                // 用实际发送给 LLM 的 JSON Schema 估算，避免序列化整个 Effect Schema 对象导致高估
+                parameters: ProviderTransform.schema(input.model, EffectZod.toJsonSchema(t.parameters)),
+              })),
+            ),
+          )
+          return systemTokens + messagesTokens + toolsTokens
+        })
+        // testagent_change end
+
         while (true) {
           yield* status.set(sessionID, { type: "busy" })
           yield* slog.info("loop", { step })
@@ -1551,13 +1587,31 @@ NOTE: At any point in time through this workflow you should feel free to ask the
             continue
           }
 
-          if (
-            lastFinished &&
-            lastFinished.summary !== true &&
-            (yield* compaction.isOverflow({ tokens: lastFinished.tokens, model }))
-          ) {
-            yield* compaction.create({ sessionID, agent: lastUser.agent, model: lastUser.model, auto: true })
-            continue
+          if (lastFinished && lastFinished.summary !== true) {
+            const cfg = yield* config.get()
+            if (cfg.compaction?.auto !== false) {
+              const agent = yield* agents.get(lastUser.agent)
+              if (agent) {
+                const current = yield* estimateContext({ agent, model, messages: msgs })
+                const limit = usable({ cfg, model })
+                if (current >= limit) {
+                  // testagent_change start - 记录循环顶部自动压缩触发原因与 token 判定
+                  yield* Effect.logInfo("自动压缩触发(循环顶部)", {
+                    sessionID,
+                    step,
+                    lastFinishedID: lastFinished.id,
+                    currentTokens: current,
+                    usable: limit,
+                    model: `${model.providerID}/${model.id}`,
+                    contextLimit: model.limit.context,
+                    inputLimit: model.limit.input,
+                  })
+                  // testagent_change end
+                  yield* compaction.create({ sessionID, agent: lastUser.agent, model: lastUser.model, auto: true })
+                  continue
+                }
+              }
+            }
           }
 
           const agent = yield* agents.get(lastUser.agent)
@@ -1692,6 +1746,19 @@ NOTE: At any point in time through this workflow you should feel free to ask the
 
             if (result === "stop") return "break" as const
             if (result === "compact") {
+              // testagent_change start - 记录推理返回 compact 的触发原因与 token 判定
+              yield* Effect.logInfo("自动压缩触发(推理返回compact)", {
+                sessionID,
+                step,
+                assistantID: handle.message.id,
+                finish: handle.message.finish,
+                overflow: !handle.message.finish,
+                tokens: handle.message.tokens,
+                model: `${model.providerID}/${model.id}`,
+                contextLimit: model.limit.context,
+                inputLimit: model.limit.input,
+              })
+              // testagent_change end
               yield* compaction.create({
                 sessionID,
                 agent: lastUser.agent,
