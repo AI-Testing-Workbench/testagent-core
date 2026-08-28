@@ -1,5 +1,5 @@
 // testagent_change - new file
-import type { Plugin } from "@opencode-ai/plugin"
+import type { Plugin, PluginInput } from "@opencode-ai/plugin"
 import { ServerAuth } from "@/server/auth"
 import { GlobalBus } from "@/bus/global"
 
@@ -19,13 +19,18 @@ type Pending = {
   startedAt: number
 }
 
-const ASK_TIMEOUT_MS = 30 * 60 * 1000
-const ANSWER_POLL_MS = 3_000 // relay answer 轮询间隔（感知延迟 ≈ 该值）
+const ASK_TIMEOUT_MS = 0 // 0 = 永不超时，一直轮询
+const ANSWER_POLL_MS = 15_000 // relay answer 轮询间隔
 const pending = new Map<string, Pending>()
 let pollLoop: Promise<void> | null = null
 
-// 诊断日志直接打到 console（扩展经 stdout/stderr 转发到 TestAgent 输出通道）
+// 日志优先走插件 log 通道（写入服务端日志文件）；插件初始化前回退 console
+let serverLog: PluginInput["log"]
 function zhLog(level: "info" | "warn" | "error", message: string, data?: unknown) {
+  if (serverLog) {
+    serverLog(level, message, (data ?? {}) as Record<string, unknown>)
+    return
+  }
   const line = `[TESTAGENT_ZH] ${message}${data !== undefined ? ` ${JSON.stringify(data)}` : ""}`
   if (level === "warn") console.warn(line)
   else if (level === "error") console.error(line)
@@ -43,7 +48,9 @@ GlobalBus.on("event", (event) => {
   if (!enabled) pending.clear()
 })
 
-export const ZhBridgePlugin: Plugin = async ({ client, directory, serverUrl, log }) => {
+export const ZhBridgePlugin: Plugin = async ({ client, directory, serverUrl, log, metric }) => {
+  serverLog = log
+  metric?.("testagent.zh.startup", 1, { service: "testagent-zh" })
   // 仅要求 relay 地址已配置；登录态 token 可能晚于插件加载才同步（连接后 PUT /testagent/user），
   // token 缺失时 sendAsk 鉴权失败会自动回退本地确认。
   if (!RELAY_URL) {
@@ -169,10 +176,22 @@ export const ZhBridgePlugin: Plugin = async ({ client, directory, serverUrl, log
     zhLog("info", "reject sent", { id: askId, kind, response: res })
   }
 
+  // 本地已答/拒：异步通知 relay 删除对应卡片，无需等待结果
+  function fireDelete(askId: string) {
+    const url = `${RELAY_URL}/message/testagent/${askId}`
+    zhLog("info", "delete request", { id: askId, method: "DELETE", url })
+    fetch(url, {
+      method: "DELETE",
+      headers: relayHeaders(),
+    })
+      .then((res) => zhLog("info", "delete response", { id: askId, status: res.status }))
+      .catch((err) => zhLog("warn", "delete failed", { id: askId, error: String(err) }))
+  }
+
   async function pollOnce(): Promise<boolean> {
     let anyPending = false
     for (const [askId, p] of pending) {
-      if (Date.now() - p.startedAt > ASK_TIMEOUT_MS) {
+      if (ASK_TIMEOUT_MS > 0 && Date.now() - p.startedAt > ASK_TIMEOUT_MS) {
         // 超时：question 拒绝 / permission 拒绝，解除 serve 侧阻塞
         pending.delete(askId)
         try {
@@ -252,8 +271,11 @@ export const ZhBridgePlugin: Plugin = async ({ client, directory, serverUrl, log
         e.type === "question.replied" ||
         e.type === "question.rejected"
       ) {
-        // 本地已答/拒：停止轮询（relay 侧按自身 TTL 清理，无需弃单接口）
-        if (e.properties?.requestID) pending.delete(e.properties.requestID)
+        // 本地已答/拒：停止轮询，并异步通知 relay 删除对应卡片（无需等待）
+        const id = e.properties?.requestID
+        if (!id) return
+        pending.delete(id)
+        fireDelete(id)
       }
     },
   }
