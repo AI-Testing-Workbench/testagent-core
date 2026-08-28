@@ -3,9 +3,11 @@ import type { Plugin } from "@opencode-ai/plugin"
 import { ServerAuth } from "@/server/auth"
 import { GlobalBus } from "@/bus/global"
 
-// ZH relay 地址：云端由 sandbox-service 注入 ZH_RELAY_URL；本地由扩展注入 ZH_RELAY_URL。
-// 兼容历史命名 TESTAGENT_ZH_RELAY_URL。
-const RELAY_URL = process.env.ZH_RELAY_URL ?? process.env.TESTAGENT_ZH_RELAY_URL ?? ""
+// ZH relay 地址：云端由 sandbox-service 注入 ZH_RELAY_URL；本地可用环境变量覆盖（ZH_RELAY_URL 或
+// 兼容历史命名 TESTAGENT_ZH_RELAY_URL），未注入时使用内置默认地址。默认地址 base64 编码存储，使用前解码。
+const DEFAULT_RELAY_URL_B64 = "aHR0cHM6Ly90ZXN0YWdlbnQtemgtcm9ib3QucGFhc3VhdC5jbWJjaGluYS5jbg=="
+const RELAY_URL =
+  process.env.ZH_RELAY_URL ?? process.env.TESTAGENT_ZH_RELAY_URL ?? atob(DEFAULT_RELAY_URL_B64)
 // 登录态（强制登录后由 env-vars 系统变量注入）：userId/token 每次请求实时读取，避免启动时未同步
 const USER_ID = () => process.env.TESTAGENT_USER_ID ?? ""
 const USER_TOKEN = () => process.env.TESTAGENT_USER_TOKEN ?? ""
