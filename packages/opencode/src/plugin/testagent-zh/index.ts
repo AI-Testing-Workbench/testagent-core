@@ -23,6 +23,8 @@ const ASK_TIMEOUT_MS = 0 // 0 = 永不超时，一直轮询
 const ANSWER_POLL_MS = 15_000 // relay answer 轮询间隔
 const pending = new Map<string, Pending>()
 let pollLoop: Promise<void> | null = null
+// 插件自己注入的回复 id（轮询拿到招乎答案后由插件回复 serve），这些事件不应触发 relay 删除
+const pluginReplied = new Set<string>()
 
 // 日志优先走插件 log 通道（写入服务端日志文件）；插件初始化前回退 console
 let serverLog: PluginInput["log"]
@@ -165,6 +167,7 @@ export const ZhBridgePlugin: Plugin = async ({ client, directory, serverUrl, log
     const p = pending.get(askId)
     if (!p) return
     const url = p.kind === "permission" ? `/permission/${askId}/reply` : `/question/${askId}/reply`
+    pluginReplied.add(askId)
     const res = await httpPost(url, reply)
     pending.delete(askId)
     zhLog("info", "injected reply", { id: askId, kind: p.kind, reply, url: routedUrl(url), response: res })
@@ -172,6 +175,7 @@ export const ZhBridgePlugin: Plugin = async ({ client, directory, serverUrl, log
 
   async function rejectAsk(askId: string, kind: Pending["kind"]) {
     const url = kind === "permission" ? `/permission/${askId}/reply` : `/question/${askId}/reject`
+    pluginReplied.add(askId)
     const res = await httpPost(url, kind === "permission" ? { reply: "reject" } : undefined)
     zhLog("info", "reject sent", { id: askId, kind, response: res })
   }
@@ -271,10 +275,11 @@ export const ZhBridgePlugin: Plugin = async ({ client, directory, serverUrl, log
         e.type === "question.replied" ||
         e.type === "question.rejected"
       ) {
-        // 本地已答/拒：停止轮询，并异步通知 relay 删除对应卡片（无需等待）
+        // 本地已答/拒：停止轮询；仅当非插件自身注入的回复时，异步通知 relay 删除对应卡片
         const id = e.properties?.requestID
         if (!id) return
         pending.delete(id)
+        if (pluginReplied.delete(id)) return
         fireDelete(id)
       }
     },
