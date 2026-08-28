@@ -192,6 +192,39 @@ export const ZhBridgePlugin: Plugin = async ({ client, directory, serverUrl, log
       .catch((err) => zhLog("warn", "delete failed", { id: askId, error: String(err) }))
   }
 
+  // 任务完成通知：session 空闲且 reason=completed 时推送到招乎（开关激活后生效），异步不阻塞
+  function notifyCompletion(sessionID: string) {
+    void (async () => {
+      let title = ""
+      try {
+        const result = await client.session.get({ path: { id: sessionID } })
+        title = result.data?.title ?? ""
+      } catch (err) {
+        zhLog("warn", "session title fetch failed", { sessionID, error: String(err) })
+      }
+      const text = title ? `${title} 任务完成` : "任务完成"
+      const url = `${RELAY_URL}/message/testagent/notification/notify`
+      const body = {
+        content: [
+          { type: "title", content: "TestAgent任务通知", style: 1 },
+          { type: "content", list: [{ content: text, style: 0 }] },
+        ],
+        userId: USER_ID(),
+      }
+      zhLog("info", "completion notify request", { sessionID, title, url, body })
+      try {
+        const res = await fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", ...relayHeaders() },
+          body: JSON.stringify(body),
+        })
+        zhLog("info", "completion notify response", { sessionID, status: res.status })
+      } catch (err) {
+        zhLog("warn", "completion notify failed", { sessionID, error: String(err) })
+      }
+    })()
+  }
+
   async function pollOnce(): Promise<boolean> {
     let anyPending = false
     for (const [askId, p] of pending) {
@@ -281,6 +314,11 @@ export const ZhBridgePlugin: Plugin = async ({ client, directory, serverUrl, log
         pending.delete(id)
         if (pluginReplied.delete(id)) return
         fireDelete(id)
+      } else if (e.type === "session.status") {
+        const status = e.properties?.status
+        if (status?.type === "idle" && status.reason === "completed") {
+          notifyCompletion(e.properties?.sessionID)
+        }
       }
     },
   }
