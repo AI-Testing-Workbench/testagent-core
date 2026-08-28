@@ -720,6 +720,13 @@ function activatePendingGeneration(
   }
 
   if (messageId) gen.assistantMessageId = messageId
+  // chat.params is not a reliable request-snapshot boundary on every
+  // OpenCode/TestAgent version. In some versions the messages transform hook
+  // for this request is delivered just after chat.params, which otherwise
+  // leaves every generation with the preceding request's history. The first
+  // concrete response part/tool hook is the earliest boundary at which the
+  // request is known to have started and its transformed messages are stable.
+  refreshGenerationInputFromCachedMessages(gen)
   addGenerationToBatch(gen.traceId, gen.generationData)
   createGenerationImmediately(gen.generationData)
 
@@ -1462,8 +1469,8 @@ function generateTestagentTestcaseId(): string {
 
 // 替换 YAML 中不符合 testagent 模式的 testcase_id
 function replaceNonTestagentTestcaseIds(text: string): string {
-  // 匹配 testcase_id: TC... 格式，使用\b确保后面没有更多字符
-  return text.replace(/testcase_id:\s*(TC[a-z0-9]{32})\b/g, (match, testcaseId) => {
+  // 匹配 testcase_id: TC... 格式
+  return text.replace(/testcase_id:\s*(TC[a-z0-9]{32})/g, (match, testcaseId) => {
     if (hasTestagentPattern(testcaseId)) {
       return match // 保留符合模式的 testcase_id
     }
@@ -2589,6 +2596,7 @@ function updateGenerationImmediately(traceId: string, genId: string, updates: Pa
         ...(existingGeneration.parentObservationId
           ? { parentObservationId: existingGeneration.parentObservationId }
           : {}),
+        ...(existingGeneration.input !== undefined ? { input: existingGeneration.input } : {}),
         ...(existingGeneration.output !== undefined ? { output: existingGeneration.output } : {}),
         ...(existingGeneration.endTime ? { endTime: existingGeneration.endTime } : {}),
         ...(existingGeneration.completionStartTime
@@ -3433,34 +3441,16 @@ async function finalizeGeneration(
     finish_reason: finishReason,
   }
 
-  const cachedMessages = llmInputs.get(sessionId)
-  const metadataMessages = g.input?.messages || []
-  const system = systemPrompts.get(sessionId) || []
-  const tools = [...allToolDefs.values()]
-
-  let fullInputMessages: any[] = []
-  if (cachedMessages && cachedMessages.length > 0) {
-    const built = buildLLMInput(cachedMessages, system, tools)
-    fullInputMessages = (built.dict as any).messages || []
-  } else if (metadataMessages.length > 0) {
-    fullInputMessages = metadataMessages
-  }
-
-  const hasToolResult = fullInputMessages.some((m: any) => m.role === "tool")
-  if (!hasToolResult && g.toolResults && g.toolResults.length > 0) {
-    const toolResultMessages = g.toolResults.map((tr: any) => ({
-      role: "tool",
-      content: [{ type: "tool-result", content: tr.output }],
-    }))
-    fullInputMessages = [...fullInputMessages, ...toolResultMessages]
-  }
-
-  const updatedInput = {
-    messages: fullInputMessages,
-    tools: g.input?.tools || [],
-  }
+  // The request input was repaired and frozen when this generation became
+  // active. Do not rebuild it from the session's latest cache here: a delayed
+  // step-finish may run after the next LLM request has already updated that
+  // cache.
+  const updatedInput = g.input || { messages: [], tools: [] }
+  const serializedInput = JSON.stringify(updatedInput, null, 2)
+  g.generationData.input = serializedInput
 
   const generationUpdates: Partial<GenerationData> = {
+    input: serializedInput,
     endTime: endTime.toISOString(),
     completionStartTime: g.completionStartTime?.toISOString(),
     usage,
@@ -3647,7 +3637,7 @@ function updateTraceBatch(traceId: string, updates: Partial<TraceBatch>) {
 
 // ==================== 消息格式转换 ====================
 
-function convertToLLMMessages(messages: any[]): any[] {
+export function convertToLLMMessages(messages: any[]): any[] {
   const result: any[] = []
 
   for (const m of messages) {
@@ -4007,7 +3997,7 @@ function extractJsonSchema(obj: Record<string, any>): any {
  * @param tools 工具定义数组
  * @returns { json: string, dict: object }
  */
-function buildLLMInput(messages: any[], system: string[], tools: any[]): { json: string; dict: object } {
+export function buildLLMInput(messages: any[], system: string[], tools: any[]): { json: string; dict: object } {
   const systemMessages = system.map((s) => ({
     role: "system",
     content: s,
@@ -4031,6 +4021,52 @@ function buildLLMInput(messages: any[], system: string[], tools: any[]): { json:
   })
   const dict = { messages: formattedMessages, tools: formattedTools }
   return { json: JSON.stringify(dict, null, 2), dict }
+}
+
+function getRawMessageId(message: any): string | undefined {
+  const id = message?.info?.id ?? message?.info?.messageID ?? message?.messageID ?? message?.id
+  return typeof id === "string" && id ? id : undefined
+}
+
+export function selectGenerationRequestMessages(cachedMessages: any[], assistantMessageId?: string): any[] {
+  if (!assistantMessageId) return cachedMessages
+
+  const assistantBoundary = cachedMessages.findIndex(
+    (message) => message?.info?.role === "assistant" && getRawMessageId(message) === assistantMessageId,
+  )
+  return assistantBoundary >= 0 ? cachedMessages.slice(0, assistantBoundary) : cachedMessages
+}
+
+/**
+ * Refresh a generation with the latest transformed request messages.
+ *
+ * Hook ordering differs across OpenCode/TestAgent versions: some invoke
+ * chat.params before experimental.chat.messages.transform. Waiting until the
+ * generation is activated fixes that one-request lag. If its first concrete
+ * event runs after a newer transform, slice at this generation's assistant message;
+ * everything before that message is precisely the causal input of this LLM
+ * call, while its own assistant/tool output must never be included.
+ */
+function refreshGenerationInputFromCachedMessages(g: GenInfo): boolean {
+  const cachedMessages = llmInputs.get(g.sessionId)
+  if (!cachedMessages || cachedMessages.length === 0) return false
+
+  const requestMessages = selectGenerationRequestMessages(cachedMessages, g.assistantMessageId)
+
+  const system = systemPrompts.get(g.sessionId) || []
+  const built = buildLLMInput(requestMessages, system, [])
+  const updatedInput = {
+    messages: (built.dict as any).messages || [],
+    // Tool availability belongs to the request captured by chat.params. Do
+    // not rebuild it from the global registry, which may contain tools that
+    // were filtered out for this agent or changed by a later request.
+    tools: g.input?.tools || [],
+  }
+  const serializedInput = JSON.stringify(updatedInput, null, 2)
+
+  g.input = updatedInput
+  g.generationData.input = serializedInput
+  return true
 }
 
 // testagent_change start - record only active tools in Langfuse LLM input
@@ -5362,7 +5398,7 @@ export const LangfusePlugin: Plugin = async (ctx) => {
           } else {
             // 检查是否有任何 testcase_id 符合 testagent 模式
             // 正则匹配: TC + 2个字符 + t + 3个字符 + e + 2个字符 + s + 3个字符 + t + 2个字符 + a + 3个字符 + g + 2个字符 + e + 3个字符 + n + 2个字符 + t + 1个字符
-            const testagentPattern = /testcase_id:\s*(TC[a-f0-9]{2}t[a-f0-9]{3}e[a-f0-9]{2}s[a-f0-9]{3}t[a-f0-9]{2}a[a-f0-9]{3}g[a-f0-9]{2}e[a-f0-9]{3}n[a-f0-9]{2}t[a-f0-9])\b/g
+            const testagentPattern = /testcase_id:\s*(TC[a-f0-9]{2}t[a-f0-9]{3}e[a-f0-9]{2}s[a-f0-9]{3}t[a-f0-9]{2}a[a-f0-9]{3}g[a-f0-9]{2}e[a-f0-9]{3}n[a-f0-9]{2}t[a-f0-9])/gi
             const hasTestagentId = testagentPattern.test(raw)
             
             if (hasTestagentId) {
@@ -5402,7 +5438,7 @@ export const LangfusePlugin: Plugin = async (ctx) => {
             } else {
               // 检查是否有任何 testcase_id 符合 testagent 模式
               // 正则匹配: TC + 2个字符 + t + 3个字符 + e + 2个字符 + s + 3个字符 + t + 2个字符 + a + 3个字符 + g + 2个字符 + e + 3个字符 + n + 2个字符 + t + 1个字符
-              const testagentPattern = /testcase_id:\s*(TC[a-f0-9]{2}t[a-f0-9]{3}e[a-f0-9]{2}s[a-f0-9]{3}t[a-f0-9]{2}a[a-f0-9]{3}g[a-f0-9]{2}e[a-f0-9]{3}n[a-f0-9]{2}t[a-f0-9])\b/g
+              const testagentPattern = /testcase_id:\s*(TC[a-f0-9]{2}t[a-f0-9]{3}e[a-f0-9]{2}s[a-f0-9]{3}t[a-f0-9]{2}a[a-f0-9]{3}g[a-f0-9]{2}e[a-f0-9]{3}n[a-f0-9]{2}t[a-f0-9])/gi
               const hasTestagentId = testagentPattern.test(raw)
               
               if (hasTestagentId) {
