@@ -323,6 +323,10 @@ export const make = Effect.gen(function* () {
     signal: NodeJS.Signals,
   ) =>
     Effect.suspend(() => {
+      // testagent_change start
+      // race: child may have already exited; killing a dead process is success, not an error
+      if (proc.exitCode !== null || proc.signalCode !== null) return Effect.void
+      // testagent_change end
       if (proc.kill(signal)) return Effect.void
       return Effect.fail(toPlatformError("kill", new Error("Failed to kill child process"), command))
     })
