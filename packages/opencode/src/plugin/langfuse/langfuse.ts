@@ -26,7 +26,7 @@ const LANGFUSE_BASE_URL = decodeURIComponent(
   atob("aHR0cCUzQSUyRiUyRnRlc3RodWItYWdlbnQtdHJhY2UucGFhc3VhdC5jbWJjaGluYS5jbg=="),
 )
 const VERSION = "1.0.4"
-const TESTAGENT_VERSION = "1.4.0"
+const TESTAGENT_VERSION = "1.5.0"
 const LANGFUSE_FETCH_TIMEOUT_MS = 10_000
 const LANGFUSE_KEY_LOOKUP_TIMEOUT_MS = 15000
 const TESTAGENT_DATA_DIR = join(homedir(), ".local", "share", "testagent")
@@ -60,6 +60,17 @@ const SESSION_CREATED_WAIT_MS = 1000
 // Plugin events may be delivered out of order: session.idle can arrive just
 // before the final step-finish event that contains usage and finish reason.
 const SESSION_IDLE_FINALIZATION_WAIT_MS = 1000
+// Let out-of-order part snapshots settle after step-finish without waiting for
+// the whole session/trace. The timer is reset by every late text/reasoning part.
+const OBSERVATION_COMPLETION_QUIET_MS = 250
+// Completion IDs are short-lived deduplication tombstones. Normal trace
+// cleanup removes them immediately; these limits protect against traces that
+// never reach session.idle because of a crash or missing lifecycle event.
+const COMPLETED_OBSERVATION_STATE_TTL_MS = 6 * 60 * 60 * 1000
+const COMPLETED_OBSERVATION_STATE_MONITOR_INTERVAL_MS = 60 * 1000
+const MAX_COMPLETED_OBSERVATIONS_PER_TRACE = 10_000
+const MAX_COMPLETED_OBSERVATIONS_TOTAL = 50_000
+const MAX_COMPLETED_OBSERVATION_TRACES = 1_000
 const pendingIdleFinalizations = new Set<string>()
 
 function generateSessionId(): string {
@@ -152,16 +163,28 @@ interface GenInfo {
   stepNumber: number
   output: string
   parts: string[]
+  // OpenCode emits text/reasoning as mutable message parts. Keep the latest
+  // value per part instead of appending every message.part.updated snapshot.
+  textPartSnapshots: Map<string, GenerationTextPartSnapshot>
+  textPartSequence: number
   toolCalls: Array<{ toolCallId: string; name: string; args: any }>
   toolResults?: Array<{ toolCallId: string; name: string; output: string; index: number; args: any; metadata?: any }>
   isSkillChild: boolean
   hasUsage: boolean
-  finalOutput: { text: string; tool_calls?: any[]; usage?: any } | null
+  finalOutput: { text: string; tool_calls?: any[]; usage?: any; finish_reason?: string } | null
   assistantMessageId?: string
   modelParameters: Record<string, any>
   input: any
   generationData: GenerationData
   pendingSequence: number
+}
+
+interface GenerationTextPartSnapshot {
+  partId: string
+  type: "text" | "reasoning" | "unknown"
+  text: string
+  sequence: number
+  complete: boolean
 }
 
 /**
@@ -278,8 +301,217 @@ let traceUpsertTimer: ReturnType<typeof setTimeout> | null = null
 const pendingBackgroundUpdateEvents = new Map<string, number>()
 const failedIngestionUpdateEventIds = new Map<string, Set<string>>()
 const ingestionEventByteLengths = new WeakMap<object, number>()
+const completedObservationIdsByTrace = new Map<string, Set<string>>()
+const completedObservationTraceTouchedAt = new Map<string, number>()
+let completedObservationIdCount = 0
+let completedObservationStateMonitorTimer: ReturnType<typeof setInterval> | null = null
+const pendingCompletedObservationEvictions = {
+  capacity: { observationCount: 0, traceCount: 0 },
+  timeout: { observationCount: 0, traceCount: 0 },
+}
+const generationCompletionTimers = new Map<string, ReturnType<typeof setTimeout>>()
 let shutdownFlushPromise: Promise<void> | null = null
 let shutdownFlushCompleted = false
+
+function reportCompletedObservationState() {
+  const tags = {
+    type: "observationCompletionDedup",
+    reason: "periodic",
+  }
+  trackEvent("metric", {
+    metricName: "plugin.langfuse.observation_completion.dedup.observation_count",
+    metricValue: completedObservationIdCount,
+    tags,
+  })
+  trackEvent("metric", {
+    metricName: "plugin.langfuse.observation_completion.dedup.trace_count",
+    metricValue: completedObservationIdsByTrace.size,
+    tags,
+  })
+}
+
+function recordCompletedObservationStateEviction(
+  reason: "capacity" | "timeout",
+  observationCount: number,
+  traceCount: number,
+) {
+  if (observationCount <= 0 && traceCount <= 0) return
+  pendingCompletedObservationEvictions[reason].observationCount += observationCount
+  pendingCompletedObservationEvictions[reason].traceCount += traceCount
+}
+
+function flushCompletedObservationStateEvictionLog() {
+  const capacity = { ...pendingCompletedObservationEvictions.capacity }
+  const timeout = { ...pendingCompletedObservationEvictions.timeout }
+  const observationCount = capacity.observationCount + timeout.observationCount
+  const traceCount = capacity.traceCount + timeout.traceCount
+  if (observationCount <= 0 && traceCount <= 0) return
+
+  pendingCompletedObservationEvictions.capacity.observationCount = 0
+  pendingCompletedObservationEvictions.capacity.traceCount = 0
+  pendingCompletedObservationEvictions.timeout.observationCount = 0
+  pendingCompletedObservationEvictions.timeout.traceCount = 0
+  // Capacity/timeout cleanup can happen repeatedly on an abnormal long-lived
+  // trace. Aggregate it into at most one log per monitor interval and do not
+  // turn internal dedup housekeeping into high-volume telemetry.
+  trackEvent("log", {
+    level: "warn",
+    message: "聚合清理 observation 完成去重状态",
+    data: {
+      observationCount,
+      traceCount,
+      capacity,
+      timeout,
+      remainingObservationCount: completedObservationIdCount,
+      remainingTraceCount: completedObservationIdsByTrace.size,
+    },
+  })
+}
+
+function clearCompletedObservationTrace(traceId: string) {
+  const observationIds = completedObservationIdsByTrace.get(traceId)
+  if (!observationIds) {
+    completedObservationTraceTouchedAt.delete(traceId)
+    return 0
+  }
+
+  const removedCount = observationIds.size
+  completedObservationIdsByTrace.delete(traceId)
+  completedObservationTraceTouchedAt.delete(traceId)
+  completedObservationIdCount = Math.max(0, completedObservationIdCount - removedCount)
+  return removedCount
+}
+
+function hasCompletedObservation(traceId: string, observationId: string) {
+  const observationIds = completedObservationIdsByTrace.get(traceId)
+  if (!observationIds?.has(observationId)) return false
+  completedObservationTraceTouchedAt.set(traceId, Date.now())
+  return true
+}
+
+function enforceCompletedObservationStateLimits(currentTraceId: string) {
+  let evictedObservationCount = 0
+  let evictedTraceCount = 0
+  const currentTraceObservationIds = completedObservationIdsByTrace.get(currentTraceId)
+  while (currentTraceObservationIds && currentTraceObservationIds.size > MAX_COMPLETED_OBSERVATIONS_PER_TRACE) {
+    const oldestObservationId = currentTraceObservationIds.values().next().value as string | undefined
+    if (!oldestObservationId) break
+    currentTraceObservationIds.delete(oldestObservationId)
+    completedObservationIdCount = Math.max(0, completedObservationIdCount - 1)
+    evictedObservationCount += 1
+  }
+
+  if (
+    completedObservationIdCount > MAX_COMPLETED_OBSERVATIONS_TOTAL ||
+    completedObservationIdsByTrace.size > MAX_COMPLETED_OBSERVATION_TRACES
+  ) {
+    const tracesByAge = [...completedObservationIdsByTrace.keys()].sort(
+      (left, right) =>
+        (completedObservationTraceTouchedAt.get(left) ?? 0) -
+        (completedObservationTraceTouchedAt.get(right) ?? 0),
+    )
+    for (const traceId of tracesByAge) {
+      if (
+        completedObservationIdCount <= MAX_COMPLETED_OBSERVATIONS_TOTAL &&
+        completedObservationIdsByTrace.size <= MAX_COMPLETED_OBSERVATION_TRACES
+      ) {
+        break
+      }
+      const removedCount = clearCompletedObservationTrace(traceId)
+      if (removedCount > 0) {
+        evictedObservationCount += removedCount
+        evictedTraceCount += 1
+      }
+    }
+  }
+
+  recordCompletedObservationStateEviction("capacity", evictedObservationCount, evictedTraceCount)
+}
+
+function markCompletedObservation(traceId: string, observationId: string) {
+  let observationIds = completedObservationIdsByTrace.get(traceId)
+  if (!observationIds) {
+    observationIds = new Set<string>()
+    completedObservationIdsByTrace.set(traceId, observationIds)
+  }
+  if (observationIds.has(observationId)) {
+    completedObservationTraceTouchedAt.set(traceId, Date.now())
+    return false
+  }
+
+  observationIds.add(observationId)
+  completedObservationTraceTouchedAt.set(traceId, Date.now())
+  completedObservationIdCount += 1
+  enforceCompletedObservationStateLimits(traceId)
+  return observationIds.has(observationId)
+}
+
+function sweepCompletedObservationState(now = Date.now()) {
+  let evictedObservationCount = 0
+  let evictedTraceCount = 0
+  for (const [traceId, touchedAt] of [...completedObservationTraceTouchedAt]) {
+    if (now - touchedAt < COMPLETED_OBSERVATION_STATE_TTL_MS) continue
+    const removedCount = clearCompletedObservationTrace(traceId)
+    if (removedCount > 0) {
+      evictedObservationCount += removedCount
+      evictedTraceCount += 1
+    }
+  }
+  recordCompletedObservationStateEviction("timeout", evictedObservationCount, evictedTraceCount)
+  flushCompletedObservationStateEvictionLog()
+  reportCompletedObservationState()
+}
+
+function startCompletedObservationStateMonitor() {
+  if (completedObservationStateMonitorTimer) clearInterval(completedObservationStateMonitorTimer)
+  completedObservationStateMonitorTimer = setInterval(
+    sweepCompletedObservationState,
+    COMPLETED_OBSERVATION_STATE_MONITOR_INTERVAL_MS,
+  )
+  completedObservationStateMonitorTimer.unref?.()
+  sweepCompletedObservationState()
+}
+
+function stopCompletedObservationStateMonitor() {
+  if (!completedObservationStateMonitorTimer) return
+  clearInterval(completedObservationStateMonitorTimer)
+  completedObservationStateMonitorTimer = null
+}
+
+function clearAllCompletedObservationState() {
+  completedObservationIdsByTrace.clear()
+  completedObservationTraceTouchedAt.clear()
+  completedObservationIdCount = 0
+  pendingCompletedObservationEvictions.capacity.observationCount = 0
+  pendingCompletedObservationEvictions.capacity.traceCount = 0
+  pendingCompletedObservationEvictions.timeout.observationCount = 0
+  pendingCompletedObservationEvictions.timeout.traceCount = 0
+}
+
+function migrateCompletedObservationState(oldTraceId: string, newTraceId: string) {
+  if (oldTraceId === newTraceId) return
+  const oldObservationIds = completedObservationIdsByTrace.get(oldTraceId)
+  if (!oldObservationIds) return
+
+  const targetObservationIds = completedObservationIdsByTrace.get(newTraceId) ?? new Set<string>()
+  const targetSizeBefore = targetObservationIds.size
+  for (const observationId of oldObservationIds) targetObservationIds.add(observationId)
+  completedObservationIdsByTrace.set(newTraceId, targetObservationIds)
+  completedObservationIdsByTrace.delete(oldTraceId)
+  completedObservationIdCount -= oldObservationIds.size
+  completedObservationIdCount += targetObservationIds.size - targetSizeBefore
+  completedObservationIdCount = Math.max(0, completedObservationIdCount)
+  completedObservationTraceTouchedAt.set(
+    newTraceId,
+    Math.max(
+      completedObservationTraceTouchedAt.get(oldTraceId) ?? 0,
+      completedObservationTraceTouchedAt.get(newTraceId) ?? 0,
+      Date.now(),
+    ),
+  )
+  completedObservationTraceTouchedAt.delete(oldTraceId)
+  enforceCompletedObservationStateLimits(newTraceId)
+}
 
 function getCurrentSkillContext(sessionId?: string, traceId?: string): SkillContext | null {
   if (!sessionId) return null
@@ -340,14 +572,50 @@ function withoutSkillInfo(metadata: Record<string, any> = {}) {
   return rest
 }
 
+function withoutObservationCompletionFields(metadata: Record<string, any> = {}) {
+  const {
+    finish_reason: _finishReason,
+    toolPartCompleted: _toolPartCompleted,
+    toolAfterReceived: _toolAfterReceived,
+    toolCompletionSource: _toolCompletionSource,
+    agentCompleted: _agentCompleted,
+    agentCompletionSource: _agentCompletionSource,
+    observationCompleted: _observationCompleted,
+    observationCompletionSource: _observationCompletionSource,
+    observationCompletionStatus: _observationCompletionStatus,
+    observationCompletedAt: _observationCompletedAt,
+    ...rest
+  } = metadata || {}
+  return rest
+}
+
+function getObservationSubagentType(traceId: string, observationId: string): string | undefined {
+  const batch = traceBatches.get(traceId)
+  const observation =
+    batch?.generations.find((generation) => generation.id === observationId) ??
+    batch?.spans.find((span) => span.id === observationId)
+  const subagentType = observation?.metadata?.subagent_type
+  return typeof subagentType === "string" && subagentType.trim() ? subagentType : undefined
+}
+
 function withTraceSkillInfoForObservationUpdate(
   traceId: string,
   observationId: string,
   metadata: Record<string, any> = {},
 ) {
+  // LLM/tool updates often replace the whole metadata object. Once a node has
+  // been associated with a subagent, keep that ownership marker on every later
+  // partial/final update, including the completion snapshot.
+  const existingSubagentType = getObservationSubagentType(traceId, observationId)
+  const metadataWithSubagentType =
+    metadata.subagent_type === undefined && existingSubagentType
+      ? { ...metadata, subagent_type: existingSubagentType }
+      : metadata
   const count = observationSkillInfoCounts.get(observationSkillInfoKey(traceId, observationId))
   const skillInfo = count === undefined ? undefined : getTraceSkillInfo(traceId, count)
-  return skillInfo && skillInfo.length > 0 ? { ...metadata, skillInfo } : withoutSkillInfo(metadata)
+  return skillInfo && skillInfo.length > 0
+    ? { ...metadataWithSubagentType, skillInfo }
+    : withoutSkillInfo(metadataWithSubagentType)
 }
 
 function getLatestActiveGeneration(sessionId: string): GenInfo | undefined {
@@ -358,6 +626,26 @@ function getLatestActiveGeneration(sessionId: string): GenInfo | undefined {
 function getNextFinishingGeneration(sessionId: string): GenInfo | undefined {
   const active = activeGenerations.get(sessionId)
   return active?.find((g) => !g.finalOutput) ?? active?.[0]
+}
+
+function getTextPartId(part: any): string | undefined {
+  const partId = part?.id ?? part?.partID
+  return typeof partId === "string" && partId ? partId : undefined
+}
+
+function findGenerationForTextPart(sessionId: string, partId?: string): GenInfo | undefined {
+  if (!partId) return undefined
+
+  const active = activeGenerations.get(sessionId) ?? []
+  const activeMatch = [...active].reverse().find((g) => g.textPartSnapshots.has(partId))
+  if (activeMatch) return activeMatch
+
+  // A final part snapshot can be delivered after step-finish. Retain the
+  // ownership established by the initial part event so that late text can
+  // repair the completed generation without losing its usage data.
+  return [...allGenerations]
+    .reverse()
+    .find((g) => g.sessionId === sessionId && g.textPartSnapshots.has(partId))
 }
 
 function getActiveGenerationForPart(sessionId: string, part: any): GenInfo | undefined {
@@ -423,8 +711,22 @@ function activatePendingGeneration(
   if (currentSkill) {
     gen.isSkillChild = true
   }
+  const subagentType = getSessionSubagentType(sessionId, gen.traceId)
+  if (subagentType && gen.generationData.metadata.subagent_type !== subagentType) {
+    gen.generationData.metadata = {
+      ...gen.generationData.metadata,
+      subagent_type: subagentType,
+    }
+  }
 
   if (messageId) gen.assistantMessageId = messageId
+  // chat.params is not a reliable request-snapshot boundary on every
+  // OpenCode/TestAgent version. In some versions the messages transform hook
+  // for this request is delivered just after chat.params, which otherwise
+  // leaves every generation with the preceding request's history. The first
+  // concrete response part/tool hook is the earliest boundary at which the
+  // request is known to have started and its transformed messages are stable.
+  refreshGenerationInputFromCachedMessages(gen)
   addGenerationToBatch(gen.traceId, gen.generationData)
   createGenerationImmediately(gen.generationData)
 
@@ -436,13 +738,22 @@ function activatePendingGeneration(
   return gen
 }
 
-function getOrActivateGenerationForPart(sessionId: string, part: any, eventTime?: any): GenInfo | undefined {
+function getOrActivateGenerationForPart(
+  sessionId: string,
+  part: any,
+  eventTime?: any,
+  options?: { allowCompletedMessageReuse?: boolean },
+): GenInfo | undefined {
+  const ownedGeneration = findGenerationForTextPart(sessionId, getTextPartId(part))
+  if (ownedGeneration) return ownedGeneration
+
   const active = getActiveGenerationForPart(sessionId, part)
   if (active || !isGenerationPart(part)) return active
 
   // Never let a delayed part from a completed assistant message create or bind
   // the next pending LLM generation.
   if (
+    !options?.allowCompletedMessageReuse &&
     part?.messageID &&
     allGenerations.some(
       (gen) => gen.sessionId === sessionId && gen.assistantMessageId === part.messageID && !!gen.finalOutput,
@@ -553,6 +864,7 @@ function migrateTraceId(oldTraceId: string, newTraceId: string) {
   if (oldTraceId === newTraceId) return
 
   migrateQueuedIngestionTraceId(oldTraceId, newTraceId)
+  migrateCompletedObservationState(oldTraceId, newTraceId)
 
   const batch = traceBatches.get(oldTraceId)
   if (batch) {
@@ -813,6 +1125,12 @@ function getSessionObservationParent(
   return undefined
 }
 
+function getSessionSubagentType(sessionId: string, traceId = sessionToTrace.get(sessionId)): string | undefined {
+  const agentSpanId = sessionToAgentSpan.get(sessionId)
+  if (!traceId || !agentSpanId) return undefined
+  return getObservationSubagentType(traceId, agentSpanId)
+}
+
 async function queuePendingSubagent(parentSessionId: string, entry: { traceId: string; agentSpanId: string }) {
   const waitingSessions = pendingSubagentSessions.get(parentSessionId)
   const waitingSessionId = waitingSessions?.shift()
@@ -896,18 +1214,44 @@ function recordSessionSpan(sessionId: string, spanId: string) {
 }
 
 async function reparentSessionObservations(sessionId: string, traceId: string, agentSpanId: string) {
+  const subagentType = getObservationSubagentType(traceId, agentSpanId)
   for (const gen of allGenerations.filter((g) => g.sessionId === sessionId && g.traceId === traceId)) {
-    if (gen.parentObservationId === agentSpanId) continue
-    gen.parentObservationId = agentSpanId
-    const generationUpdates: Partial<GenerationData> = { parentObservationId: agentSpanId }
+    const existingGeneration = traceBatches.get(traceId)?.generations.find((item) => item.id === gen.genId)
+    const needsParentUpdate = gen.parentObservationId !== agentSpanId
+    const needsSubagentTypeUpdate = !!subagentType && existingGeneration?.metadata?.subagent_type !== subagentType
+    if (!needsParentUpdate && !needsSubagentTypeUpdate) continue
+
+    if (needsParentUpdate) {
+      gen.parentObservationId = agentSpanId
+      gen.generationData.parentObservationId = agentSpanId
+    }
+    if (needsSubagentTypeUpdate) {
+      gen.generationData.metadata = {
+        ...(existingGeneration?.metadata ?? gen.generationData.metadata),
+        subagent_type: subagentType,
+      }
+    }
+    const generationUpdates: Partial<GenerationData> = {
+      ...(needsParentUpdate ? { parentObservationId: agentSpanId } : {}),
+      ...(needsSubagentTypeUpdate ? { metadata: gen.generationData.metadata } : {}),
+    }
     updateGenerationInBatch(traceId, gen.genId, generationUpdates)
     updateGenerationImmediately(traceId, gen.genId, generationUpdates)
   }
 
   for (const spanId of sessionSpanIds.get(sessionId) ?? []) {
     const span = traceBatches.get(traceId)?.spans.find((s) => s.id === spanId)
-    if (!span || span.id === agentSpanId || span.parentObservationId === agentSpanId) continue
-    const spanUpdates: Partial<SpanData> = { parentObservationId: agentSpanId }
+    if (!span || span.id === agentSpanId) continue
+    const needsParentUpdate = span.parentObservationId !== agentSpanId
+    const needsSubagentTypeUpdate = !!subagentType && span.metadata?.subagent_type !== subagentType
+    if (!needsParentUpdate && !needsSubagentTypeUpdate) continue
+
+    const spanUpdates: Partial<SpanData> = {
+      ...(needsParentUpdate ? { parentObservationId: agentSpanId } : {}),
+      ...(needsSubagentTypeUpdate
+        ? { metadata: { ...span.metadata, subagent_type: subagentType } }
+        : {}),
+    }
     updateSpanInBatch(traceId, spanId, spanUpdates)
     updateSpanImmediately(traceId, spanId, spanUpdates)
   }
@@ -925,6 +1269,17 @@ function hasActiveSessionsForTrace(traceId: string): boolean {
 
 function cleanupTraceState(traceId: string, sessionIds: string[]) {
   const sessionIdSet = new Set(sessionIds)
+  const completedBatch = traceBatches.get(traceId)
+  // Normal lifecycle cleanup is silent. The periodic gauges are sufficient;
+  // one metric/log per trace would add noise unrelated to data delivery.
+  clearCompletedObservationTrace(traceId)
+  // Only LLM generations can own a completion timer. Tool/skill/subagent spans
+  // complete synchronously and do not need a pointless timer-map lookup.
+  for (const generation of completedBatch?.generations ?? []) {
+    const timer = generationCompletionTimers.get(generation.id)
+    if (timer) clearTimeout(timer)
+    generationCompletionTimers.delete(generation.id)
+  }
 
   traceBatches.delete(traceId)
   gens.delete(traceId)
@@ -1114,8 +1469,8 @@ function generateTestagentTestcaseId(): string {
 
 // 替换 YAML 中不符合 testagent 模式的 testcase_id
 function replaceNonTestagentTestcaseIds(text: string): string {
-  // 匹配 testcase_id: TC... 格式，使用\b确保后面没有更多字符
-  return text.replace(/testcase_id:\s*(TC[a-z0-9]{32})\b/g, (match, testcaseId) => {
+  // 匹配 testcase_id: TC... 格式
+  return text.replace(/testcase_id:\s*(TC[a-z0-9]{32})/g, (match, testcaseId) => {
     if (hasTestagentPattern(testcaseId)) {
       return match // 保留符合模式的 testcase_id
     }
@@ -1546,6 +1901,27 @@ function getIngestionUpdateKey(event: any): string | undefined {
   return `${event.type}:${event.body.id}`
 }
 
+function isObservationCompletionEvent(event: any) {
+  return event?.body?.metadata?.observationCompleted === true
+}
+
+function preservePendingObservationCompletion(existingEvent: any, nextEvent: any) {
+  if (!isObservationCompletionEvent(existingEvent) || isObservationCompletionEvent(nextEvent)) return nextEvent
+  return {
+    ...nextEvent,
+    // Keep one stable event ID so transport retries remain idempotent.
+    id: existingEvent.id,
+    body: {
+      ...existingEvent.body,
+      ...nextEvent.body,
+      metadata: {
+        ...(existingEvent.body?.metadata ?? {}),
+        ...(nextEvent.body?.metadata ?? {}),
+      },
+    },
+  }
+}
+
 function getBackgroundIngestionQueueSize() {
   return backgroundIngestionEvents.length - backgroundIngestionHead
 }
@@ -1594,16 +1970,49 @@ function rebuildFailedIngestionUpdateEventIds() {
 }
 
 function removeSupersededFailedIngestionUpdates(events: any[], retainedEventIds = new Set<string>()) {
-  const updateKeys = new Set(events.map(getIngestionUpdateKey).filter(Boolean))
+  const replacementByUpdateKey = new Map<string, any>()
+  for (const event of events) {
+    const updateKey = getIngestionUpdateKey(event)
+    if (updateKey) replacementByUpdateKey.set(updateKey, event)
+  }
+  const updateKeys = new Set(replacementByUpdateKey.keys())
   if (updateKeys.size === 0 || failedIngestionEvents.length === 0) return
+
+  const effectiveRetainedEventIds = new Set(retainedEventIds)
+  let mergedCompletionUpdate = false
+  // A completion update is the only event allowed to carry the terminal
+  // marker. If it is waiting for retry, a newer ordinary update must enrich
+  // that event instead of superseding it and silently losing completion.
+  for (let index = 0; index < failedIngestionEvents.length; index += 1) {
+    const failedEvent = failedIngestionEvents[index]
+    const updateKey = getIngestionUpdateKey(failedEvent)
+    const replacement = updateKey ? replacementByUpdateKey.get(updateKey) : undefined
+    if (!replacement || !isObservationCompletionEvent(failedEvent) || isObservationCompletionEvent(replacement)) {
+      continue
+    }
+
+    const merged = preservePendingObservationCompletion(failedEvent, replacement)
+    if (failedEvent.__langfuseRetryCount !== undefined) {
+      merged.__langfuseRetryCount = failedEvent.__langfuseRetryCount
+    }
+    failedIngestionEvents[index] = merged
+    mergedCompletionUpdate = true
+    effectiveRetainedEventIds.add(failedEvent.id)
+    // When the replacement was also queued as failed, its data is now already
+    // carried by the stable completion event and the duplicate can be removed.
+    effectiveRetainedEventIds.delete(replacement.id)
+  }
 
   const supersededEventIds = new Set<string>()
   for (const updateKey of updateKeys) {
     for (const eventId of failedIngestionUpdateEventIds.get(updateKey) ?? []) {
-      if (!retainedEventIds.has(eventId)) supersededEventIds.add(eventId)
+      if (!effectiveRetainedEventIds.has(eventId)) supersededEventIds.add(eventId)
     }
   }
-  if (supersededEventIds.size === 0) return
+  if (supersededEventIds.size === 0) {
+    if (mergedCompletionUpdate) replaceFailedIngestionEvents([...failedIngestionEvents])
+    return
+  }
 
   const remainingEvents = failedIngestionEvents.filter((event) => !supersededEventIds.has(event.id))
   replaceFailedIngestionEvents(remainingEvents)
@@ -1919,8 +2328,12 @@ function scheduleBackgroundIngestion(events: any[]) {
           0,
           backgroundIngestionBytes - getBackgroundIngestionEventByteLength(backgroundIngestionEvents[existingIndex]),
         )
-        backgroundIngestionEvents[existingIndex] = event
-        backgroundIngestionBytes += getBackgroundIngestionEventByteLength(event)
+        const coalescedEvent = preservePendingObservationCompletion(
+          backgroundIngestionEvents[existingIndex],
+          event,
+        )
+        backgroundIngestionEvents[existingIndex] = coalescedEvent
+        backgroundIngestionBytes += getBackgroundIngestionEventByteLength(coalescedEvent)
         pendingBackgroundUpdateEvents.set(updateKey!, existingIndex)
         continue
       }
@@ -2155,7 +2568,13 @@ function generationEventBody(gen: GenerationData) {
 function createGenerationImmediately(gen: GenerationData) {
   gen.metadata = withTraceSkillInfo(gen.traceId, gen.metadata)
   rememberObservationSkillInfoCount(gen.traceId, gen.id)
-  scheduleBackgroundIngestion([buildIngestionEvent("generation-create", generationEventBody(gen), gen.startTime)])
+  const outgoingGeneration: GenerationData = {
+    ...gen,
+    metadata: withoutObservationCompletionFields(gen.metadata),
+  }
+  scheduleBackgroundIngestion([
+    buildIngestionEvent("generation-create", generationEventBody(outgoingGeneration), gen.startTime),
+  ])
 }
 
 function updateGenerationImmediately(traceId: string, genId: string, updates: Partial<GenerationData>) {
@@ -2168,8 +2587,34 @@ function updateGenerationImmediately(traceId: string, genId: string, updates: Pa
   // update: some ingestion implementations otherwise use the event timestamp
   // as the end boundary for an update that omits endTime.
   const existingGeneration = traceBatches.get(traceId)?.generations.find((generation) => generation.id === genId)
-  const endTime = normalizedUpdates.endTime ?? existingGeneration?.endTime
-  const modelMetadata = updates.metadata?.model ?? {}
+  // Pending generation updates are coalesced by ID and the newest event
+  // replaces the older one. Carry the current mutable observation state in
+  // every update so a later text/reparent update cannot discard usage or other
+  // terminal fields from a still-queued step-finish update.
+  const preservedState: Partial<GenerationData> = existingGeneration
+    ? {
+        ...(existingGeneration.parentObservationId
+          ? { parentObservationId: existingGeneration.parentObservationId }
+          : {}),
+        ...(existingGeneration.input !== undefined ? { input: existingGeneration.input } : {}),
+        ...(existingGeneration.output !== undefined ? { output: existingGeneration.output } : {}),
+        ...(existingGeneration.endTime ? { endTime: existingGeneration.endTime } : {}),
+        ...(existingGeneration.completionStartTime
+          ? { completionStartTime: existingGeneration.completionStartTime }
+          : {}),
+        ...(existingGeneration.usage ? { usage: existingGeneration.usage } : {}),
+        modelParameters: existingGeneration.modelParameters,
+        metadata: existingGeneration.metadata,
+        tags: existingGeneration.tags,
+      }
+    : {}
+  const effectiveUpdates = { ...preservedState, ...normalizedUpdates }
+  const outgoingUpdates =
+    effectiveUpdates.metadata !== undefined
+      ? { ...effectiveUpdates, metadata: withoutObservationCompletionFields(effectiveUpdates.metadata) }
+      : effectiveUpdates
+  const endTime = effectiveUpdates.endTime
+  const modelMetadata = effectiveUpdates.metadata?.model ?? {}
   scheduleBackgroundIngestion([
     buildIngestionEvent(
       "generation-update",
@@ -2178,7 +2623,7 @@ function updateGenerationImmediately(traceId: string, genId: string, updates: Pa
         traceId,
         selectedModel: modelMetadata.selectedModel,
         resolvedModel: modelMetadata.resolvedModel,
-        ...normalizedUpdates,
+        ...outgoingUpdates,
         ...(endTime ? { endTime } : {}),
       },
       endTime,
@@ -2202,10 +2647,79 @@ function spanEventBody(span: SpanData) {
   }
 }
 
+function buildObservationCompletionMetadata(
+  metadata: Record<string, any>,
+  source: "step-finish" | "message.part.updated" | "tool.execute.after" | "session.idle",
+  completedAt = new Date().toISOString(),
+) {
+  const nodeType = metadata?.nodeType
+  return {
+    ...metadata,
+    ...(nodeType === "subagent"
+      ? {
+          agentCompleted: true,
+          agentCompletionSource: source,
+        }
+      : {}),
+    observationCompleted: true,
+    observationCompletionSource: source,
+    observationCompletionStatus: "success",
+    observationCompletedAt: completedAt,
+  }
+}
+
+function emitGenerationObservationCompleted(g: GenInfo) {
+  if (hasCompletedObservation(g.traceId, g.genId)) return false
+  const generation = traceBatches.get(g.traceId)?.generations.find((item) => item.id === g.genId)
+  if (!generation?.endTime) return false
+
+  const completedGeneration: GenerationData = {
+    ...generation,
+    metadata: buildObservationCompletionMetadata(
+      generation.metadata,
+      "step-finish",
+      generation.endTime,
+    ),
+  }
+  if (!markCompletedObservation(g.traceId, g.genId)) return false
+  scheduleBackgroundIngestion([
+    buildIngestionEvent(
+      "generation-update",
+      generationEventBody(completedGeneration),
+      completedGeneration.endTime,
+    ),
+  ])
+  return true
+}
+
+function emitSpanObservationCompleted(
+  traceId: string,
+  spanId: string,
+  source: "message.part.updated" | "tool.execute.after" | "session.idle",
+) {
+  if (hasCompletedObservation(traceId, spanId)) return false
+  const span = traceBatches.get(traceId)?.spans.find((item) => item.id === spanId)
+  if (!span?.endTime || !hasOwn(span, "output")) return false
+
+  const completedSpan: SpanData = {
+    ...span,
+    metadata: buildObservationCompletionMetadata(span.metadata, source, span.endTime),
+  }
+  if (!markCompletedObservation(traceId, spanId)) return false
+  scheduleBackgroundIngestion([
+    buildIngestionEvent("span-update", spanEventBody(completedSpan), completedSpan.endTime),
+  ])
+  return true
+}
+
 function createSpanImmediately(span: SpanData) {
   span.metadata = withTraceSkillInfo(span.traceId, span.metadata)
   rememberObservationSkillInfoCount(span.traceId, span.id)
-  scheduleBackgroundIngestion([buildIngestionEvent("span-create", spanEventBody(span), span.startTime)])
+  const outgoingSpan: SpanData = {
+    ...span,
+    metadata: withoutObservationCompletionFields(span.metadata),
+  }
+  scheduleBackgroundIngestion([buildIngestionEvent("span-create", spanEventBody(outgoingSpan), span.startTime)])
 }
 
 function updateSpanImmediately(traceId: string, spanId: string, updates: Partial<SpanData>) {
@@ -2213,6 +2727,10 @@ function updateSpanImmediately(traceId: string, spanId: string, updates: Partial
     updates.metadata !== undefined
       ? { ...updates, metadata: withTraceSkillInfoForObservationUpdate(traceId, spanId, updates.metadata) }
       : updates
+  const outgoingUpdates =
+    normalizedUpdates.metadata !== undefined
+      ? { ...normalizedUpdates, metadata: withoutObservationCompletionFields(normalizedUpdates.metadata) }
+      : normalizedUpdates
   // Do not let a late metadata/parent update reopen a completed tool span.
   // Keep both the body endTime and ingestion timestamp on the original end.
   const existingSpan = traceBatches.get(traceId)?.spans.find((span) => span.id === spanId)
@@ -2220,7 +2738,7 @@ function updateSpanImmediately(traceId: string, spanId: string, updates: Partial
   scheduleBackgroundIngestion([
     buildIngestionEvent(
       "span-update",
-      { id: spanId, traceId, ...normalizedUpdates, ...(endTime ? { endTime } : {}) },
+      { id: spanId, traceId, ...outgoingUpdates, ...(endTime ? { endTime } : {}) },
       endTime,
     ),
   ])
@@ -2341,6 +2859,42 @@ async function updateToolSpanOutput(traceId: string, spanId: string, endTime: Da
 
   updateSpanInBatch(traceId, spanId, spanUpdates)
   updateSpanImmediately(traceId, spanId, spanUpdates)
+  tryCompleteToolObservation(traceId, spanId)
+}
+
+function tryCompleteToolObservation(traceId: string, spanId: string) {
+  const span = traceBatches.get(traceId)?.spans.find((item) => item.id === spanId)
+  if (!span?.endTime || !hasOwn(span, "output")) return false
+
+  const metadata = span.metadata ?? {}
+  if (
+    metadata.nodeType === "tool" &&
+    metadata.toolPartCompleted === true &&
+    metadata.toolAfterReceived === true &&
+    metadata.toolCompletionSource === "message.part.updated"
+  ) {
+    return emitSpanObservationCompleted(traceId, spanId, "message.part.updated")
+  }
+
+  if (
+    metadata.nodeType === "skill" &&
+    metadata.toolAfterReceived === true &&
+    metadata.toolCompletionSource === "tool.execute.after"
+  ) {
+    return emitSpanObservationCompleted(traceId, spanId, "tool.execute.after")
+  }
+
+  return false
+}
+
+function cleanupToolCallIfCompleted(callID: string, traceId?: string) {
+  const callInfo = toolCallInfos.get(callID)
+  const spanId = callInfo?.spanId ?? toolSpanIds.get(callID)
+  const resolvedTraceId = callInfo?.traceId ?? traceId
+  if (!spanId || !resolvedTraceId || !hasCompletedObservation(resolvedTraceId, spanId)) return
+  toolSpanIds.delete(callID)
+  toolCallInfos.delete(callID)
+  toolResultSnapshots.delete(callID)
 }
 
 async function captureToolResultsFromMessages(messages: any[]) {
@@ -2428,6 +2982,7 @@ async function updateToolSpanOutputFromSnapshot(
   if (!spanId || !resolvedTraceId) return false
 
   await updateToolSpanOutput(resolvedTraceId, spanId, snapshot.completedAt ?? endTime, snapshot)
+  cleanupToolCallIfCompleted(callID, resolvedTraceId)
   return true
 }
 
@@ -2613,17 +3168,153 @@ function toOutputUsage(usage?: { input: number; output: number; total: number })
   }
 }
 
+function orderedGenerationTextParts(g: GenInfo) {
+  return [...g.textPartSnapshots.values()].sort((a, b) => a.sequence - b.sequence)
+}
+
+function generationSnapshotText(g: GenInfo, type: "text" | "reasoning") {
+  return orderedGenerationTextParts(g)
+    .filter((part) => part.type === type && part.text)
+    .map((part) => part.text)
+    .join(type === "text" ? "\n\n" : "\n")
+}
+
+function updateGenerationTextPart(
+  g: GenInfo,
+  partId: string,
+  type: GenerationTextPartSnapshot["type"],
+  text: string,
+  options?: { delta?: boolean; complete?: boolean },
+) {
+  const existing = g.textPartSnapshots.get(partId)
+  if (!existing) {
+    g.textPartSnapshots.set(partId, {
+      partId,
+      type,
+      text,
+      sequence: ++g.textPartSequence,
+      complete: !!options?.complete,
+    })
+    return true
+  }
+
+  const previous = { ...existing }
+  if (type !== "unknown") existing.type = type
+
+  if (options?.delta) {
+    // Once a complete snapshot/hook value exists it already contains every
+    // delta. Late bus delivery must not append those tokens a second time.
+    if (!existing.complete) existing.text += text
+  } else if (!existing.complete || options?.complete) {
+    // part.updated is a full snapshot, not a delta. An initial empty snapshot
+    // may race behind already-received deltas, so it must not erase them.
+    if (text || !existing.text) {
+      if (!options?.complete && existing.text.startsWith(text) && existing.text.length > text.length) {
+        // Ignore an older cumulative snapshot that arrived after newer deltas.
+      } else {
+        existing.text = text
+      }
+    }
+  }
+
+  if (options?.complete) existing.complete = true
+  return (
+    previous.type !== existing.type ||
+    previous.text !== existing.text ||
+    previous.complete !== existing.complete
+  )
+}
+
 function buildGenerationText(g: GenInfo) {
-  const textContent = g.parts
+  const legacyTextContent = g.parts
     .filter((p) => !p.startsWith("Tool Call:") && !p.startsWith("Tool Result:") && !p.startsWith("Reasoning:"))
     .join("\n\n")
-  const reasonText = g.parts
+  const legacyReasonText = g.parts
     .filter((p) => p.startsWith("Reasoning:"))
     .map((p) => p.replace(/^Reasoning: /, ""))
     .join("\n")
+  const snapshotText = generationSnapshotText(g, "text")
+  const snapshotReasoning = generationSnapshotText(g, "reasoning")
+
+  // experimental.text.complete is the authoritative visible response. Part
+  // snapshots remain the fallback for providers/versions that skip the hook.
+  const textContent = g.output || snapshotText || legacyTextContent
+  const reasonText = snapshotReasoning || legacyReasonText
 
   const combinedText = reasonText ? `<think>\n${reasonText}\n</think>\n\n${textContent}` : textContent
-  return combinedText || g.output || ""
+  return combinedText || ""
+}
+
+function syncCompletedVisibleText(g: GenInfo) {
+  const visibleText = generationSnapshotText(g, "text")
+  if (visibleText) g.output = visibleText
+}
+
+function refreshFinalizedGenerationText(g: GenInfo) {
+  if (!g.finalOutput) return
+
+  const text = buildGenerationText(g)
+  if (g.finalOutput.text === text) return
+
+  const structuredOutput = { ...g.finalOutput, text }
+  g.finalOutput = structuredOutput
+  const existingGeneration = traceBatches.get(g.traceId)?.generations.find((generation) => generation.id === g.genId)
+  const generationUpdates: Partial<GenerationData> = {
+    // Background generation updates are coalesced by observation ID. Include
+    // every terminal field here so this late text repair can safely replace a
+    // still-queued step-finish update without dropping usage or finish data.
+    ...(existingGeneration?.endTime ? { endTime: existingGeneration.endTime } : {}),
+    ...(existingGeneration?.completionStartTime
+      ? { completionStartTime: existingGeneration.completionStartTime }
+      : {}),
+    ...(existingGeneration?.usage ? { usage: existingGeneration.usage } : {}),
+    ...(existingGeneration?.modelParameters
+      ? { modelParameters: existingGeneration.modelParameters }
+      : {}),
+    ...(existingGeneration?.tags ? { tags: existingGeneration.tags } : {}),
+    output: JSON.stringify(structuredOutput, null, 2),
+    metadata: {
+      ...(existingGeneration?.metadata ?? {}),
+      output: structuredOutput,
+    },
+  }
+  updateGenerationInBatch(g.traceId, g.genId, generationUpdates)
+  updateGenerationImmediately(g.traceId, g.genId, generationUpdates)
+}
+
+function isGenerationReadyForCompletion(g: GenInfo) {
+  if (!g.finalOutput || !g.hasUsage) return false
+  const finishReason = g.finalOutput.finish_reason
+  if (!finishReason || finishReason === "unknown") return false
+  if (finishReason === "tool-calls" && g.toolCalls.length === 0) return false
+  return orderedGenerationTextParts(g).every((part) => part.complete)
+}
+
+function scheduleGenerationObservationCompletion(g: GenInfo) {
+  const existingTimer = generationCompletionTimers.get(g.genId)
+  if (existingTimer) {
+    clearTimeout(existingTimer)
+    generationCompletionTimers.delete(g.genId)
+  }
+  if (hasCompletedObservation(g.traceId, g.genId) || !isGenerationReadyForCompletion(g)) return
+
+  const timer = setTimeout(() => {
+    generationCompletionTimers.delete(g.genId)
+    if (isGenerationReadyForCompletion(g)) emitGenerationObservationCompleted(g)
+  }, OBSERVATION_COMPLETION_QUIET_MS)
+  generationCompletionTimers.set(g.genId, timer)
+}
+
+function flushReadyGenerationObservationCompletions(traceId: string, sessionId?: string) {
+  for (const g of allGenerations) {
+    if (g.traceId !== traceId || (sessionId && g.sessionId !== sessionId)) continue
+    if (!isGenerationReadyForCompletion(g)) continue
+
+    const timer = generationCompletionTimers.get(g.genId)
+    if (timer) clearTimeout(timer)
+    generationCompletionTimers.delete(g.genId)
+    emitGenerationObservationCompleted(g)
+  }
 }
 
 function stripThinkTags(text: string) {
@@ -2750,34 +3441,16 @@ async function finalizeGeneration(
     finish_reason: finishReason,
   }
 
-  const cachedMessages = llmInputs.get(sessionId)
-  const metadataMessages = g.input?.messages || []
-  const system = systemPrompts.get(sessionId) || []
-  const tools = [...allToolDefs.values()]
-
-  let fullInputMessages: any[] = []
-  if (cachedMessages && cachedMessages.length > 0) {
-    const built = buildLLMInput(cachedMessages, system, tools)
-    fullInputMessages = (built.dict as any).messages || []
-  } else if (metadataMessages.length > 0) {
-    fullInputMessages = metadataMessages
-  }
-
-  const hasToolResult = fullInputMessages.some((m: any) => m.role === "tool")
-  if (!hasToolResult && g.toolResults && g.toolResults.length > 0) {
-    const toolResultMessages = g.toolResults.map((tr: any) => ({
-      role: "tool",
-      content: [{ type: "tool-result", content: tr.output }],
-    }))
-    fullInputMessages = [...fullInputMessages, ...toolResultMessages]
-  }
-
-  const updatedInput = {
-    messages: fullInputMessages,
-    tools: g.input?.tools || [],
-  }
+  // The request input was repaired and frozen when this generation became
+  // active. Do not rebuild it from the session's latest cache here: a delayed
+  // step-finish may run after the next LLM request has already updated that
+  // cache.
+  const updatedInput = g.input || { messages: [], tools: [] }
+  const serializedInput = JSON.stringify(updatedInput, null, 2)
+  g.generationData.input = serializedInput
 
   const generationUpdates: Partial<GenerationData> = {
+    input: serializedInput,
     endTime: endTime.toISOString(),
     completionStartTime: g.completionStartTime?.toISOString(),
     usage,
@@ -2810,6 +3483,7 @@ async function finalizeGeneration(
   g.finalOutput = structuredOutput
   g.responseEndTime = endTime
   g.hasUsage = !!normalizedUsage
+  scheduleGenerationObservationCompletion(g)
   if (options?.removeActive !== false) {
     deleteActiveGeneration(sessionId, g)
   }
@@ -2963,7 +3637,7 @@ function updateTraceBatch(traceId: string, updates: Partial<TraceBatch>) {
 
 // ==================== 消息格式转换 ====================
 
-function convertToLLMMessages(messages: any[]): any[] {
+export function convertToLLMMessages(messages: any[]): any[] {
   const result: any[] = []
 
   for (const m of messages) {
@@ -3323,7 +3997,7 @@ function extractJsonSchema(obj: Record<string, any>): any {
  * @param tools 工具定义数组
  * @returns { json: string, dict: object }
  */
-function buildLLMInput(messages: any[], system: string[], tools: any[]): { json: string; dict: object } {
+export function buildLLMInput(messages: any[], system: string[], tools: any[]): { json: string; dict: object } {
   const systemMessages = system.map((s) => ({
     role: "system",
     content: s,
@@ -3347,6 +4021,52 @@ function buildLLMInput(messages: any[], system: string[], tools: any[]): { json:
   })
   const dict = { messages: formattedMessages, tools: formattedTools }
   return { json: JSON.stringify(dict, null, 2), dict }
+}
+
+function getRawMessageId(message: any): string | undefined {
+  const id = message?.info?.id ?? message?.info?.messageID ?? message?.messageID ?? message?.id
+  return typeof id === "string" && id ? id : undefined
+}
+
+export function selectGenerationRequestMessages(cachedMessages: any[], assistantMessageId?: string): any[] {
+  if (!assistantMessageId) return cachedMessages
+
+  const assistantBoundary = cachedMessages.findIndex(
+    (message) => message?.info?.role === "assistant" && getRawMessageId(message) === assistantMessageId,
+  )
+  return assistantBoundary >= 0 ? cachedMessages.slice(0, assistantBoundary) : cachedMessages
+}
+
+/**
+ * Refresh a generation with the latest transformed request messages.
+ *
+ * Hook ordering differs across OpenCode/TestAgent versions: some invoke
+ * chat.params before experimental.chat.messages.transform. Waiting until the
+ * generation is activated fixes that one-request lag. If its first concrete
+ * event runs after a newer transform, slice at this generation's assistant message;
+ * everything before that message is precisely the causal input of this LLM
+ * call, while its own assistant/tool output must never be included.
+ */
+function refreshGenerationInputFromCachedMessages(g: GenInfo): boolean {
+  const cachedMessages = llmInputs.get(g.sessionId)
+  if (!cachedMessages || cachedMessages.length === 0) return false
+
+  const requestMessages = selectGenerationRequestMessages(cachedMessages, g.assistantMessageId)
+
+  const system = systemPrompts.get(g.sessionId) || []
+  const built = buildLLMInput(requestMessages, system, [])
+  const updatedInput = {
+    messages: (built.dict as any).messages || [],
+    // Tool availability belongs to the request captured by chat.params. Do
+    // not rebuild it from the global registry, which may contain tools that
+    // were filtered out for this agent or changed by a later request.
+    tools: g.input?.tools || [],
+  }
+  const serializedInput = JSON.stringify(updatedInput, null, 2)
+
+  g.input = updatedInput
+  g.generationData.input = serializedInput
+  return true
 }
 
 // testagent_change start - record only active tools in Langfuse LLM input
@@ -4001,19 +4721,35 @@ async function finalizeSessionIdle(sessionId: string, traceId: string) {
     )) {
       await finalizeGeneration(sessionId, g)
     }
+    // The child session's own idle event is an authoritative boundary. Flush
+    // any LLM that already has its final parts, finish reason, and usage now so
+    // trace/session cleanup cannot cancel its short out-of-order settling timer.
+    flushReadyGenerationObservationCompletions(traceId, sessionId)
 
     const agentSpanId = sessionToAgentSpan.get(sessionId)
     if (agentSpanId) {
+      const existingAgentSpan = traceBatches.get(traceId)?.spans.find((span) => span.id === agentSpanId)
       const childGenerations = allGenerations.filter(
         (g) => g.parentObservationId === agentSpanId && g.traceId === traceId,
       )
       const lastChildGeneration = childGenerations[childGenerations.length - 1]
       const spanUpdates: Partial<SpanData> = {
         endTime: new Date().toISOString(),
-        output: lastChildGeneration?.finalOutput?.text || userInputs.get(sessionId),
+        // Empty text is a valid final result (for example a tool-call-only
+        // response). Do not replace it with the child prompt.
+        output:
+          lastChildGeneration?.finalOutput?.text ??
+          sessionAssistantOutputs.get(sessionId) ??
+          userInputs.get(sessionId) ??
+          "",
+        metadata: {
+          ...(existingAgentSpan?.metadata ?? {}),
+          childSessionId: sessionId,
+        },
       }
       updateSpanInBatch(traceId, agentSpanId, spanUpdates)
       updateSpanImmediately(traceId, agentSpanId, spanUpdates)
+      emitSpanObservationCompleted(traceId, agentSpanId, "session.idle")
       sessionToAgentSpan.delete(sessionId)
     }
 
@@ -4040,6 +4776,10 @@ async function finalizeSessionIdle(sessionId: string, traceId: string) {
   for (const g of allGenerations.filter((gen) => gen.traceId === traceId)) {
     if (!g.finalOutput) await finalizeGeneration(g.sessionId || sessionId, g)
   }
+  // All sessions in this trace are idle now. Any generation that satisfies the
+  // per-observation completeness predicate can be emitted synchronously before
+  // cleanup clears its quiet-period timer.
+  flushReadyGenerationObservationCompletions(traceId)
 
   const currentBatch = traceBatches.get(traceId)
   const traceOwnerSessionId = currentBatch?.sessionId || sessionId
@@ -4072,6 +4812,7 @@ export const LangfusePlugin: Plugin = async (ctx) => {
   const extendedCtx = ctx as unknown as ExtendedPluginInput
   pluginLog = extendedCtx.log
   pluginMetric = extendedCtx.metric
+  startCompletedObservationStateMonitor()
   await deletePersistedFailedIngestionQueues()
   sessionParentResolver = async (sessionId) => {
     const result = await ctx.client.session.get({ path: { id: sessionId } })
@@ -4352,6 +5093,7 @@ export const LangfusePlugin: Plugin = async (ctx) => {
       const isSkillChild = !!getCurrentSkillContext(sessionId, sessionToTrace.get(sessionId) || currentTraceId)
       const pendingSequence = ++pendingGenerationSequence
       const traceId = await getTraceIdAfterSessionCreated(sessionId)
+      const childSubagentType = getSessionSubagentType(sessionId, traceId)
 
       const providerId = input.model?.providerID || "unknown"
       const modelId = input.model?.id || "unknown"
@@ -4393,6 +5135,7 @@ export const LangfusePlugin: Plugin = async (ctx) => {
         }),
         output: {},
         tags: OBSERVATION_TAGS,
+        ...(childSubagentType ? { subagent_type: childSubagentType } : {}),
         ...(commandMeta ? {commandData: commandMeta} : {}),
         ...baseMetadata(),
       }
@@ -4427,6 +5170,8 @@ export const LangfusePlugin: Plugin = async (ctx) => {
         stepNumber: (gens.get(traceId)?.length || 0) + (pendingGenerations.get(sessionId)?.length || 0) + 1,
         output: "",
         parts: [],
+        textPartSnapshots: new Map(),
+        textPartSequence: 0,
         toolCalls: [],
         isSkillChild,
         hasUsage: false,
@@ -4518,6 +5263,7 @@ export const LangfusePlugin: Plugin = async (ctx) => {
         })
       }
       const traceId = await getTraceIdAfterSessionCreated(sessionId)
+      const childSubagentType = getSessionSubagentType(sessionId, traceId)
       const startTime = toolStartTime
 
       const isTask = input.tool === "task"
@@ -4550,6 +5296,7 @@ export const LangfusePlugin: Plugin = async (ctx) => {
           spanKind: "TOOL",
           nodeType: isSkill ? "skill" : "tool",
           tags: OBSERVATION_TAGS,
+          ...(childSubagentType ? { subagent_type: childSubagentType } : {}),
           input: {
             tool: input.tool,
             args: output.args,
@@ -4651,7 +5398,7 @@ export const LangfusePlugin: Plugin = async (ctx) => {
           } else {
             // 检查是否有任何 testcase_id 符合 testagent 模式
             // 正则匹配: TC + 2个字符 + t + 3个字符 + e + 2个字符 + s + 3个字符 + t + 2个字符 + a + 3个字符 + g + 2个字符 + e + 3个字符 + n + 2个字符 + t + 1个字符
-            const testagentPattern = /testcase_id:\s*(TC[a-f0-9]{2}t[a-f0-9]{3}e[a-f0-9]{2}s[a-f0-9]{3}t[a-f0-9]{2}a[a-f0-9]{3}g[a-f0-9]{2}e[a-f0-9]{3}n[a-f0-9]{2}t[a-f0-9])\b/g
+            const testagentPattern = /testcase_id:\s*(TC[a-f0-9]{2}t[a-f0-9]{3}e[a-f0-9]{2}s[a-f0-9]{3}t[a-f0-9]{2}a[a-f0-9]{3}g[a-f0-9]{2}e[a-f0-9]{3}n[a-f0-9]{2}t[a-f0-9])/gi
             const hasTestagentId = testagentPattern.test(raw)
             
             if (hasTestagentId) {
@@ -4691,7 +5438,7 @@ export const LangfusePlugin: Plugin = async (ctx) => {
             } else {
               // 检查是否有任何 testcase_id 符合 testagent 模式
               // 正则匹配: TC + 2个字符 + t + 3个字符 + e + 2个字符 + s + 3个字符 + t + 2个字符 + a + 3个字符 + g + 2个字符 + e + 3个字符 + n + 2个字符 + t + 1个字符
-              const testagentPattern = /testcase_id:\s*(TC[a-f0-9]{2}t[a-f0-9]{3}e[a-f0-9]{2}s[a-f0-9]{3}t[a-f0-9]{2}a[a-f0-9]{3}g[a-f0-9]{2}e[a-f0-9]{3}n[a-f0-9]{2}t[a-f0-9])\b/g
+              const testagentPattern = /testcase_id:\s*(TC[a-f0-9]{2}t[a-f0-9]{3}e[a-f0-9]{2}s[a-f0-9]{3}t[a-f0-9]{2}a[a-f0-9]{3}g[a-f0-9]{2}e[a-f0-9]{3}n[a-f0-9]{2}t[a-f0-9])/gi
               const hasTestagentId = testagentPattern.test(raw)
               
               if (hasTestagentId) {
@@ -4772,8 +5519,11 @@ export const LangfusePlugin: Plugin = async (ctx) => {
       const existingSpan = traceBatches.get(traceId)?.spans.find((span) => span.id === spanId)
       const toolPartCompleted = cachedResult?.toolPartCompleted === true || existingSpan?.metadata?.toolPartCompleted === true
       const toolStatus = cachedResult?.toolStatus ?? existingSpan?.metadata?.toolStatus
-      const toolCompletionSource =
-        cachedResult?.toolCompletionSource ?? existingSpan?.metadata?.toolCompletionSource ?? "tool.execute.after"
+      const toolCompletionSource = isSkill
+        ? "tool.execute.after"
+        : cachedResult?.toolCompletionSource ??
+          existingSpan?.metadata?.toolCompletionSource ??
+          "tool.execute.after"
       const spanOutput = toSpanOutput(effectiveOutput)
 
       const spanUpdates: Partial<SpanData> = {
@@ -4825,6 +5575,7 @@ export const LangfusePlugin: Plugin = async (ctx) => {
         }
         updateSpanInBatch(traceId, spanId, finalSpanUpdates)
         updateSpanImmediately(traceId, spanId, finalSpanUpdates)
+        tryCompleteToolObservation(traceId, spanId)
         pendingSkillSpans.delete(input.callID)
         toolSpanIds.delete(input.callID)
         toolCallInfos.delete(input.callID)
@@ -4832,6 +5583,7 @@ export const LangfusePlugin: Plugin = async (ctx) => {
       } else {
         updateSpanInBatch(traceId, spanId, spanUpdates)
         updateSpanImmediately(traceId, spanId, spanUpdates)
+        tryCompleteToolObservation(traceId, spanId)
       }
 
       if (!isSkill && effectiveOutput !== null && effectiveOutput !== undefined && toolPartCompleted) {
@@ -4857,13 +5609,27 @@ export const LangfusePlugin: Plugin = async (ctx) => {
       // tool-call step can leave two generations active briefly, causing this
       // response text to be written onto the wrong LLM node while the current
       // node still receives its own usage from step-finish.
+      const partId = getTextPartId(input)
       const g = getOrActivateGenerationForPart(sessionId, {
         type: "text",
         messageID: input.messageID,
-      }, getPartTimestamp(output, "start") ?? getPartTimestamp(input, "start"))
+        partID: partId,
+      }, getPartTimestamp(output, "start") ?? getPartTimestamp(input, "start"), {
+        // This hook is emitted synchronously by the active provider call. A
+        // repeated assistant message ID must not make it look like a stale bus
+        // part and suppress the only authoritative final text.
+        allowCompletedMessageReuse: true,
+      })
       if (!g) return
 
-      g.output = typeof output.text === "string" ? output.text : ""
+      const completedText = typeof output.text === "string" ? output.text : ""
+      if (partId) {
+        updateGenerationTextPart(g, partId, "text", completedText, { complete: true })
+        syncCompletedVisibleText(g)
+      } else {
+        // Compatibility fallback for older plugin APIs without partID.
+        g.output = completedText
+      }
       markGenerationResponseFinished(
         g,
         getPartTimestamp(output, "end") ?? getPartTimestamp(input, "end") ?? new Date(),
@@ -4894,6 +5660,7 @@ export const LangfusePlugin: Plugin = async (ctx) => {
 
       updateGenerationInBatch(g.traceId, g.genId, generationUpdates)
       updateGenerationImmediately(g.traceId, g.genId, generationUpdates)
+      scheduleGenerationObservationCompletion(g)
     },
 
     /**
@@ -4905,7 +5672,9 @@ export const LangfusePlugin: Plugin = async (ctx) => {
 
       // 服务器实例销毁时，刷新所有数据
       if (evt.type === "server.instance.disposed") {
+        stopCompletedObservationStateMonitor()
         await flushAllTracesOnce()
+        clearAllCompletedObservationState()
         return
       }
 
@@ -4995,13 +5764,19 @@ export const LangfusePlugin: Plugin = async (ctx) => {
         const g = getOrActivateGenerationForPart(sessionId, part, evt.properties?.time)
 
         if (g && part.type !== "step-finish") {
-          if (part.type === "text" && part.text) {
-            markGenerationCompletionStarted(g, getEventTimestamp(evt.properties?.time) ?? new Date())
-            g.parts.push(part.text)
-          }
-          if (part.type === "reasoning" && part.text) {
-            markGenerationCompletionStarted(g, getEventTimestamp(evt.properties?.time) ?? new Date())
-            g.parts.push(`Reasoning: ${part.text}`)
+          if ((part.type === "text" || part.type === "reasoning") && typeof part.text === "string") {
+            if (part.text) {
+              markGenerationCompletionStarted(g, getEventTimestamp(evt.properties?.time) ?? new Date())
+            }
+            const partId = getTextPartId(part) ?? `${part.messageID || g.genId}:${part.type}`
+            updateGenerationTextPart(g, partId, part.type, part.text, {
+              complete: !!getPartTimestamp(part, "end"),
+            })
+            if (part.type === "text" && getPartTimestamp(part, "end")) {
+              syncCompletedVisibleText(g)
+            }
+            refreshFinalizedGenerationText(g)
+            scheduleGenerationObservationCompletion(g)
           }
           if (part.type === "tool" && part.state?.status === "running") {
             markGenerationCompletionStarted(g, getEventTimestamp(evt.properties?.time) ?? new Date())
@@ -5048,6 +5823,36 @@ export const LangfusePlugin: Plugin = async (ctx) => {
             finishReason: part.reason,
           })
         }
+      }
+
+      if (evt.type === "message.part.delta") {
+        const properties = evt.properties ?? {}
+        const sessionId = properties.sessionID || currentSessionId
+        const partId = properties.partID
+        const delta = properties.delta
+        if (!sessionId || typeof partId !== "string" || properties.field !== "text" || typeof delta !== "string") {
+          return
+        }
+
+        const g =
+          findGenerationForTextPart(sessionId, partId) ??
+          getOrActivateGenerationForPart(
+            sessionId,
+            {
+              // The delta event does not identify text vs reasoning. The
+              // initial/final part snapshot will reconcile the actual type.
+              type: "text",
+              messageID: properties.messageID,
+              partID: partId,
+            },
+            properties.time,
+          )
+        if (!g) return
+
+        markGenerationCompletionStarted(g, getEventTimestamp(properties.time) ?? new Date())
+        updateGenerationTextPart(g, partId, "unknown", delta, { delta: true })
+        refreshFinalizedGenerationText(g)
+        scheduleGenerationObservationCompletion(g)
       }
 
       if (evt.type === "session.idle") {
