@@ -85,26 +85,22 @@ export const layer = Layer.effect(
         const add = input.add ?? []
         const npmOptions = yield* NpmConfig.load(input.dir)
         
-        // testagent_change start - use registry from npm config or env or fallback
-        // Priority: 1. npm config (.npmrc) 2. NPM_REGISTRY env 3. internal registry
+        // testagent_change start - always use internal registry (highest priority)
+        // Internal registry is always used, ignoring npm config and env variables
+        const internalRegistry = `${decodeURIComponent(atob("aHR0cCUzQSUyRiUyRmNlbnRyYWwuamFmLmNtYmNoaW5hLmNu"))}:80/artifactory/api/npm/group-npm`
+        const registry = internalRegistry
+        
         const configRegistry = typeof npmOptions.registry === "string" ? npmOptions.registry : undefined
         const envRegistry = process.env.NPM_REGISTRY
-        const fallbackRegistry = `${decodeURIComponent(atob("aHR0cCUzQSUyRiUyRmNlbnRyYWwuamFmLmNtYmNoaW5hLmNu"))}:80/artifactory/api/npm/group-npm`
-        
-        const registry = configRegistry || envRegistry || fallbackRegistry
         
         log.info('npm registry selection', {
           selected: registry,
-          source: configRegistry ? 'npm-config' : envRegistry ? 'env' : 'fallback',
-          configRegistry,
-          envRegistry,
-          fallbackRegistry,
-          npmOptionsKeys: Object.keys(npmOptions),
+          source: 'internal-registry-forced',
+          internalRegistry,
+          ignoredConfigRegistry: configRegistry,
+          ignoredEnvRegistry: envRegistry,
           dir: input.dir
         })
-        
-        // Log full npm config for debugging (only in debug mode)
-        log.debug('full npm config', { npmOptions })
         // testagent_change end
         
         const arborist = new Arborist({

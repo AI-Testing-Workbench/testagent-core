@@ -19,11 +19,13 @@ import { iife } from "@/util/iife"
 import { Global } from "@opencode-ai/core/global"
 import path from "path"
 import { pathToFileURL } from "url"
-import { Effect, Layer, Context, Schema, Types } from "effect"
+import { Effect, Layer, Context, Schema, Types, ManagedRuntime } from "effect"
 import { EffectBridge } from "@/effect/bridge"
 import { InstanceState } from "@/effect/instance-state"
 import { User } from "@/testagent/user" // testagent_change
 import { AppFileSystem } from "@opencode-ai/core/filesystem"
+import { Observability } from "@opencode-ai/core/effect/observability"
+import { memoMap } from "@opencode-ai/core/effect/memo-map"
 import { isRecord } from "@/util/record"
 import { optionalOmitUndefined, withStatics } from "@/util/schema"
 
@@ -31,6 +33,14 @@ import * as ProviderTransform from "./transform"
 import { ModelID, ProviderID } from "./schema"
 
 const log = Log.create({ service: "provider" })
+
+let otelRt: ManagedRuntime.ManagedRuntime<never, never> | undefined
+const getOtelRt = () => {
+  if (!otelRt) otelRt = ManagedRuntime.make(Observability.layer as Layer.Layer<never, never>, { memoMap })
+  return otelRt
+}
+
+const info = (message: string, data?: Record<string, unknown>) => getOtelRt().runFork(Effect.logInfo(message, data))
 
 function shouldUseCopilotResponsesApi(modelID: string): boolean {
   const match = /^gpt-(\d+)/.exec(modelID)
@@ -609,7 +619,7 @@ function custom(dep: CustomDep): Record<string, CustomLoader> {
         },
         async discoverModels(): Promise<Record<string, Model>> {
           if (!apiKey) {
-            log.info("gitlab model discovery skipped: no apiKey")
+            info("gitlab model discovery skipped: no apiKey")
             return {}
           }
 
@@ -618,11 +628,11 @@ function custom(dep: CustomDep): Record<string, CustomLoader> {
             const getHeaders = (): Record<string, string> =>
               auth?.type === "api" ? { "PRIVATE-TOKEN": token } : { Authorization: `Bearer ${token}` }
 
-            log.info("gitlab model discovery starting", { instanceUrl })
+            info("gitlab model discovery starting", { instanceUrl })
             const result = await discoverWorkflowModels({ instanceUrl, getHeaders }, { workingDirectory: directory })
 
             if (!result.models.length) {
-              log.info("gitlab model discovery skipped: no models found", {
+              info("gitlab model discovery skipped: no models found", {
                 project: result.project
                   ? {
                       id: result.project.id,
@@ -678,7 +688,7 @@ function custom(dep: CustomDep): Record<string, CustomLoader> {
               }
             }
 
-            log.info("gitlab model discovery complete", {
+            info("gitlab model discovery complete", {
               count: Object.keys(models).length,
               models: Object.keys(models),
             })
@@ -1543,7 +1553,7 @@ const layer: Layer.Layer<
                 // Try to import external undici package
                 const undici = await import("undici")
 
-                log.info("Using external undici package", {
+                info("Using external undici package", {
                   providerID: model.providerID,
                 })
 
@@ -1559,7 +1569,7 @@ const layer: Layer.Layer<
                 // Set as global dispatcher for undici.fetch
                 undici.setGlobalDispatcher(agent)
 
-                log.info("Custom undici configured", {
+                info("Custom undici configured", {
                   providerID: model.providerID,
                   bodyTimeout: 0,
                   headersTimeout: 0,
@@ -1691,11 +1701,11 @@ const layer: Layer.Layer<
               if (u.sapId) body.user = u.sapId
               body.tags = ["test-design"]
               opts.body = JSON.stringify(body)
-              log.info("userID", { sapId: u.sapId })
+              info("userID", { sapId: u.sapId })
             } catch {}
           }
 
-          log.info("🚀 HTTP Request to LLM", {
+          info("🚀 HTTP Request to LLM", {
             providerID: model.providerID,
             modelID: model.id,
             url,
@@ -1722,7 +1732,7 @@ const layer: Layer.Layer<
 
           // testagent_change start - Add detailed HTTP response logging
           const elapsed = Date.now() - startTime
-          log.info("✅ HTTP Response from LLM", {
+          info("✅ HTTP Response from LLM", {
             providerID: model.providerID,
             modelID: model.id,
             status: res.status,
@@ -1738,7 +1748,7 @@ const layer: Layer.Layer<
 
         const bundledLoader = BUNDLED_PROVIDERS[model.api.npm]
         if (bundledLoader) {
-          log.info("using bundled provider", {
+          info("using bundled provider", {
             providerID: model.providerID,
             pkg: model.api.npm,
           })
@@ -1757,7 +1767,7 @@ const layer: Layer.Layer<
           if (!item.entrypoint) throw new Error(`Package ${model.api.npm} has no import entrypoint`)
           installedPath = item.entrypoint
         } else {
-          log.info("loading local provider", { pkg: model.api.npm })
+          info("loading local provider", { pkg: model.api.npm })
           installedPath = model.api.npm
         }
 

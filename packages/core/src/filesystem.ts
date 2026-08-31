@@ -81,7 +81,12 @@ export namespace AppFileSystem {
 
       const readJson = Effect.fn("FileSystem.readJson")(function* (path: string) {
         const text = yield* fs.readFileString(path)
-        return JSON.parse(text)
+        try {
+          return JSON.parse(text)
+        } catch (err: any) {
+          const msg = err?.message || String(err)
+          throw new SyntaxError(`Failed to parse JSON file: ${path}\n${msg}`)
+        }
       })
 
       const writeJson = Effect.fn("FileSystem.writeJson")(function* (path: string, data: unknown, mode?: number) {

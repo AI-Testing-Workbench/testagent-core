@@ -415,6 +415,25 @@ export const layer: Layer.Layer<
         toolOutputMaxChars: TOOL_OUTPUT_MAX_CHARS,
       })
       const beforeTokens = yield* estimate({ messages: input.messages, model })  //testagent_change - estimate tokens before compaction for metrics
+      // testagent_change start - 压缩前诊断日志：记录触发信息、可用窗口与 token 估算
+      yield* Effect.logInfo("compaction 开始", {
+        sessionID: input.sessionID,
+        compactionID: input.parentID,
+        auto: input.auto,
+        overflow: input.overflow,
+        model: `${model.providerID}/${model.id}`,
+        contextLimit: model.limit.context,
+        inputLimit: model.limit.input,
+        usable: usable({ cfg, model }),
+        beforeTokens,
+        totalMessages: input.messages.length,
+        tailTurns: cfg.compaction?.tail_turns,
+        preserveRecentTokens: cfg.compaction?.preserve_recent_tokens,
+        reserved: cfg.compaction?.reserved,
+        thresholdPercent: cfg.compaction?.threshold_percent,
+        tailStartID: selected.tail_start_id,
+      })
+      // testagent_change end
       const ctx = yield* InstanceState.context
       const msg: MessageV2.Assistant = {
         id: MessageID.ascending(),
@@ -590,6 +609,18 @@ export const layer: Layer.Layer<
         const compAttrs = { sessionID: input.sessionID, compactionID: input.parentID, modelID: model.id, providerID: model.providerID }
         yield* Metric.update(Metric.withAttributes(compactionTokensBefore, compAttrs), beforeTokens)
         yield* Metric.update(Metric.withAttributes(compactionTokensAfter, compAttrs), afterTokens)
+        // testagent_change start - 压缩后诊断日志：对比压缩前后 token，便于分析连续压缩
+        const summaryTokens = summary ? Token.estimate(summary) : 0
+        yield* Effect.logInfo("compaction 完成", {
+          sessionID: input.sessionID,
+          compactionID: input.parentID,
+          result,
+          beforeTokens,
+          afterTokens,
+          summaryTokens,
+          tailTokens: afterTokens - summaryTokens,
+        })
+        // testagent_change end
         //testagent_change end
       }
       return result
@@ -644,6 +675,7 @@ export const layer: Layer.Layer<
         sessionID: userMsg.sessionID,
         type: "compaction",
         auto: false,
+        clear_context: true, // testagent_change - 标记由 clearContext 产生，toModelMessagesEffect 据此不生成 "What did we do so far?"
       })
       // Stub assistant with summary:true + finish so filterCompacted treats it as completed
       const stubAsst = yield* session.updateMessage({
@@ -651,7 +683,7 @@ export const layer: Layer.Layer<
         role: "assistant",
         parentID: userMsg.id,
         sessionID: input.sessionID,
-        mode: "compaction" as any,
+        mode: "clear_context", // testagent_change - 区分于 compaction；UI 据此显示"清空上下文"气泡，LLM 据此跳过整条 stub
         agent: "compaction" as any,
         summary: true,
         finish: "stop",
@@ -662,13 +694,14 @@ export const layer: Layer.Layer<
         providerID: ProviderID.make(""),
         time: { created: Date.now() },
       })
-      // Add a text part so toModelMessagesEffect doesn't skip the empty stub
+      // stub 的 text part 作为"清空上下文"气泡的正文（UI 用）。message-part 按 part 渲染气泡，0 part 则气泡不出现。
+      // toModelMessagesEffect 按 mode 跳过整条 stub，此文本不进 LLM。
       yield* session.updatePart({
         id: PartID.ascending(),
         messageID: stubAsst.id,
         sessionID: input.sessionID,
         type: "text",
-        text: "SDT框架会话已清理，上下文已清空。之前的对话记录不再可见。",
+        text: "会话上下文已清空，历史对话对LLM不可见",
         synthetic: true,
       })
       yield* bus.publish(Event.Compacted, { sessionID: input.sessionID })

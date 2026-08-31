@@ -3,6 +3,7 @@ import * as Log from "@opencode-ai/core/util/log"
 import { Effect } from "effect"
 import { HttpApiBuilder, HttpApiError } from "effect/unstable/httpapi" // testagent_change
 import { RootHttpApi } from "../api"
+import { GlobalBus } from "@/bus/global" // testagent_change
 import {
   AgentOverrideClearPayload,
   AgentOverridePayload,
@@ -12,6 +13,7 @@ import {
   EnvVarBatchQueryPayload,
   EnvVarBatchUpdatePayload,
   TestagentUserPayload,
+  ZhAnswerTogglePayload, // testagent_change
 } from "../groups/testagent" // testagent_change
 import type { StoredToken } from "@/external-auth"
 import { EnvVarsConfigInvalidError } from "@/testagent/env-vars" // testagent_change
@@ -117,6 +119,24 @@ export const testagentHandlers = HttpApiBuilder.group(RootHttpApi, "testagent", 
       return true
     })
 
+    // testagent_change start - zh-answer toggle endpoint（按钮仅运行时切换，不写环境变量）
+    const zhAnswerSet = Effect.fn("TestagentHttpApi.zhAnswerSet")(function* (ctx: {
+      payload: typeof ZhAnswerTogglePayload.Type
+    }) {
+      const enabled = ctx.payload.enabled
+
+      // 按钮与 TESTAGENT_ZH_ANSWER_ENABLED 环境变量是两个独立的激活方式：
+      // 环境变量仅在启动时生效（扩展/云端注入）；按钮只发进程级全局事件热切换，不落环境变量。
+      // 注意：/testagent/* 属于 root 路由，无 per-instance 目录上下文，不能走 per-directory 的 Bus
+      // （会因取不到实例上下文而失败），必须用 GlobalBus 进程级广播，插件在模块级监听 zh.answer.toggled。
+      GlobalBus.emit("event", {
+        payload: { type: "zh.answer.toggled", properties: { enabled } },
+      })
+      log.info("ZH answer toggled", { enabled })
+      return true
+    })
+    // testagent_change end
+
     // testagent_change start - per-stage subagent override handlers
     const agentOverrideSet = Effect.fn("TestagentHttpApi.agentOverrideSet")(function* (ctx: {
       payload: typeof AgentOverridePayload.Type
@@ -148,6 +168,7 @@ export const testagentHandlers = HttpApiBuilder.group(RootHttpApi, "testagent", 
       .handle("customEnvVarBatchCreate", customEnvVarBatchCreate)
       .handle("customEnvVarBatchUpdate", customEnvVarBatchUpdate)
       .handle("customEnvVarBatchDelete", customEnvVarBatchDelete)
+      .handle("zhAnswerSet", zhAnswerSet) // testagent_change
       .handle("agentOverrideSet", agentOverrideSet) // testagent_change
       .handle("agentOverrideClear", agentOverrideClear) // testagent_change
   }),

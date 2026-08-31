@@ -2,6 +2,10 @@ import { Schema } from "effect"
 import { HttpApi, HttpApiEndpoint, HttpApiError, HttpApiGroup, OpenApi } from "effect/unstable/httpapi" // testagent_change
 import { described } from "./metadata"
 
+export const ZhAnswerTogglePayload = Schema.Struct({
+  enabled: Schema.Boolean,
+})
+
 export const TestagentUserPayload = Schema.Struct({
   token: Schema.optional(Schema.String),
   userId: Schema.optional(Schema.String),
@@ -107,6 +111,7 @@ export const TestagentPaths = {
   envVarsCustomCreate: "/testagent/env-vars/custom",
   envVarsCustomUpdate: "/testagent/env-vars/custom",
   envVarsCustomDelete: "/testagent/env-vars/custom",
+  zhAnswerSet: "/testagent/zh-answer", // testagent_change
   agentOverrideSet: "/testagent/agent/override",
   agentOverrideClear: "/testagent/agent/override",
 } as const
@@ -183,6 +188,18 @@ export const TestagentApi = HttpApi.make("testagent").add(
           identifier: "testagent.customEnvVars.batchDelete",
           summary: "Batch delete custom environment variables",
           description: "Delete multiple custom environment variables. Non-existing keys are ignored.",
+        }),
+      ),
+    )
+    .add(
+      HttpApiEndpoint.post("zhAnswerSet", TestagentPaths.zhAnswerSet, {
+        payload: ZhAnswerTogglePayload,
+        success: described(Schema.Boolean, "ZH answer toggle set successfully"),
+      }).annotateMerge(
+        OpenApi.annotations({
+          identifier: "testagent.zhAnswer.set",
+          summary: "Toggle ZH answer bridging",
+          description: "Enable or disable bridging of permission/question asks to enterprise ZH via relay.",
         }),
       ),
     )

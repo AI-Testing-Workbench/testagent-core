@@ -12,6 +12,8 @@ import { ModelID, ProviderID } from "../provider/schema"
 import { type Tool as AITool, tool, jsonSchema, type ToolExecutionOptions, asSchema } from "ai"
 import type { JSONSchema7 } from "@ai-sdk/provider"
 import { SessionCompaction } from "./compaction"
+import { usable } from "./overflow"
+import { Token } from "@/util/token"
 import { Bus } from "../bus"
 import { ProviderTransform } from "@/provider/transform"
 import { SystemPrompt } from "./system"
@@ -135,7 +137,7 @@ export const layer = Layer.effect(
 
     // testagent_change start - 透传前端传入的 idle reason
     const cancel = Effect.fn("SessionPrompt.cancel")(function* (sessionID: SessionID, reason?: IdleReason) {
-      yield* elog.info("cancel", { sessionID })
+      yield* elog.info("cancel", { sessionID, reason: reason ?? "completed" })
       yield* state.cancel(sessionID, reason)
     })
     // testagent_change end
@@ -1398,6 +1400,18 @@ NOTE: At any point in time through this workflow you should feel free to ask the
 
     const prompt: (input: PromptInput) => Effect.Effect<MessageV2.WithParts> = Effect.fn("SessionPrompt.prompt")(
       function* (input: PromptInput) {
+        // testagent_change start - debug log: prompt entry
+        yield* elog.info("prompt 入口", {
+          sessionID: input.sessionID,
+          agent: input.agent,
+          model: input.model,
+          variant: input.variant,
+          messageID: input.messageID,
+          noReply: input.noReply,
+          thinkingEnabled: input.thinkingEnabled,
+          text: (input.parts ?? []).map((p) => (p.type === "text" ? p.text.slice(0, 80) : `[${p.type}]`)),
+        })
+        // testagent_change end
         if (input.thinkingEnabled !== undefined) {
           thinkingEnabledStore.set(input.sessionID, input.thinkingEnabled)
         }
@@ -1437,6 +1451,40 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         let step = 0
         const session = yield* sessions.get(sessionID).pipe(Effect.orDie)
 
+        // testagent_change start - 估算下一次请求将发送的完整上下文（system + messages + tools）
+        const estimateContext = Effect.fn("SessionPrompt.estimateContext")(function* (input: {
+          agent: Agent.Info
+          model: Provider.Model
+          messages: MessageV2.WithParts[]
+        }) {
+          const [skills, env, instructions, modelMsgs] = yield* Effect.all([
+            sys.skills(input.agent),
+            sys.environment(input.model),
+            instruction.system().pipe(Effect.orDie),
+            MessageV2.toModelMessagesEffect(input.messages, input.model),
+          ])
+          const system = [...env, ...instructions, ...(skills ? [skills] : [])]
+          const systemTokens = Token.estimate(JSON.stringify(system))
+          const messagesTokens = Token.estimate(JSON.stringify(modelMsgs))
+          const toolDefs = yield* registry.tools({
+            modelID: ModelID.make(input.model.api.id),
+            providerID: input.model.providerID,
+            agent: input.agent,
+          })
+          const toolsTokens = Token.estimate(
+            JSON.stringify(
+              toolDefs.map((t) => ({
+                id: t.id,
+                description: t.description,
+                // 用实际发送给 LLM 的 JSON Schema 估算，避免序列化整个 Effect Schema 对象导致高估
+                parameters: ProviderTransform.schema(input.model, EffectZod.toJsonSchema(t.parameters)),
+              })),
+            ),
+          )
+          return systemTokens + messagesTokens + toolsTokens
+        })
+        // testagent_change end
+
         while (true) {
           yield* status.set(sessionID, { type: "busy" })
           yield* slog.info("loop", { step })
@@ -1458,6 +1506,19 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           }
 
           if (!lastUser) throw new Error("No user message found in stream. This should never happen.")
+            
+          // testagent_change start - debug log: what the loop sees as last messages
+          yield* slog.info("loop 进入", {
+            step,
+            totalMsgs: msgs.length,
+            lastUserID: lastUser.id,
+            lastUserAgent: lastUser.agent,
+            lastUserModel: lastUser.model ? `${lastUser.model.providerID}/${lastUser.model.modelID}` : undefined,
+            lastAssistantID: lastAssistant?.id,
+            lastAssistantFinish: lastAssistant?.finish,
+            lastFinishedID: lastFinished?.id,
+          })
+          // testagent_change end
 
           const lastAssistantMsg = msgs.findLast(
             (msg) => msg.info.role === "assistant" && msg.info.id === lastAssistant?.id,
@@ -1473,9 +1534,23 @@ NOTE: At any point in time through this workflow you should feel free to ask the
             lastAssistant?.finish &&
             !["tool-calls"].includes(lastAssistant.finish) &&
             !hasToolCalls &&
-            lastUser.id < lastAssistant.id
+            // testagent_change start - 用真实创建时间判断顺序，避免消息 ID 时间戳回绕
+            // (48位时间戳约2.18年回绕一次)导致 lastUser.id < lastAssistant.id 误判
+            lastUser.time.created < lastAssistant.time.created
+            // testagent_change end
           ) {
-            yield* slog.info("exiting loop")
+            // testagent_change start - debug log: why loop exits immediately
+            yield* slog.info("exiting loop", {
+              lastUserID: lastUser.id,
+              lastAssistantID: lastAssistant.id,
+              lastUserBeforeAssistant: lastUser.time.created < lastAssistant.time.created,
+              lastUserCreated: lastUser.time.created,
+              lastAssistantCreated: lastAssistant.time.created,
+              finish: lastAssistant.finish,
+              hasToolCalls,
+              reason: "已存在的最后一条 assistant 已完成且新 user 消息在其之前",
+            })
+            // testagent_change end
             break
           }
 
@@ -1488,7 +1563,18 @@ NOTE: At any point in time through this workflow you should feel free to ask the
               history: msgs,
             }).pipe(Effect.ignore, Effect.forkIn(scope))
 
+          // testagent_change start - debug log: resolving model for last user message
+          yield* slog.info("getModel 调用", {
+            providerID: lastUser.model.providerID,
+            modelID: lastUser.model.modelID,
+            lastUserID: lastUser.id,
+            lastUserAgent: lastUser.agent,
+          })
+          // testagent_change end
           const model = yield* getModel(lastUser.model.providerID, lastUser.model.modelID, sessionID)
+          // testagent_change start - debug log: model resolved successfully
+          yield* slog.info("getModel 成功", { providerID: model.providerID, modelID: model.id, name: model.name })
+          // testagent_change end
           const task = tasks.pop()
 
           if (task?.type === "subtask") {
@@ -1508,16 +1594,41 @@ NOTE: At any point in time through this workflow you should feel free to ask the
             continue
           }
 
-          if (
-            lastFinished &&
-            lastFinished.summary !== true &&
-            (yield* compaction.isOverflow({ tokens: lastFinished.tokens, model }))
-          ) {
-            yield* compaction.create({ sessionID, agent: lastUser.agent, model: lastUser.model, auto: true })
-            continue
+          if (lastFinished && lastFinished.summary !== true) {
+            const cfg = yield* config.get()
+            if (cfg.compaction?.auto !== false) {
+              const agent = yield* agents.get(lastUser.agent)
+              if (agent) {
+                const current = yield* estimateContext({ agent, model, messages: msgs })
+                const limit = usable({ cfg, model })
+                if (current >= limit) {
+                  // testagent_change start - 记录循环顶部自动压缩触发原因与 token 判定
+                  yield* Effect.logInfo("自动压缩触发(循环顶部)", {
+                    sessionID,
+                    step,
+                    lastFinishedID: lastFinished.id,
+                    currentTokens: current,
+                    usable: limit,
+                    model: `${model.providerID}/${model.id}`,
+                    contextLimit: model.limit.context,
+                    inputLimit: model.limit.input,
+                  })
+                  // testagent_change end
+                  yield* compaction.create({ sessionID, agent: lastUser.agent, model: lastUser.model, auto: true })
+                  continue
+                }
+              }
+            }
           }
 
           let agent = yield* agents.get(lastUser.agent)
+          // testagent_change start - debug log: agent resolution result
+          if (agent) {
+            yield* slog.info("agent 解析成功", { agentName: agent.name, steps: agent.steps })
+          } else {
+            yield* slog.warn("agent 解析失败", { requestedAgent: lastUser.agent })
+          }
+          // testagent_change end
           if (!agent) {
             const available = (yield* agents.list()).filter((a) => !a.hidden).map((a) => a.name)
             const hint = available.length ? ` Available agents: ${available.join(", ")}` : ""
@@ -1595,7 +1706,9 @@ NOTE: At any point in time through this workflow you should feel free to ask the
 
             if (step > 1 && lastFinished) {
               for (const m of msgs) {
-                if (m.info.role !== "user" || m.info.id <= lastFinished.id) continue
+                // testagent_change start - 同样用 time.created 判断先后，避免 ID 回绕误判
+                if (m.info.role !== "user" || m.info.time.created <= lastFinished.time.created) continue
+                // testagent_change end
                 for (const p of m.parts) {
                   if (p.type !== "text" || p.ignored || p.synthetic) continue
                   if (!p.text.trim()) continue
@@ -1656,6 +1769,19 @@ NOTE: At any point in time through this workflow you should feel free to ask the
 
             if (result === "stop") return "break" as const
             if (result === "compact") {
+              // testagent_change start - 记录推理返回 compact 的触发原因与 token 判定
+              yield* Effect.logInfo("自动压缩触发(推理返回compact)", {
+                sessionID,
+                step,
+                assistantID: handle.message.id,
+                finish: handle.message.finish,
+                overflow: !handle.message.finish,
+                tokens: handle.message.tokens,
+                model: `${model.providerID}/${model.id}`,
+                contextLimit: model.limit.context,
+                inputLimit: model.limit.input,
+              })
+              // testagent_change end
               yield* compaction.create({
                 sessionID,
                 agent: lastUser.agent,
@@ -1675,11 +1801,80 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       },
     )
 
+    // testagent_change start - 并发消费多个 subtask part
+    // 不改 runLoop 主体：收集最新 user 消息里全部 subtask part → Effect.all 并发跑各 handleSubtask
+    // （各建独立子 session、各自 Runner，无 coalesce）→ 再 yield* runLoop 交还后续 LLM step + exit
+    // （靠 lastFinished 跳过已处理 subtask）。一个批次共用同一 agent，入口预校验一次、fail-fast。
+    const runParallelSubtasks: (sessionID: SessionID) => Effect.Effect<MessageV2.WithParts> = Effect.fn(
+      "SessionPrompt.runParallelSubtasks",
+    )(function* (sessionID: SessionID) {
+      const session = yield* sessions.get(sessionID).pipe(Effect.orDie)
+      const msgs = yield* MessageV2.filterCompactedEffect(sessionID)
+
+      let lastUser: MessageV2.User | undefined
+      let lastUserMsg: MessageV2.WithParts | undefined
+      for (let i = msgs.length - 1; i >= 0; i--) {
+        const m = msgs[i]
+        if (m.info.role !== "user") continue
+        lastUserMsg = m
+        lastUser = m.info
+        break
+      }
+      if (!lastUser || !lastUserMsg) {
+        throw new Error("No user message found in stream. This should never happen.")
+      }
+      const subtasks = lastUserMsg.parts.filter(
+        (p): p is MessageV2.SubtaskPart => p.type === "subtask",
+      )
+
+      // 无 subtask 或仅 1 个（被误派发）：兜底直接交还 runLoop，行为同现状
+      if (subtasks.length <= 1) {
+        return yield* runLoop(sessionID)
+      }
+
+      const model = yield* getModel(lastUser.model.providerID, lastUser.model.modelID, sessionID)
+
+      // 入口预校验本批次涉及的全部 agent：任一不存在直接 fail-fast（配置错误，不进 Effect.all）。
+      const distinctAgents = Array.from(new Set(subtasks.map((t) => t.agent)))
+      for (const agentName of distinctAgents) {
+        const taskAgent = yield* agents.get(agentName)
+        if (!taskAgent) {
+          const available = (yield* agents.list()).filter((a) => !a.hidden).map((a) => a.name)
+          const hint = available.length ? ` Available agents: ${available.join(", ")}` : ""
+          const error = new NamedError.Unknown({ message: `Agent not found: "${agentName}".${hint}` })
+          yield* bus.publish(Session.Event.Error, { sessionID, error: error.toObject() })
+          throw error
+        }
+      }
+
+      // 并发消费全部 subtask；运行期失败已被 handleSubtask 的 catchCause 吞掉、不短路
+      yield* Effect.all(
+        subtasks.map((task) => handleSubtask({ task, model, lastUser, sessionID, session, msgs })),
+        { concurrency: "unbounded" },
+      )
+
+      // 交还 runLoop 跑后续 LLM step + exit
+      return yield* runLoop(sessionID)
+    })
+    // testagent_change end
+
+    // testagent_change start - loop 薄壳派发：最新 user 消息 subtask part >1 走并发，否则原 runLoop（N==1 行为不变）
     const loop: (input: LoopInput) => Effect.Effect<MessageV2.WithParts> = Effect.fn("SessionPrompt.loop")(function* (
       input: LoopInput,
     ) {
-      return yield* state.ensureRunning(input.sessionID, lastAssistant(input.sessionID), runLoop(input.sessionID))
+      let work: Effect.Effect<MessageV2.WithParts> = runLoop(input.sessionID)
+      const msgs = yield* MessageV2.filterCompactedEffect(input.sessionID)
+      for (let i = msgs.length - 1; i >= 0; i--) {
+        const m = msgs[i]
+        if (m.info.role !== "user") continue
+        if (m.parts.filter((p) => p.type === "subtask").length > 1) {
+          work = runParallelSubtasks(input.sessionID)
+        }
+        break
+      }
+      return yield* state.ensureRunning(input.sessionID, lastAssistant(input.sessionID), work)
     })
+    // testagent_change end
 
     // testagent_change start - 添加 resume 函数实现
     // "继续" 的正确语义：删掉指定的 assistant 消息，然后重新跑 loop。

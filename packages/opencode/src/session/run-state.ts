@@ -140,9 +140,11 @@ export const layer = Layer.effect(
       const existing = data.runners.get(sessionID)
       if (!existing || !existing.busy) {
         yield* status.set(sessionID, { type: "idle", reason })
+        log.info("cancel ignored", { sessionID, reason, busy: Boolean(existing?.busy) })
         return
       }
       data.idleReason.set(sessionID, reason)
+      log.info("cancel runner", { sessionID, reason })
       yield* existing.cancel
     })
     // testagent_change end
