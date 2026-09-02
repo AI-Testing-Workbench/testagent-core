@@ -71,7 +71,7 @@ afterEach(() => {
 })
 
 function createModel(opts: {
-  context: number
+  context: number | undefined
   output: number
   input?: number
   cost?: Provider.Model["cost"]
@@ -549,6 +549,36 @@ describe("session.compaction.isOverflow", () => {
         const tokens = { input: 100_000, output: 10_000, reasoning: 0, cache: { read: 0, write: 0 } }
         expect(yield* compact.isOverflow({ tokens, model })).toBe(false)
       }),
+    ),
+  )
+
+  it.live(
+    "returns false when model context limit is missing but input limit is set",
+    provideTmpdirInstance(() =>
+      Effect.gen(function* () {
+        const compact = yield* SessionCompaction.Service
+        const model = createModel({ context: undefined, input: 8_000, output: 4_000 })
+        const tokens = { input: 100, output: 10, reasoning: 0, cache: { read: 0, write: 0 } }
+        expect(yield* compact.isOverflow({ tokens, model })).toBe(false)
+      }),
+    ),
+  )
+
+  it.live(
+    "returns false when model context limit is missing and threshold_percent is set",
+    provideTmpdirInstance(
+      () =>
+        Effect.gen(function* () {
+          const compact = yield* SessionCompaction.Service
+          const model = createModel({ context: undefined, input: 8_000, output: 4_000 })
+          const tokens = { input: 100, output: 10, reasoning: 0, cache: { read: 0, write: 0 } }
+          expect(yield* compact.isOverflow({ tokens, model })).toBe(false)
+        }),
+      {
+        config: {
+          compaction: { threshold_percent: 10 },
+        },
+      },
     ),
   )
 
