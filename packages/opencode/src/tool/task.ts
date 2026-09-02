@@ -234,7 +234,10 @@ export const TaskTool = Tool.define(
             if (Exit.hasInterrupts(exit)) yield* cancel
           }).pipe(
             Effect.ensuring(
-              Effect.sync(() => {
+              Effect.gen(function* () {
+                // testagent_change start - 子会话执行结束清除其 override，避免条目积累与 resume 时套用旧配置
+                yield* agent.clearSessionOverride({ sessionID: nextSession.id })
+                // testagent_change end
                 ctx.abort.removeEventListener("abort", onAbort)
               }),
             ),

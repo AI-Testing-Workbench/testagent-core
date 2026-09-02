@@ -574,8 +574,11 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       sessionID: SessionID
       session: Session.Info
       msgs: MessageV2.WithParts[]
+      // testagent_change start - 并发批次由 runParallelSubtasks 统一快照后下发，避免 N 个 subtask 争抢单条 Map 记录
+      override?: { prompt?: string; permission?: Permission.Ruleset; temperature?: number; topP?: number; steps?: number }
+      // testagent_change end
     }) {
-      const { task, model, lastUser, sessionID, session, msgs } = input
+      const { task, model, lastUser, sessionID, session, msgs, override: overrideSnapshot } = input
       const ctx = yield* InstanceState.context
       const promptOps = yield* ops()
       const { task: taskTool } = yield* registry.named()
@@ -636,11 +639,16 @@ NOTE: At any point in time through this workflow you should feel free to ask the
 
       let error: Error | undefined
       const taskAbort = new AbortController()
-      // testagent_change start - resolve parent session override and consume it
-      // 一次性消费：读取后立即清除，避免泄漏到父会话自身的主循环（line 1513 会读取该 override）
-      const sessionOverride = yield* agents.getSessionOverride(sessionID)
-      if (sessionOverride) {
-        yield* agents.clearSessionOverride({ sessionID })
+      // testagent_change start - resolve parent session override
+      // 并发批次：override 由 runParallelSubtasks 统一读取一次并清除、经 input.override 下发到每个 subtask，
+      // 避免 N 个 handleSubtask 并发争抢同一 Map 条目（只有 1 个拿到、其余静默丢失）。
+      // 顺序路径（runLoop tasks.pop）：未传 override 时仍走旧的读取+一次性清除，N==1 行为不变。
+      let sessionOverride = overrideSnapshot
+      if (!sessionOverride) {
+        sessionOverride = yield* agents.getSessionOverride(sessionID)
+        if (sessionOverride) {
+          yield* agents.clearSessionOverride({ sessionID })
+        }
       }
       // testagent_change end
       const result = yield* taskTool
@@ -1847,9 +1855,20 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         }
       }
 
+      // testagent_change start - 并发批次统一消费 override：读一次 + 立即清除
+      // 父 session override 是单条 Map 记录，N 个 handleSubtask 并发各读各清会丢；
+      // 这里一次性快照后下发到每个 subtask，清除保证父会话自身 runLoop(line 1642) 不再读到而误应用。
+      const batchOverride = yield* agents.getSessionOverride(sessionID)
+      if (batchOverride) {
+        yield* agents.clearSessionOverride({ sessionID })
+      }
+      // testagent_change end
+
       // 并发消费全部 subtask；运行期失败已被 handleSubtask 的 catchCause 吞掉、不短路
       yield* Effect.all(
-        subtasks.map((task) => handleSubtask({ task, model, lastUser, sessionID, session, msgs })),
+        subtasks.map((task) =>
+          handleSubtask({ task, model, lastUser, sessionID, session, msgs, override: batchOverride }),
+        ),
         { concurrency: "unbounded" },
       )
 
