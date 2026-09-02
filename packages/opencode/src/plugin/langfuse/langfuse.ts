@@ -57,6 +57,7 @@ let sessionParentResolver: ((sessionId: string) => Promise<string | undefined>) 
 // it is intentionally per-session so concurrent top-level conversations are
 // never serialized. Child-session creation can lag hook callbacks noticeably.
 const SESSION_CREATED_WAIT_MS = 1000
+const SESSION_PARENT_LOOKUP_TIMEOUT_MS = 300
 // Plugin events may be delivered out of order: session.idle can arrive just
 // before the final step-finish event that contains usage and finish reason.
 const SESSION_IDLE_FINALIZATION_WAIT_MS = 1000
@@ -680,23 +681,40 @@ function isGenerationPart(part: any) {
   return part?.type === "tool" && part.state?.status === "running"
 }
 
+function getLatestCompletedSessionSpanTime(sessionId: string, traceId: string): Date | undefined {
+  const batch = traceBatches.get(traceId)
+  const spanIds = sessionSpanIds.get(sessionId)
+  if (!batch || !spanIds?.size) return undefined
+
+  let latest: Date | undefined
+  for (const span of batch.spans) {
+    if (!spanIds.has(span.id) || !span.endTime) continue
+
+    const endTime = getEventTimestamp(span.endTime)
+    if (endTime && (!latest || endTime.getTime() > latest.getTime())) latest = endTime
+  }
+  return latest
+}
+
 function activatePendingGeneration(
   sessionId: string,
   messageId?: string,
-  options?: { preferLatest?: boolean; startTime?: Date },
+  options?: { preferLatest?: boolean },
 ): GenInfo | undefined {
   const pending = pendingGenerations.get(sessionId)
   const gen = options?.preferLatest ? pending?.pop() : pending?.shift()
   if (!gen) return undefined
   if (pending.length === 0) pendingGenerations.delete(sessionId)
 
-  // chat.params can be delivered ahead of preceding tool hooks. Do not retain
-  // its arrival time as the observation boundary: use the first concrete
-  // generation event (or a caller-provided fallback) immediately before the
-  // generation-create event is emitted.
-  const startTime = options?.startTime ?? new Date()
-  gen.startTime = startTime
-  gen.generationData.startTime = startTime.toISOString()
+  // chat.params may be delivered before the preceding tool hooks. Keep its
+  // request boundary when it is already ordered correctly; otherwise advance
+  // it only to the latest completed session span. Never replace it with the
+  // activation/first-token time, which would collapse TTFT to zero.
+  const precedingSpanEndTime = getLatestCompletedSessionSpanTime(sessionId, gen.traceId)
+  if (precedingSpanEndTime && precedingSpanEndTime.getTime() > gen.startTime.getTime()) {
+    gen.startTime = precedingSpanEndTime
+    gen.generationData.startTime = precedingSpanEndTime.toISOString()
+  }
 
   // chat.params only creates a pending candidate. A skill hook can be
   // delivered after that callback but before this first concrete response
@@ -741,7 +759,6 @@ function activatePendingGeneration(
 function getOrActivateGenerationForPart(
   sessionId: string,
   part: any,
-  eventTime?: any,
   options?: { allowCompletedMessageReuse?: boolean },
 ): GenInfo | undefined {
   const ownedGeneration = findGenerationForTextPart(sessionId, getTextPartId(part))
@@ -761,8 +778,7 @@ function getOrActivateGenerationForPart(
   ) {
     return undefined
   }
-  const startTime = getPartTimestamp(part, "start") ?? getEventTimestamp(eventTime) ?? new Date()
-  return activatePendingGeneration(sessionId, part?.messageID, { startTime })
+  return activatePendingGeneration(sessionId, part?.messageID)
 }
 
 function addActiveGeneration(sessionId: string, gen: GenInfo) {
@@ -783,7 +799,11 @@ function deleteActiveGeneration(sessionId: string, gen: GenInfo) {
 function markGenerationCompletionStarted(g: GenInfo, completionStartTime = new Date()) {
   if (g.completionStartTime) return
 
-  g.completionStartTime = completionStartTime
+  // Event delivery can be out of order across OpenCode versions. Never emit a
+  // first-token boundary before the request boundary, which would produce a
+  // negative TTFT in Langfuse.
+  g.completionStartTime =
+    completionStartTime.getTime() >= g.startTime.getTime() ? completionStartTime : g.startTime
   const generationUpdates = { completionStartTime: g.completionStartTime.toISOString() }
   updateGenerationInBatch(g.traceId, g.genId, generationUpdates)
   updateGenerationImmediately(g.traceId, g.genId, generationUpdates)
@@ -1012,6 +1032,18 @@ function getTraceIdForSession(sessionId: string, preferredTraceId?: string): str
  * parent/child mapping wins over fallback trace allocation.
  */
 async function getTraceIdAfterSessionCreated(sessionId: string, preferredTraceId?: string): Promise<string> {
+  // Most new sessions are top-level conversations. If there is no pending
+  // task/subagent launch, waiting for the asynchronously forwarded
+  // session.created event only delays the first LLM request and cannot improve
+  // parent association. Keep the wait exclusively for sessions that may be a
+  // child of an in-flight task call.
+  if (sessionToTrace.has(sessionId) || createdSessionIds.has(sessionId)) {
+    return getTraceIdForSession(sessionId, preferredTraceId)
+  }
+  if (!hasPendingSubagentWork()) {
+    return getTraceIdForSession(sessionId, preferredTraceId)
+  }
+
   if (!createdSessionIds.has(sessionId)) {
     await new Promise<void>((resolve) => {
       const waiters = sessionCreatedWaiters.get(sessionId) ?? []
@@ -1037,7 +1069,7 @@ async function getTraceIdAfterSessionCreated(sessionId: string, preferredTraceId
   // the one session still missing its creation event, so independent top-level
   // conversations retain their separate trace/session mapping.
   if (!createdSessionIds.has(sessionId) && !sessionToTrace.has(sessionId)) {
-    const parentSessionId = await sessionParentResolver?.(sessionId)
+    const parentSessionId = await resolveSessionParentWithTimeout(sessionId)
     if (parentSessionId) await associateSubagentSession(sessionId, parentSessionId)
 
     // If OpenCode has not yet exposed parentID, but exactly one task call is
@@ -1049,6 +1081,40 @@ async function getTraceIdAfterSessionCreated(sessionId: string, preferredTraceId
     }
   }
   return getTraceIdForSession(sessionId, preferredTraceId)
+}
+
+function hasPendingSubagentWork() {
+  if (pendingSubagentSessions.size > 0) return true
+  for (const entries of pendingSubagents.values()) {
+    if (entries.length > 0) return true
+  }
+  return false
+}
+
+async function resolveSessionParentWithTimeout(sessionId: string): Promise<string | undefined> {
+  if (!sessionParentResolver) return undefined
+
+  let timeout: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([
+      sessionParentResolver(sessionId),
+      new Promise<undefined>((resolve) => {
+        timeout = setTimeout(() => resolve(undefined), SESSION_PARENT_LOOKUP_TIMEOUT_MS)
+      }),
+    ])
+  } catch (e) {
+    trackEvent("both", {
+      level: "warn",
+      message: "查询 session 父级失败，将使用兜底 Trace ID",
+      data: { error: String(e), sessionId },
+      metricName: "plugin.langfuse.session.parent.resolve.error",
+      metricValue: 1,
+      tags: { type: "sessionParentResolver", reason: "exception" },
+    })
+    return undefined
+  } finally {
+    if (timeout) clearTimeout(timeout)
+  }
 }
 
 function markSessionCreated(sessionId: string) {
@@ -5230,7 +5296,7 @@ export const LangfusePlugin: Plugin = async (ctx) => {
       // incorrectly attached to the skill it is about to invoke.
       const toolStartTime = reportedToolStartTime ?? toolObservedAt
       const precedingGeneration =
-        getLatestActiveGeneration(sessionId) ?? activatePendingGeneration(sessionId, undefined, { startTime: toolStartTime })
+        getLatestActiveGeneration(sessionId) ?? activatePendingGeneration(sessionId)
       if (precedingGeneration) markGenerationResponseFinished(precedingGeneration, toolStartTime)
 
       const isSkill = input.tool === "skill"
@@ -5614,7 +5680,7 @@ export const LangfusePlugin: Plugin = async (ctx) => {
         type: "text",
         messageID: input.messageID,
         partID: partId,
-      }, getPartTimestamp(output, "start") ?? getPartTimestamp(input, "start"), {
+      }, {
         // This hook is emitted synchronously by the active provider call. A
         // repeated assistant message ID must not make it look like a stale bus
         // part and suppress the only authoritative final text.
@@ -5761,7 +5827,7 @@ export const LangfusePlugin: Plugin = async (ctx) => {
           )
         }
 
-        const g = getOrActivateGenerationForPart(sessionId, part, evt.properties?.time)
+        const g = getOrActivateGenerationForPart(sessionId, part)
 
         if (g && part.type !== "step-finish") {
           if ((part.type === "text" || part.type === "reasoning") && typeof part.text === "string") {
@@ -5845,7 +5911,6 @@ export const LangfusePlugin: Plugin = async (ctx) => {
               messageID: properties.messageID,
               partID: partId,
             },
-            properties.time,
           )
         if (!g) return
 
