@@ -194,6 +194,10 @@ import type {
   TestagentEnvVarsListErrors,
   TestagentEnvVarsListResponses,
   TestagentUserSetResponses,
+  TestagentAgentOverrideSetResponses,
+  TestagentAgentOverrideSetErrors,
+  TestagentAgentOverrideClearResponses,
+  TestagentAgentOverrideClearErrors,
   TextPartInput,
   ToolIdsErrors,
   ToolIdsResponses,
@@ -872,6 +876,101 @@ export class Testagent extends HeyApiClient {
   private _customEnvVars?: CustomEnvVars
   get customEnvVars(): CustomEnvVars {
     return (this._customEnvVars ??= new CustomEnvVars({ client: this.client }))
+  }
+
+  private _agentOverride?: AgentOverride
+  get agentOverride(): AgentOverride {
+    return (this._agentOverride ??= new AgentOverride({ client: this.client }))
+  }
+}
+
+export class AgentOverride extends HeyApiClient {
+  /**
+   * Set per-stage subagent override for a session
+   *
+   * Override the prompt and/or permission rules of the sdt subagent for the given session.
+   */
+  public set<ThrowOnError extends boolean = false>(
+    parameters: {
+      sessionID: string
+      prompt?: string
+      permission?: Array<{
+        permission: string
+        pattern: string
+        action: "allow" | "deny" | "ask"
+      }>
+      temperature?: number
+      topP?: number
+      steps?: number
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "body", key: "sessionID" },
+            { in: "body", key: "prompt" },
+            { in: "body", key: "permission" },
+            { in: "body", key: "temperature" },
+            { in: "body", key: "topP" },
+            { in: "body", key: "steps" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).post<
+      TestagentAgentOverrideSetResponses,
+      TestagentAgentOverrideSetErrors,
+      ThrowOnError
+    >({
+      url: "/testagent/agent/override",
+      ...options,
+      ...params,
+      headers: {
+        "Content-Type": "application/json",
+        ...options?.headers,
+        ...params.headers,
+      },
+    })
+  }
+
+  /**
+   * Clear per-stage subagent override for a session
+   *
+   * Remove the transient override for the given session, restoring default sdt behavior.
+   */
+  public clear<ThrowOnError extends boolean = false>(
+    parameters: {
+      sessionID: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "body", key: "sessionID" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).delete<
+      TestagentAgentOverrideClearResponses,
+      TestagentAgentOverrideClearErrors,
+      ThrowOnError
+    >({
+      url: "/testagent/agent/override",
+      ...options,
+      ...params,
+      headers: {
+        "Content-Type": "application/json",
+        ...options?.headers,
+        ...params.headers,
+      },
+    })
   }
 }
 

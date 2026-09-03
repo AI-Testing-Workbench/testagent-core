@@ -7,6 +7,7 @@ import { Agent } from "../agent/agent"
 import type { SessionPrompt } from "../session/prompt"
 import { IdleReason } from "@/session/status"
 import { Config } from "@/config/config"
+import { Permission } from "@/permission"
 import { Effect, Exit, Metric, Schema } from "effect"
 import { EffectBridge } from "@/effect/bridge"
 import { taskCall } from "@opencode-ai/core/effect/observability"
@@ -135,6 +136,31 @@ export const TaskTool = Tool.define(
           ],
         }))
 
+      // testagent_change start - apply per-stage subagent override to child session
+      const override = (ctx.extra?.override as
+        | { prompt?: string; permission?: Permission.Ruleset; temperature?: number; topP?: number; steps?: number }
+        | undefined)
+      if (override) {
+        if (override.permission && override.permission.length > 0) {
+          // 追加覆盖：基准权限 + override 规则在末尾（findLast 后到者优先）
+          yield* sessions.setPermission({
+            sessionID: nextSession.id,
+            permission: Permission.merge(nextSession.permission ?? [], override.permission),
+          })
+        }
+        // 继承 override（prompt + permission + temperature + topP + steps）到子会话，供子会话 agent 解析时
+        // 正确反映角色提示词和工具权限（Skill.available / resolveTools 都走 agent.permission）
+        yield* agent.setSessionOverride({
+          sessionID: nextSession.id,
+          prompt: override.prompt,
+          permission: override.permission,
+          temperature: override.temperature,
+          topP: override.topP,
+          steps: override.steps,
+        })
+      }
+      // testagent_change end
+
       const msg = yield* Effect.sync(() => MessageV2.get({ sessionID: ctx.sessionID, messageID: ctx.messageID }))
       if (msg.info.role !== "assistant") return yield* Effect.fail(new Error("Not an assistant message"))
 
@@ -208,7 +234,10 @@ export const TaskTool = Tool.define(
             if (Exit.hasInterrupts(exit)) yield* cancel
           }).pipe(
             Effect.ensuring(
-              Effect.sync(() => {
+              Effect.gen(function* () {
+                // testagent_change start - 子会话执行结束清除其 override，避免条目积累与 resume 时套用旧配置
+                yield* agent.clearSessionOverride({ sessionID: nextSession.id })
+                // testagent_change end
                 ctx.abort.removeEventListener("abort", onAbort)
               }),
             ),

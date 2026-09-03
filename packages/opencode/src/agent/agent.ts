@@ -60,6 +60,26 @@ export interface Interface {
   readonly get: (agent: string) => Effect.Effect<Info>
   readonly list: () => Effect.Effect<Info[]>
   readonly defaultAgent: () => Effect.Effect<string>
+  // testagent_change start - override methods
+  readonly getSessionOverride: (sessionID: string) => Effect.Effect<{
+    prompt?: string
+    permission?: Permission.Ruleset
+    temperature?: number
+    topP?: number
+    steps?: number
+  } | undefined>
+  readonly setSessionOverride: (input: {
+    sessionID: string
+    prompt?: string
+    permission?: Permission.Ruleset
+    temperature?: number
+    topP?: number
+    steps?: number
+  }) => Effect.Effect<{ applied: boolean }>
+  readonly clearSessionOverride: (input: {
+    sessionID: string
+  }) => Effect.Effect<void>
+  // testagent_change end
   readonly generate: (input: {
     description: string
     model?: { providerID: ProviderID; modelID: ModelID }
@@ -70,7 +90,7 @@ export interface Interface {
   }>
 }
 
-type State = Omit<Interface, "generate">
+type State = Omit<Interface, "generate" | "getSessionOverride" | "setSessionOverride" | "clearSessionOverride"> // testagent_change
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/Agent") {}
 
@@ -179,7 +199,7 @@ export const layer = Layer.effect(
           // testagent_change start
           sdt: {
             name: "sdt",
-            description: "SDT test framework subagent for executing structured multi-phase test tasks. Use this when the SDT framework schedules test execution.",
+            description: "SDT test framework subagent",
             permission: Permission.merge(
               defaults,
               Permission.fromConfig({
@@ -448,6 +468,10 @@ export const layer = Layer.effect(
       }),
     )
 
+    // testagent_change start - transient override map for per-stage subagent config
+    const overrideMap = new Map<string, { prompt?: string; permission?: Permission.Ruleset; temperature?: number; topP?: number; steps?: number }>()
+    // testagent_change end
+
     return Service.of({
       get: Effect.fn("Agent.get")(function* (agent: string) {
         return yield* InstanceState.useEffect(state, (s) => s.get(agent))
@@ -458,6 +482,33 @@ export const layer = Layer.effect(
       defaultAgent: Effect.fn("Agent.defaultAgent")(function* () {
         return yield* InstanceState.useEffect(state, (s) => s.defaultAgent())
       }),
+      // testagent_change start - override methods
+      getSessionOverride: Effect.fn("Agent.getSessionOverride")(function* (sessionID: string) {
+        return overrideMap.get(sessionID)
+      }),
+      setSessionOverride: Effect.fn("Agent.setSessionOverride")(function* (input: {
+        sessionID: string
+        prompt?: string
+        permission?: Permission.Ruleset
+        temperature?: number
+        topP?: number
+        steps?: number
+      }) {
+        overrideMap.set(input.sessionID, {
+          prompt: input.prompt,
+          permission: input.permission,
+          temperature: input.temperature,
+          topP: input.topP,
+          steps: input.steps,
+        })
+        return { applied: true }
+      }),
+      clearSessionOverride: Effect.fn("Agent.clearSessionOverride")(function* (input: {
+        sessionID: string
+      }) {
+        overrideMap.delete(input.sessionID)
+      }),
+      // testagent_change end
       generate: Effect.fn("Agent.generate")(function* (input: {
         description: string
         model?: { providerID: ProviderID; modelID: ModelID }

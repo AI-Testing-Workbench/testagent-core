@@ -574,8 +574,11 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       sessionID: SessionID
       session: Session.Info
       msgs: MessageV2.WithParts[]
+      // testagent_change start - 并发批次由 runParallelSubtasks 统一快照后下发，避免 N 个 subtask 争抢单条 Map 记录
+      override?: { prompt?: string; permission?: Permission.Ruleset; temperature?: number; topP?: number; steps?: number }
+      // testagent_change end
     }) {
-      const { task, model, lastUser, sessionID, session, msgs } = input
+      const { task, model, lastUser, sessionID, session, msgs, override: overrideSnapshot } = input
       const ctx = yield* InstanceState.context
       const promptOps = yield* ops()
       const { task: taskTool } = yield* registry.named()
@@ -636,6 +639,18 @@ NOTE: At any point in time through this workflow you should feel free to ask the
 
       let error: Error | undefined
       const taskAbort = new AbortController()
+      // testagent_change start - resolve parent session override
+      // 并发批次：override 由 runParallelSubtasks 统一读取一次并清除、经 input.override 下发到每个 subtask，
+      // 避免 N 个 handleSubtask 并发争抢同一 Map 条目（只有 1 个拿到、其余静默丢失）。
+      // 顺序路径（runLoop tasks.pop）：未传 override 时仍走旧的读取+一次性清除，N==1 行为不变。
+      let sessionOverride = overrideSnapshot
+      if (!sessionOverride) {
+        sessionOverride = yield* agents.getSessionOverride(sessionID)
+        if (sessionOverride) {
+          yield* agents.clearSessionOverride({ sessionID })
+        }
+      }
+      // testagent_change end
       const result = yield* taskTool
         .execute(taskArgs, {
           agent: task.agent,
@@ -643,7 +658,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           sessionID,
           abort: taskAbort.signal,
           callID: part.callID,
-          extra: { bypassAgentCheck: true, promptOps },
+          extra: { bypassAgentCheck: true, promptOps, override: sessionOverride },
           messages: msgs,
           metadata: (val: { title?: string; metadata?: Record<string, any> }) =>
             Effect.gen(function* () {
@@ -1615,7 +1630,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
             }
           }
 
-          const agent = yield* agents.get(lastUser.agent)
+          let agent = yield* agents.get(lastUser.agent)
           // testagent_change start - debug log: agent resolution result
           if (agent) {
             yield* slog.info("agent 解析成功", { agentName: agent.name, steps: agent.steps })
@@ -1630,6 +1645,22 @@ NOTE: At any point in time through this workflow you should feel free to ask the
             yield* bus.publish(Session.Event.Error, { sessionID, error: error.toObject() })
             throw error
           }
+          // testagent_change start - apply session override prompt + permission merge
+          // 优先使用 override 中的 permission 规则（直接来自 overrideMap），
+          // 兜底合并 session.permission（经 setPermission 写入的权限）
+          const sessionOverride = yield* agents.getSessionOverride(sessionID)
+          const sessionPerm = sessionOverride?.permission
+            ? Permission.merge(agent.permission, sessionOverride.permission)
+            : Permission.merge(agent.permission, session.permission ?? [])
+          agent = {
+            ...agent,
+            prompt: sessionOverride?.prompt ?? agent.prompt,
+            temperature: sessionOverride?.temperature ?? agent.temperature,
+            topP: sessionOverride?.topP ?? agent.topP,
+            steps: sessionOverride?.steps ?? agent.steps,
+            permission: sessionPerm,
+          }
+          // testagent_change end
           const maxSteps = agent.steps ?? Infinity
           const isLastStep = step >= maxSteps
           msgs = yield* insertReminders({ messages: msgs, agent, session })
@@ -1825,9 +1856,20 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         }
       }
 
+      // testagent_change start - 并发批次统一消费 override：读一次 + 立即清除
+      // 父 session override 是单条 Map 记录，N 个 handleSubtask 并发各读各清会丢；
+      // 这里一次性快照后下发到每个 subtask，清除保证父会话自身 runLoop(line 1642) 不再读到而误应用。
+      const batchOverride = yield* agents.getSessionOverride(sessionID)
+      if (batchOverride) {
+        yield* agents.clearSessionOverride({ sessionID })
+      }
+      // testagent_change end
+
       // 并发消费全部 subtask；运行期失败已被 handleSubtask 的 catchCause 吞掉、不短路
       yield* Effect.all(
-        subtasks.map((task) => handleSubtask({ task, model, lastUser, sessionID, session, msgs })),
+        subtasks.map((task) =>
+          handleSubtask({ task, model, lastUser, sessionID, session, msgs, override: batchOverride }),
+        ),
         { concurrency: "unbounded" },
       )
 
