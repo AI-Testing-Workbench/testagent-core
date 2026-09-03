@@ -26,7 +26,7 @@ const LANGFUSE_BASE_URL = decodeURIComponent(
   atob("aHR0cCUzQSUyRiUyRnRlc3RodWItYWdlbnQtdHJhY2UucGFhc3VhdC5jbWJjaGluYS5jbg=="),
 )
 const VERSION = "1.0.4"
-const TESTAGENT_VERSION = "1.5.0"
+const TESTAGENT_VERSION = "1.4.2"
 const LANGFUSE_FETCH_TIMEOUT_MS = 10_000
 const LANGFUSE_KEY_LOOKUP_TIMEOUT_MS = 15000
 const TESTAGENT_DATA_DIR = join(homedir(), ".local", "share", "testagent")
@@ -34,12 +34,8 @@ const LANGFUSE_KEY_CACHE_FILE = join(TESTAGENT_DATA_DIR, "langfuse-project-keys.
 const MAX_INGESTION_BATCH_BYTES = 900 * 1024
 const MAX_OBSERVED_TEXT_LENGTH = 10000
 const MAX_ERROR_DETAIL_LENGTH = 2000
-const PLUGIN_RUNTIME_ID = generateUUID()
-const MAX_DIAGNOSTIC_BATCH_EVENT_IDS = 50
-const MAX_DIAGNOSTIC_TAG_VALUE_LENGTH = 4000
 
 let baseMetadata: () => Record<string, string>
-let currentPluginInstanceId = "uninitialized"
 
 // ==================== 会话管理 ====================
 
@@ -1751,14 +1747,16 @@ async function uploadToIngestion(events: any[], source: "background" | "retry") 
       if (typeof serializedEvent !== "string") throw new TypeError("Ingestion event is not serializable")
     } catch (e) {
       const errorDetail = normalizeErrorDetail(e)
+      trackEvent("metric", {
+        metricName: "plugin.langfuse.ingestion.error",
+        metricValue: 1,
+        tags: { error: "serialization" },
+      })
       if (shouldLogIngestionFailure()) {
-        trackEvent("both", {
+        trackEvent("log", {
           level: "error",
           message: `数据上报序列化失败: ${errorDetail.name}${errorDetail.message ? ` - ${errorDetail.message}` : ""}`,
           data: { error: errorDetail, eventId: event?.id },
-          metricName: "plugin.langfuse.ingestion.error",
-          metricValue: 1,
-          tags: { error: "serialization" },
         })
       }
       errors.push({ id: event?.id, status: 500, error: String(e) })
@@ -1787,15 +1785,14 @@ async function uploadToIngestionChunk(taggedEvents: any[], body: string, source:
   const credentials = btoa(`${publicKey}:${secretKey}`)
   const traceId = taggedEvents?.[0]?.body?.traceId || taggedEvents?.[0]?.body?.id
   const projectId = taggedEvents?.[0]?.body?.metadata?.projectId
+  const metricTags = {
+    source,
+    eventType: ingestionMetricEventType(taggedEvents),
+  }
   trackEvent("metric", {
     metricName: "plugin.langfuse.ingestion.attempt",
     metricValue: 1,
-    tags: ingestionDiagnosticTags(taggedEvents, {
-      node: "ingestion",
-      action: "upload_batch",
-      status: "started",
-      source,
-    }),
+    tags: metricTags,
   })
   try {
     const res = await fetchWithTimeout(`${LANGFUSE_BASE_URL}/api/public/ingestion`, {
@@ -1812,14 +1809,7 @@ async function uploadToIngestionChunk(taggedEvents: any[], body: string, source:
       trackEvent("metric", {
         metricName: "plugin.langfuse.ingestion.success",
         metricValue: 1,
-        tags: ingestionDiagnosticTags(taggedEvents, {
-          node: "ingestion",
-          action: "upload_batch",
-          status: "success",
-          source,
-          ...(traceId ? { firstTraceId: traceId } : {}),
-          ...(projectId ? { projectId } : {}),
-        }),
+        tags: metricTags,
       })
       return { successes: taggedEvents.map((event) => ({ id: event.id })), errors: [] }
     }
@@ -1828,8 +1818,17 @@ async function uploadToIngestionChunk(taggedEvents: any[], body: string, source:
     const responseBody = summarizeResponseBody(text)
     const reason = res.status === 413 ? "payload_too_large" : "request_failed"
     const statusText = res.statusText || ""
+    trackEvent("metric", {
+      metricName: "plugin.langfuse.ingestion.error",
+      metricValue: 1,
+      tags: {
+        ...metricTags,
+        httpStatus: String(res.status),
+        reason,
+      },
+    })
     if (shouldLogIngestionFailure()) {
-      trackEvent("both", {
+      trackEvent("log", {
         level: "error",
         message: `数据上报失败: HTTP ${res.status}${statusText ? ` ${statusText}` : ""}${responseBody ? ` - ${responseBody.slice(0, 300)}` : ""}`,
         data: {
@@ -1840,24 +1839,22 @@ async function uploadToIngestionChunk(taggedEvents: any[], body: string, source:
           traceId,
           projectId,
         },
-        metricName: "plugin.langfuse.ingestion.error",
-        metricValue: 1,
-        tags: ingestionDiagnosticTags(taggedEvents, {
-          node: "ingestion",
-          action: "upload_batch",
-          status: "failed",
-          source,
-          httpStatus: String(res.status),
-          reason,
-        }),
       })
     }
     return { successes: [], errors: taggedEvents.map((event) => ({ id: event.id, status: res.status, error: text })) }
   } catch (e) {
     const errorDetail = normalizeErrorDetail(e)
     const isTimeout = errorDetail.name === "AbortError"
+    trackEvent("metric", {
+      metricName: "plugin.langfuse.ingestion.error",
+      metricValue: 1,
+      tags: {
+        ...metricTags,
+        error: isTimeout ? "timeout" : "exception",
+      },
+    })
     if (shouldLogIngestionFailure()) {
-      trackEvent("both", {
+      trackEvent("log", {
         level: "error",
         message: `数据上报异常: ${errorDetail.name}${errorDetail.message ? ` - ${errorDetail.message}` : ""}`,
         data: {
@@ -1866,15 +1863,6 @@ async function uploadToIngestionChunk(taggedEvents: any[], body: string, source:
           traceId,
           projectId,
         },
-        metricName: "plugin.langfuse.ingestion.error",
-        metricValue: 1,
-        tags: ingestionDiagnosticTags(taggedEvents, {
-          node: "ingestion",
-          action: "upload_batch",
-          status: "exception",
-          source,
-          error: isTimeout ? "timeout" : "exception",
-        }),
       })
     }
     return { successes: [], errors: taggedEvents.map((event) => ({ id: event.id, status: 500, error: String(e) })) }
@@ -2330,13 +2318,8 @@ async function retryFailedIngestionEvents() {
   const events = failedIngestionEvents.slice(0, FAILED_INGESTION_RETRY_BATCH_SIZE)
   trackEvent("metric", {
     metricName: "plugin.langfuse.queue.retry.attempt",
-    metricValue: 1,
-    tags: ingestionDiagnosticTags(events, {
-      node: "ingestionRetryQueue",
-      action: "retry_upload",
-      status: "started",
-      queueSizeBefore: String(failedIngestionEvents.length),
-    }),
+    metricValue: events.length,
+    tags: { type: "ingestionRetryQueue", status: "started" },
   })
   try {
     const result = await uploadToIngestion(events, "retry")
@@ -2345,15 +2328,11 @@ async function retryFailedIngestionEvents() {
     markIngestionEventsAttempted(events, retainedFailedEvents)
     trackEvent("metric", {
       metricName: "plugin.langfuse.queue.retry.result",
-      metricValue: 1,
-      tags: ingestionDiagnosticTags(events, {
-        node: "ingestionRetryQueue",
-        action: "retry_upload",
+      metricValue: events.length,
+      tags: {
+        type: "ingestionRetryQueue",
         status: retainedFailedEvents.length === 0 ? "all_removed" : "partially_retained",
-        attemptedCount: String(events.length),
-        retainedCount: String(retainedFailedEvents.length),
-        queueSizeAfter: String(failedIngestionEvents.length),
-      }),
+      },
     })
     recordIngestionAttemptOutcome(retainedFailedEvents.length)
     backgroundBatchesSinceFailedRetry = 0
@@ -2430,17 +2409,6 @@ function scheduleBackgroundIngestion(events: any[]) {
     // 排查期间丢弃后台队列溢出的 event，不转入失败重试队列。
   }
 
-  trackEvent("metric", {
-    metricName: "plugin.langfuse.ingestion.queue.enqueued",
-    metricValue: events.length,
-    tags: ingestionDiagnosticTags(events, {
-      node: "backgroundIngestionQueue",
-      action: "enqueue",
-      status: "scheduled",
-      queueSize: String(getBackgroundIngestionQueueSize()),
-      queueBytes: String(backgroundIngestionBytes),
-    }),
-  })
   scheduleBackgroundIngestionDrain()
 }
 
@@ -2558,17 +2526,6 @@ function enqueueTraceUpsert(batch: TraceBatch) {
 
   const type = uploadedTraceIds.has(batch.id) ? "trace-update" : "trace-create"
   const event = buildIngestionEvent(type, body)
-  trackEvent("metric", {
-    metricName: "plugin.langfuse.trace.ingestion.enqueued",
-    metricValue: 1,
-    tags: ingestionDiagnosticTags([event], {
-      node: "traceUpsert",
-      action: "enqueue_ingestion_event",
-      status: "scheduled",
-      sessionId: batch.sessionId,
-      traceId: batch.id,
-    }),
-  })
   scheduleBackgroundIngestion([event])
   lastEnqueuedTraceSnapshots.set(batch.id, snapshot)
   uploadedTraceIds.add(batch.id)
@@ -4302,7 +4259,7 @@ async function create_organization(session: string, langfuse_host: string): Prom
       trackEvent("metric", {
         metricName: "plugin.langfuse.api.success",
         metricValue: 1,
-        tags: { api: "create_organization", orgId },
+        tags: { api: "create_organization" },
       })
     } else {
       trackEvent("both", {
@@ -4359,7 +4316,7 @@ async function create_project(
     trackEvent("metric", {
       metricName: "plugin.langfuse.api.success",
       metricValue: 1,
-      tags: { api: "projects.create", projectId: project_id },
+      tags: { api: "projects.create" },
     })
 
     res = await fetchWithTimeout(`${langfuse_host}/api/trpc/projectApiKeys.create`, {
@@ -4397,7 +4354,7 @@ async function create_project(
     trackEvent("metric", {
       metricName: "plugin.langfuse.api.success",
       metricValue: 1,
-      tags: { api: "projectApiKeys.create", projectId: project_id },
+      tags: { api: "projectApiKeys.create" },
     })
     return { public_key, secret_key, project_id }
   } catch (e) {
@@ -4466,7 +4423,7 @@ function readCachedProjectKeys(user_id: string, user_name: string, langfuse_host
       trackEvent("metric", {
         metricName: "plugin.langfuse.cache.success",
         metricValue: 1,
-        tags: { type: "langfuseKeyCache", status: "hit", projectId: apiKeys.project_id },
+        tags: { type: "langfuseKeyCache", status: "hit" },
       })
       return apiKeys
     }
@@ -4516,7 +4473,7 @@ function writeCachedProjectKeys(user_id: string, user_name: string, langfuse_hos
     trackEvent("metric", {
       metricName: "plugin.langfuse.cache.success",
       metricValue: 1,
-      tags: { type: "langfuseKeyCache", action: "write", projectId: apiKeys.project_id },
+      tags: { type: "langfuseKeyCache", action: "write" },
     })
   } catch (e) {
     trackEvent("both", {
@@ -4563,7 +4520,7 @@ async function get_apikeys_by_user(
       trackEvent("metric", {
         metricName: "plugin.langfuse.api.success",
         metricValue: 1,
-        tags: { api: "get_apikeys_by_user", status: "found", projectId: project_id },
+        tags: { api: "get_apikeys_by_user", status: "found" },
       })
       return { status: "found", apiKeys: { public_key, secret_key, project_id } }
     }
@@ -4708,31 +4665,39 @@ type MetricTrackOptions = {
 type BothTrackOptions = LogTrackOptions & MetricTrackOptions
 type TrackOptions = LogTrackOptions | MetricTrackOptions | BothTrackOptions
 
-function diagnosticTagValue(values: string[]) {
-  const distinctValues = [...new Set(values.filter(Boolean))]
-  const value = distinctValues.join(",")
-  return value.length <= MAX_DIAGNOSTIC_TAG_VALUE_LENGTH ? value : value.slice(0, MAX_DIAGNOSTIC_TAG_VALUE_LENGTH)
+const HIGH_CARDINALITY_METRIC_TAG_KEYS = new Set([
+  "eventid",
+  "eventids",
+  "traceid",
+  "traceids",
+  "firsttraceid",
+  "sessionid",
+  "parentsessionid",
+  "childsessionid",
+  "messageid",
+  "runtimeid",
+  "plugininstanceid",
+  "projectid",
+  "orgid",
+  "organizationid",
+  "userid",
+  "callid",
+  "spanid",
+  "generationid",
+])
+
+export function lowCardinalityMetricTags(
+  tags?: Record<string, string | number | boolean>,
+): Record<string, string | number | boolean> {
+  if (!tags) return {}
+  return Object.fromEntries(
+    Object.entries(tags).filter(([key]) => !HIGH_CARDINALITY_METRIC_TAG_KEYS.has(key.toLowerCase())),
+  )
 }
 
-function ingestionDiagnosticTags(
-  events: any[],
-  tags: Record<string, string | number | boolean> = {},
-): Record<string, string | number | boolean> {
-  const limitedEvents = events.slice(0, MAX_DIAGNOSTIC_BATCH_EVENT_IDS)
-  const traceIds = limitedEvents.map((event) => String(event?.body?.traceId || event?.body?.id || ""))
-  const eventIds = limitedEvents.map((event) => String(event?.id || ""))
-  const eventTypes = limitedEvents.map((event) => String(event?.type || "unknown"))
-  return {
-    ...tags,
-    runtimeId: PLUGIN_RUNTIME_ID,
-    pluginInstanceId: currentPluginInstanceId,
-    eventCount: String(events.length),
-    traceCount: String(new Set(traceIds.filter(Boolean)).size),
-    traceIds: diagnosticTagValue(traceIds),
-    eventIds: diagnosticTagValue(eventIds),
-    eventTypes: diagnosticTagValue(eventTypes),
-    eventListTruncated: events.length > limitedEvents.length,
-  }
+function ingestionMetricEventType(events: any[]) {
+  const eventTypes = new Set(events.map((event) => String(event?.type || "unknown")))
+  return eventTypes.size === 1 ? eventTypes.values().next().value! : "mixed"
 }
 
 /**
@@ -4755,7 +4720,7 @@ function trackEvent(type: TrackType, options: TrackOptions): void {
   if (type === 'metric' || type === 'both') {
     const { metricName, metricValue, tags } = options as MetricTrackOptions
     const metricPayload = {
-      ...tags,
+      ...lowCardinalityMetricTags(tags),
       service: "langfuse",
       metricName,
       value: metricValue,
@@ -4872,7 +4837,6 @@ async function finalizeSessionIdle(sessionId: string, traceId: string) {
 // ==================== 插件主逻辑 ====================
 
 export const LangfusePlugin: Plugin = async (ctx) => {
-  currentPluginInstanceId = generateUUID()
   shutdownFlushPromise = null
   shutdownFlushCompleted = false
   const extendedCtx = ctx as unknown as ExtendedPluginInput
@@ -4903,15 +4867,7 @@ export const LangfusePlugin: Plugin = async (ctx) => {
       trackEvent("metric", {
         metricName: "plugin.langfuse.client.init.success",
         metricValue: 1,
-        tags: {
-          node: "pluginInitialization",
-          action: "resolve_project_api_keys",
-          status: "success",
-          source,
-          projectId: apiKeys.project_id,
-          runtimeId: PLUGIN_RUNTIME_ID,
-          pluginInstanceId: currentPluginInstanceId,
-        },
+        tags: { source },
       })
     }
     const refreshProjectApiKeys = async (allowCreateOnNotFound: boolean) => {
@@ -4963,10 +4919,10 @@ export const LangfusePlugin: Plugin = async (ctx) => {
           tags: { api: "get_project_apikeys", reason: "fallback_keys" },
         })
       } else {
-        trackEvent("metric", {
-          metricName: "plugin.langfuse.api.success",
-          metricValue: 1,
-          tags: { api: "get_project_apikeys", status: "first_fetch", projectId: project_id },
+          trackEvent("metric", {
+            metricName: "plugin.langfuse.api.success",
+            metricValue: 1,
+            tags: { api: "get_project_apikeys", status: "first_fetch" },
         })
       }
     }
@@ -5001,19 +4957,6 @@ export const LangfusePlugin: Plugin = async (ctx) => {
      */
     "chat.message": async (input, output) => {
       const sessionId = getSessionId(input.sessionID)
-      trackEvent("metric", {
-        metricName: "plugin.langfuse.chat.message.received",
-        metricValue: 1,
-        tags: {
-          node: "chatMessageHook",
-          action: "receive",
-          status: "received",
-          runtimeId: PLUGIN_RUNTIME_ID,
-          pluginInstanceId: currentPluginInstanceId,
-          sessionId,
-          messageId: input.messageID || "",
-        },
-      })
       trackedSessionIds.add(sessionId)
       idleSessionIds.delete(sessionId)
 
@@ -5031,31 +4974,10 @@ export const LangfusePlugin: Plugin = async (ctx) => {
           data: { error: String(e), sessionId, messageId: input.messageID },
           metricName: "plugin.langfuse.chat.trace.resolve.error",
           metricValue: 1,
-          tags: {
-            node: "chatMessageHook",
-            action: "resolve_trace_id",
-            status: "error",
-            runtimeId: PLUGIN_RUNTIME_ID,
-            pluginInstanceId: currentPluginInstanceId,
-            sessionId,
-          },
+          tags: { type: "chatMessageHook", reason: "trace_resolution" },
         })
         return
       }
-      trackEvent("metric", {
-        metricName: "plugin.langfuse.chat.trace.resolve.success",
-        metricValue: 1,
-        tags: {
-          node: "chatMessageHook",
-          action: "resolve_trace_id",
-          status: "success",
-          runtimeId: PLUGIN_RUNTIME_ID,
-          pluginInstanceId: currentPluginInstanceId,
-          sessionId,
-          messageId: input.messageID || "",
-          traceId,
-        },
-      })
       const textContent = output.parts
         .filter((p: any) => p?.type === "text" && typeof p?.text === "string")
         .map((p: any) => p.text)
@@ -5139,20 +5061,6 @@ export const LangfusePlugin: Plugin = async (ctx) => {
      */
     "chat.params": async (input, output) => {
       const sessionId = getSessionId(input.sessionID)
-      trackEvent("metric", {
-        metricName: "plugin.langfuse.opencode.chat.params.received",
-        metricValue: 1,
-        tags: {
-          node: "opencodeChatParamsHook",
-          action: "receive",
-          status: "received",
-          runtimeId: PLUGIN_RUNTIME_ID,
-          pluginInstanceId: currentPluginInstanceId,
-          sessionId,
-          providerId: input.model?.providerID || "unknown",
-          modelId: input.model?.id || "unknown",
-        },
-      })
       // Snapshot ownership before any await. Session association can pause this
       // handler while a later skill changes the active context.
       const parentObservationId = getSessionObservationParent(sessionId)
@@ -5754,19 +5662,6 @@ export const LangfusePlugin: Plugin = async (ctx) => {
           evt.properties?.parentID ||
           evt.properties?.parentId
         if (sid) {
-          trackEvent("metric", {
-            metricName: "plugin.langfuse.opencode.session.created.received",
-            metricValue: 1,
-            tags: {
-              node: "opencodeEventHook",
-              action: "receive_session_created",
-              status: "received",
-              runtimeId: PLUGIN_RUNTIME_ID,
-              pluginInstanceId: currentPluginInstanceId,
-              sessionId: sid,
-              parentSessionId: parentId || "",
-            },
-          })
           trackedSessionIds.add(sid)
           idleSessionIds.delete(sid)
           // If events begin with a child, wait for its parent instead of
@@ -5790,22 +5685,6 @@ export const LangfusePlugin: Plugin = async (ctx) => {
         const part = evt.properties.part
         const sessionId = part.sessionID || currentSessionId
         if (!sessionId) return
-        trackEvent("metric", {
-          metricName: "plugin.langfuse.opencode.message.part.updated.received",
-          metricValue: 1,
-          tags: {
-            node: "opencodeEventHook",
-            action: "receive_message_part_updated",
-            status: "received",
-            runtimeId: PLUGIN_RUNTIME_ID,
-            pluginInstanceId: currentPluginInstanceId,
-            sessionId,
-            traceId: sessionToTrace.get(sessionId) || "",
-            partType: part.type || "unknown",
-            partStatus: part.state?.status || "",
-            messageId: part.messageID || "",
-          },
-        })
 
         if (part.type === "tool" && part.callID && part.state?.status === "completed" && hasOwn(part.state, "output")) {
           const snapshot = {
