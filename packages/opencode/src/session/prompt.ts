@@ -1594,7 +1594,8 @@ NOTE: At any point in time through this workflow you should feel free to ask the
               if (agent) {
                 const current = yield* estimateContext({ agent, model, messages: msgs })
                 const limit = usable({ cfg, model })
-                if (current >= limit) {
+                // testagent_change - usable() 返回 0 表示模型未配置 context/limit，此时不做自动压缩
+                if (limit > 0 && current >= limit) {
                   // testagent_change start - 记录循环顶部自动压缩触发原因与 token 判定
                   yield* Effect.logInfo("自动压缩触发(循环顶部)", {
                     sessionID,
