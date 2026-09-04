@@ -40,6 +40,10 @@ import { NamedError } from "@opencode-ai/core/util/error"
 import { SessionProcessor } from "./processor"
 import { Tool } from "@/tool/tool"
 import { Permission } from "@/permission"
+// testagent_change start
+import { Sheet } from "@/testagent/sheet"
+import { Doc } from "@/testagent/doc"
+// testagent_change end
 import { SessionStatus, type IdleReason } from "./status"
 import { LLM } from "./llm"
 import { thinkingEnabledStore } from "./llm" // testagent_change
@@ -1099,6 +1103,10 @@ NOTE: At any point in time through this workflow you should feel free to ask the
               log.info("file", { mime: part.mime })
               const filepath = fileURLToPath(part.url)
               const mime = (yield* fsys.isDir(filepath)) ? "application/x-directory" : part.mime
+              // testagent_change start - 表格文件不信任客户端 mime（常被误报），统一走 read 解析
+              const sheet = mime !== "application/x-directory" && Sheet.isSheet(filepath)
+              const doc = mime !== "application/x-directory" && Doc.isDoc(filepath)
+              // testagent_change end
 
               const { read } = yield* registry.named()
               const execRead = (args: Parameters<typeof read.execute>[0], extra?: Tool.Context["extra"]) => {
@@ -1117,7 +1125,8 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                   .pipe(Effect.onInterrupt(() => Effect.sync(() => controller.abort())))
               }
 
-              if (mime === "text/plain") {
+              // testagent_change - 表格(sheet)/文档(doc)文件强制走 read 路径，read 已支持解析为文本
+              if (mime === "text/plain" || sheet || doc) {
                 let offset: number | undefined
                 let limit: number | undefined
                 const range = { start: url.searchParams.get("start"), end: url.searchParams.get("end") }
@@ -1175,7 +1184,13 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                       })),
                     )
                   } else {
-                    pieces.push({ ...part, mime, messageID: info.id, sessionID: input.sessionID })
+                    // testagent_change - sheet 的 file:// 原始 part 不发给模型（内容已在文本 piece 中），规范化为 text/plain 以下游过滤
+                    pieces.push({
+                      ...part,
+                      mime: sheet || doc ? "text/plain" : mime,
+                      messageID: info.id,
+                      sessionID: input.sessionID,
+                    })
                   }
                 } else {
                   const error = Cause.squash(exit.cause)
