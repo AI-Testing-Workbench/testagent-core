@@ -67,7 +67,13 @@ function selectedWorkspaceID(url: URL, sessionWorkspaceID?: WorkspaceID): Worksp
 }
 
 function defaultDirectory(request: HttpServerRequest.HttpServerRequest, url: URL): string {
-  return url.searchParams.get("directory") || request.headers["x-opencode-directory"] || process.cwd()
+  // testagent-core_change: 客户端(workbench)对含非 ASCII 的路径做了 percent-encode(HTTP header 只允许 Latin-1)，此处解码；非法编码回退原值
+  const header = request.headers["x-opencode-directory"]
+  let directory = header
+  if (header && header.includes("%")) {
+    try { directory = decodeURIComponent(header) } catch { /* keep raw */ }
+  }
+  return url.searchParams.get("directory") || directory || process.cwd()
 }
 
 function shouldStayOnControlPlane(request: HttpServerRequest.HttpServerRequest, url: URL): boolean {
