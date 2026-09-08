@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# testagent-core_change - new file
+# agent host 只会传 `serve --port=0`（workbench openCodeAgent.ts），node 版 CLI 不认位置参数，
+# 这里做参数翻译；不转发 "$@"。port=0 与 bun 版行为一致。
+set -euo pipefail
+export OPENCODE_SERVER_PASSWORD="${OPENCODE_SERVER_PASSWORD:-dev}" # 对齐 agent host 默认头 Basic(opencode:dev)
+exec node --experimental-sqlite "$(cd "$(dirname "$0")" && pwd)/../nodejs-server/cli.mjs" \
+  --hostname 127.0.0.1 --port 0

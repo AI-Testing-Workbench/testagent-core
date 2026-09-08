@@ -4,7 +4,7 @@ import { pathToFileURL } from "url"
 import os from "os"
 import z from "zod"
 import { mergeDeep } from "remeda"
-import { Global, opencodeConfig } from "@opencode-ai/core/global" // testagent_change
+import { Global } from "@opencode-ai/core/global" // testagent_change: 不再读取 opencode 配置，opencodeConfig 不再使用
 import fsNode from "fs/promises"
 import { NamedError } from "@opencode-ai/core/util/error"
 import { ConfigError } from "./error" // testagent_change - for warning accumulation
@@ -501,9 +501,11 @@ export interface Interface {
 export class Service extends Context.Service<Service, Interface>()("@opencode/Config") {}
 
 function globalConfigFile() {
-  const candidates = ["testagent.jsonc", "testagent.json", "opencode.jsonc", "opencode.json", "config.json"].map(
+  // testagent_change start - 候选去掉 opencode.*，全局读写只落 testagent 文件
+  const candidates = ["testagent.jsonc", "testagent.json", "config.json"].map(
     (file) => path.join(Global.Path.config, file),
   )
+  // testagent_change end
   for (const file of candidates) {
     if (existsSync(file)) return file
   }
@@ -606,14 +608,15 @@ export const layer = Layer.effect(
 
     const loadGlobal = Effect.fnUntraced(function* () {
       let result: Info = {}
-      // testagent_change start - load opencode legacy global config first (lower priority, user-created)
-      result = mergeConfig(result, yield* loadFile(path.join(opencodeConfig, "config.json")))
-      result = mergeConfig(result, yield* loadFile(path.join(opencodeConfig, "opencode.json")))
-      result = mergeConfig(result, yield* loadFile(path.join(opencodeConfig, "opencode.jsonc")))
-      // testagent_change end
+      // testagent_change start - 不再读取 ~/.config/opencode 旧全局配置与 opencode.* 文件：
+      // 旧文件（如含不符合新 schema 的 provider 项）会导致 ConfigInvalidError，拖垮整个配置加载
+      // result = mergeConfig(result, yield* loadFile(path.join(opencodeConfig, "config.json")))
+      // result = mergeConfig(result, yield* loadFile(path.join(opencodeConfig, "opencode.json")))
+      // result = mergeConfig(result, yield* loadFile(path.join(opencodeConfig, "opencode.jsonc")))
       result = mergeConfig(result, yield* loadFile(path.join(Global.Path.config, "config.json")))
-      result = mergeConfig(result, yield* loadFile(path.join(Global.Path.config, "opencode.json")))
-      result = mergeConfig(result, yield* loadFile(path.join(Global.Path.config, "opencode.jsonc")))
+      // result = mergeConfig(result, yield* loadFile(path.join(Global.Path.config, "opencode.json")))
+      // result = mergeConfig(result, yield* loadFile(path.join(Global.Path.config, "opencode.jsonc")))
+      // testagent_change end
       // testagent_change start
       result = mergeConfig(result, yield* loadFile(path.join(Global.Path.config, "testagent.json")))
       result = mergeConfig(result, yield* loadFile(path.join(Global.Path.config, "testagent.jsonc")))
@@ -847,16 +850,18 @@ export const layer = Layer.effect(
         const deps: Fiber.Fiber<void, never>[] = []
 
         for (const dir of allDirs) {
-          if (dir.endsWith(".opencode") || dir === Flag.OPENCODE_CONFIG_DIR) {
-            for (const file of ["opencode.json", "opencode.jsonc"]) {
-              const source = path.join(dir, file)
-              log.debug(`loading config from ${source}`)
-              yield* merge(source, yield* loadFileCatching(source))
-              result.agent ??= {}
-              result.mode ??= {}
-              result.plugin ??= []
-            }
-          }
+          // testagent_change start - 不读取 .opencode/ 目录下的 opencode 配置（保留原代码备查）
+          // if (dir.endsWith(".opencode") || dir === Flag.OPENCODE_CONFIG_DIR) {
+          //   for (const file of ["opencode.json", "opencode.jsonc"]) {
+          //     const source = path.join(dir, file)
+          //     log.debug(`loading config from ${source}`)
+          //     yield* merge(source, yield* loadFileCatching(source))
+          //     result.agent ??= {}
+          //     result.mode ??= {}
+          //     result.plugin ??= []
+          //   }
+          // }
+          // testagent_change end
           // testagent_change start - load testagent.json from .testagent/ dirs (higher priority)
           if (dir.endsWith(".testagent")) {
             for (const file of ["testagent.json", "testagent.jsonc"]) {
@@ -985,10 +990,11 @@ export const layer = Layer.effect(
 
         const managedDir = ConfigManaged.managedConfigDir()
         if (existsSync(managedDir)) {
-          for (const file of ["opencode.json", "opencode.jsonc"]) {
-            const source = path.join(managedDir, file)
-            yield* merge(source, yield* loadFileCatching(source), "global")
-          }
+          // testagent_change - 不读取 managed 目录的 opencode.* 配置
+          // for (const file of ["opencode.json", "opencode.jsonc"]) {
+          //   const source = path.join(managedDir, file)
+          //   yield* merge(source, yield* loadFileCatching(source), "global")
+          // }
           // testagent_change start
           for (const file of ["testagent.json", "testagent.jsonc"]) {
             const source = path.join(managedDir, file)

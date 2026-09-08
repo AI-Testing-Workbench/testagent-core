@@ -23,10 +23,11 @@
     "bun:linux-arm64": "cross-env OPENCODE_CHANNEL=latest bun packages/opencode/script/build.ts --target=linux-arm64 --skip-models",
     "bun:alpine": "cross-env OPENCODE_CHANNEL=latest bun packages/opencode/script/build.ts --target=linux-x64-musl --skip-models",
     "bun:alpine-arm64": "cross-env OPENCODE_CHANNEL=latest bun packages/opencode/script/build.ts --target=linux-arm64-musl --skip-models",
-    "bun:mac": "cross-env OPENCODE_CHANNEL=latest bun packages/opencode/script/build.ts --target=darwin-x64 --skip-models  && mkdir -p ../kilo-vscode/bin/ &&  cp packages/opencode/dist/testagent-darwin-x64/bin/testagent ../kilo-vscode/bin/testagent",
+    "bun:mac": "cross-env OPENCODE_CHANNEL=latest bun packages/opencode/script/build.ts --target=darwin-x64 --skip-models  && mkdir -p ../kilo-vscode/bin/ &&  cp packages/opencode/dist/testagent-darwin-x64/bin/testagent ../kilo-vscode/bin/testagent && bun packages/nodejs-server/script/deploy.ts",
     "bun:mac-skip": "cross-env OPENCODE_CHANNEL=latest bun packages/opencode/script/build.ts --target=darwin-x64 --skip-models  --skip-install && mkdir -p ../kilo-vscode/bin/ &&  cp packages/opencode/dist/testagent-darwin-x64/bin/testagent ../kilo-vscode/bin/testagent",
     "bun:mac-arm64": "cross-env OPENCODE_CHANNEL=latest bun packages/opencode/script/build.ts --target=darwin-arm64 --skip-models",
-    "bun:windows": "cross-env OPENCODE_CHANNEL=latest bun packages/opencode/script/build.ts --target=win32-x64-baseline --skip-models && mkdir -p ../kilo-vscode/bin/ &&  cp packages/opencode/dist/testagent-windows-x64-baseline/bin/testagent.exe ../kilo-vscode/bin/testagent.exe",
+    "bun:windows": "cross-env OPENCODE_CHANNEL=latest bun packages/opencode/script/build.ts --target=win32-x64-baseline --skip-models && mkdir -p ../kilo-vscode/bin/ &&  cp packages/opencode/dist/testagent-windows-x64-baseline/bin/testagent.exe ../kilo-vscode/bin/testagent.exe && bun packages/nodejs-server/script/deploy.ts",
+    "node:deploy": "bun packages/nodejs-server/script/deploy.ts",
     "bun:windows-skip": "cross-env OPENCODE_CHANNEL=latest bun packages/opencode/script/build.ts --target=win32-x64-baseline --skip-models --skip-install&& mkdir -p ../kilo-vscode/bin/ &&  cp packages/opencode/dist/testagent-windows-x64-baseline/bin/testagent.exe ../kilo-vscode/bin/testagent.exe",
     "bun:windows-x64": "cross-env OPENCODE_CHANNEL=latest bun packages/opencode/script/build.ts --target=win32-x64 --skip-models  && mkdir -p ../kilo-vscode/bin/ &&  cp packages/opencode/dist/testagent-windows-x64/bin/testagent.exe ../kilo-vscode/bin/testagent.exe"
   },
