@@ -25,14 +25,13 @@ import { homedir } from "os"
 const LANGFUSE_BASE_URL = decodeURIComponent(
   atob("aHR0cCUzQSUyRiUyRnRlc3RodWItYWdlbnQtdHJhY2UucGFhc3VhdC5jbWJjaGluYS5jbg=="),
 )
-const VERSION = "1.0.4"
-const TESTAGENT_VERSION = "1.4.2"
+const VERSION = "1.0.5"
+const TESTAGENT_VERSION = "1.4.3"
 const LANGFUSE_FETCH_TIMEOUT_MS = 10_000
 const LANGFUSE_KEY_LOOKUP_TIMEOUT_MS = 15000
 const TESTAGENT_DATA_DIR = join(homedir(), ".local", "share", "testagent")
 const LANGFUSE_KEY_CACHE_FILE = join(TESTAGENT_DATA_DIR, "langfuse-project-keys.json")
 const MAX_INGESTION_BATCH_BYTES = 900 * 1024
-const MAX_OBSERVED_TEXT_LENGTH = 10000
 const MAX_ERROR_DETAIL_LENGTH = 2000
 
 let baseMetadata: () => Record<string, string>
@@ -593,6 +592,19 @@ function getObservationSubagentType(traceId: string, observationId: string): str
     batch?.spans.find((span) => span.id === observationId)
   const subagentType = observation?.metadata?.subagent_type
   return typeof subagentType === "string" && subagentType.trim() ? subagentType : undefined
+}
+
+/**
+ * Mirror Langfuse's structural parent onto metadata so downstream consumers
+ * can reconstruct the same observation tree using metadata alone.
+ */
+export function withParentObservationMetadata(
+  metadata: Record<string, any> = {},
+  parentObservationId?: string,
+) {
+  return parentObservationId
+    ? { ...metadata, parent_observation_id: parentObservationId }
+    : metadata
 }
 
 function withTraceSkillInfoForObservationUpdate(
@@ -2579,7 +2591,7 @@ function generationEventBody(gen: GenerationData) {
     input: gen.input,
     output: gen.output,
     usage: gen.usage,
-    metadata: gen.metadata,
+    metadata: withParentObservationMetadata(gen.metadata, gen.parentObservationId),
     tags: gen.tags,
     startTime: gen.startTime,
     endTime: gen.endTime,
@@ -2634,7 +2646,12 @@ function updateGenerationImmediately(traceId: string, genId: string, updates: Pa
   const effectiveUpdates = { ...preservedState, ...normalizedUpdates }
   const outgoingUpdates =
     effectiveUpdates.metadata !== undefined
-      ? { ...effectiveUpdates, metadata: withoutObservationCompletionFields(effectiveUpdates.metadata) }
+      ? {
+          ...effectiveUpdates,
+          metadata: withoutObservationCompletionFields(
+            withParentObservationMetadata(effectiveUpdates.metadata, effectiveUpdates.parentObservationId),
+          ),
+        }
       : effectiveUpdates
   const endTime = effectiveUpdates.endTime
   const modelMetadata = effectiveUpdates.metadata?.model ?? {}
@@ -2662,7 +2679,7 @@ function spanEventBody(span: SpanData) {
     name: span.name,
     input: span.input,
     output: span.output,
-    metadata: span.metadata,
+    metadata: withParentObservationMetadata(span.metadata, span.parentObservationId),
     tags: span.tags,
     startTime: span.startTime,
     endTime: span.endTime,
@@ -2750,13 +2767,21 @@ function updateSpanImmediately(traceId: string, spanId: string, updates: Partial
     updates.metadata !== undefined
       ? { ...updates, metadata: withTraceSkillInfoForObservationUpdate(traceId, spanId, updates.metadata) }
       : updates
+  const existingSpan = traceBatches.get(traceId)?.spans.find((span) => span.id === spanId)
   const outgoingUpdates =
     normalizedUpdates.metadata !== undefined
-      ? { ...normalizedUpdates, metadata: withoutObservationCompletionFields(normalizedUpdates.metadata) }
+      ? {
+          ...normalizedUpdates,
+          metadata: withoutObservationCompletionFields(
+            withParentObservationMetadata(
+              normalizedUpdates.metadata,
+              normalizedUpdates.parentObservationId ?? existingSpan?.parentObservationId,
+            ),
+          ),
+        }
       : normalizedUpdates
   // Do not let a late metadata/parent update reopen a completed tool span.
   // Keep both the body endTime and ingestion timestamp on the original end.
-  const existingSpan = traceBatches.get(traceId)?.spans.find((span) => span.id === spanId)
   const endTime = normalizedUpdates.endTime ?? existingSpan?.endTime
   scheduleBackgroundIngestion([
     buildIngestionEvent(
@@ -2787,20 +2812,59 @@ function stringifyToolOutput(output: any) {
   }
 }
 
-function truncateObservedText(text: string, maxLength = MAX_OBSERVED_TEXT_LENGTH) {
-  if (text.length <= maxLength) return text
-  return `${text.slice(0, maxLength)}...[truncated ${text.length - maxLength} chars]`
-}
-
-function toSpanOutput(output: any) {
+export function toSpanOutput(output: any) {
   if (output === undefined) return undefined
   if (output === null) return null
-  return truncateObservedText(stringifyToolOutput(output))
+  return stringifyToolOutput(output)
 }
 
 function getToolCallId(value: any): string | undefined {
   const id = value?.callID ?? value?.toolCallID ?? value?.tool_call_id ?? value?.id
   return id === undefined || id === null || id === "" ? undefined : String(id)
+}
+
+export function withToolCallIdMetadata(metadata: Record<string, any>, value: any): Record<string, any> {
+  const toolCallId = getToolCallId(value)
+  return toolCallId ? { ...metadata, tool_call_id: toolCallId } : metadata
+}
+
+export function formatGenerationToolCalls(
+  toolCalls: Array<{ toolCallId: string; name: string; args: any }>,
+): any[] {
+  return toolCalls.map((toolCall) => ({
+    type: "function",
+    ...(toolCall.toolCallId ? { tool_call_id: toolCall.toolCallId } : {}),
+    function: {
+      name: toolCall.name,
+      arguments: toolCall.args || {},
+    },
+  }))
+}
+
+export function upsertGenerationToolCall(
+  toolCalls: Array<{ toolCallId: string; name: string; args: any }>,
+  value: any,
+  name: string,
+  args: any,
+): boolean {
+  const toolCallId = getToolCallId(value)
+  const existing =
+    (toolCallId ? toolCalls.find((toolCall) => toolCall.toolCallId === toolCallId) : undefined) ??
+    toolCalls.find((toolCall) => !toolCall.toolCallId && toolCall.name === name)
+
+  if (!existing) {
+    toolCalls.push({ toolCallId: toolCallId ?? "", name, args })
+    return true
+  }
+
+  const changed =
+    (!!toolCallId && existing.toolCallId !== toolCallId) ||
+    existing.name !== name ||
+    existing.args !== args
+  if (toolCallId) existing.toolCallId = toolCallId
+  existing.name = name
+  existing.args = args
+  return changed
 }
 
 function isMeaningfulToolOutput(output: any) {
@@ -3273,13 +3337,19 @@ function syncCompletedVisibleText(g: GenInfo) {
   if (visibleText) g.output = visibleText
 }
 
-function refreshFinalizedGenerationText(g: GenInfo) {
+function refreshFinalizedGenerationOutput(g: GenInfo) {
   if (!g.finalOutput) return
 
   const text = buildGenerationText(g)
-  if (g.finalOutput.text === text) return
+  const toolCalls = formatGenerationToolCalls(g.toolCalls)
+  if (
+    g.finalOutput.text === text &&
+    JSON.stringify(g.finalOutput.tool_calls ?? []) === JSON.stringify(toolCalls)
+  ) {
+    return
+  }
 
-  const structuredOutput = { ...g.finalOutput, text }
+  const structuredOutput = { ...g.finalOutput, text, tool_calls: toolCalls }
   g.finalOutput = structuredOutput
   const existingGeneration = traceBatches.get(g.traceId)?.generations.find((generation) => generation.id === g.genId)
   const generationUpdates: Partial<GenerationData> = {
@@ -3448,13 +3518,7 @@ async function finalizeGeneration(
   // finish reason. Keep the field present for downstream completion checks.
   const finishReason = options?.finishReason || "unknown"
 
-  const toolCallsOutput = g.toolCalls.map((tc) => ({
-    type: "function",
-    function: {
-      name: tc.name,
-      arguments: tc.args || {},
-    },
-  }))
+  const toolCallsOutput = formatGenerationToolCalls(g.toolCalls)
 
   const structuredOutput = {
     text: fullText,
@@ -4049,6 +4113,18 @@ export function buildLLMInput(messages: any[], system: string[], tools: any[]): 
 function getRawMessageId(message: any): string | undefined {
   const id = message?.info?.id ?? message?.info?.messageID ?? message?.messageID ?? message?.id
   return typeof id === "string" && id ? id : undefined
+}
+
+export function resolveChatMessageId(input: any, output: any): string | undefined {
+  if (typeof input?.messageID === "string" && input.messageID) return input.messageID
+
+  const outputMessageId = getRawMessageId(output?.message)
+  if (outputMessageId) return outputMessageId
+
+  for (const part of output?.parts ?? []) {
+    if (typeof part?.messageID === "string" && part.messageID) return part.messageID
+  }
+  return undefined
 }
 
 export function selectGenerationRequestMessages(cachedMessages: any[], assistantMessageId?: string): any[] {
@@ -4957,6 +5033,7 @@ export const LangfusePlugin: Plugin = async (ctx) => {
      */
     "chat.message": async (input, output) => {
       const sessionId = getSessionId(input.sessionID)
+      const messageId = resolveChatMessageId(input, output)
       trackedSessionIds.add(sessionId)
       idleSessionIds.delete(sessionId)
 
@@ -4966,12 +5043,12 @@ export const LangfusePlugin: Plugin = async (ctx) => {
 
       let traceId: string
       try {
-        traceId = await getTraceIdAfterSessionCreated(sessionId, input.messageID)
+        traceId = await getTraceIdAfterSessionCreated(sessionId, messageId)
       } catch (e) {
         trackEvent("both", {
           level: "error",
           message: "新对话解析 Trace ID 失败，未进入 Langfuse 上报队列",
-          data: { error: String(e), sessionId, messageId: input.messageID },
+          data: { error: String(e), sessionId, messageId },
           metricName: "plugin.langfuse.chat.trace.resolve.error",
           metricValue: 1,
           tags: { type: "chatMessageHook", reason: "trace_resolution" },
@@ -5004,14 +5081,14 @@ export const LangfusePlugin: Plugin = async (ctx) => {
           : {}),
         metadata: {
           ...batch.metadata,
-          messageID: input.messageID,
+          messageID: messageId,
           messageIndex: count,
           isSubagent: isSubagentSession(sessionId),
           input: {
             sessionID: input.sessionID,
             agent: input.agent,
             model: input.model,
-            messageID: input.messageID,
+            messageID: messageId,
             variant: input.variant,
           },
         },
@@ -5060,6 +5137,12 @@ export const LangfusePlugin: Plugin = async (ctx) => {
      * 处理聊天参数事件，创建 LLM generation
      */
     "chat.params": async (input, output) => {
+      // OpenCode invokes chat.params for its internal session-title request as
+      // well as the user-facing model request. Title responses do not emit the
+      // normal message-part events used to activate pending generations, so do
+      // not allocate or expose an observation ID for them.
+      if (input.agent === "title") return
+
       const sessionId = getSessionId(input.sessionID)
       // Snapshot ownership before any await. Session association can pause this
       // handler while a later skill changes the active context.
@@ -5156,6 +5239,8 @@ export const LangfusePlugin: Plugin = async (ctx) => {
         pendingSequence,
       }
 
+      ;(output as any).observationId = genId
+      ;(output as any).projectId = project_id
       const pending = pendingGenerations.get(sessionId) ?? []
       const insertionIndex = pending.findIndex((entry) => entry.pendingSequence > genInfo.pendingSequence)
       if (insertionIndex === -1) pending.push(genInfo)
@@ -5205,7 +5290,19 @@ export const LangfusePlugin: Plugin = async (ctx) => {
       const toolStartTime = reportedToolStartTime ?? toolObservedAt
       const precedingGeneration =
         getLatestActiveGeneration(sessionId) ?? activatePendingGeneration(sessionId)
-      if (precedingGeneration) markGenerationResponseFinished(precedingGeneration, toolStartTime)
+      if (precedingGeneration) {
+        markGenerationResponseFinished(precedingGeneration, toolStartTime)
+        upsertGenerationToolCall(
+          precedingGeneration.toolCalls,
+          input,
+          input.tool,
+          output.args ?? input.args ?? {},
+        )
+        // Some OpenCode versions publish the authoritative call ID only on
+        // tool.execute.before. Repair an already-finalized LLM output as well
+        // as the in-memory record used by a later step-finish.
+        refreshFinalizedGenerationOutput(precedingGeneration)
+      }
 
       const isSkill = input.tool === "skill"
       const skillSpanId = isSkill ? generateUUID() : undefined
@@ -5266,17 +5363,20 @@ export const LangfusePlugin: Plugin = async (ctx) => {
         name: spanName,
         input: sanitize(output.args),
         startTime: startTime.toISOString(),
-        metadata: {
-          spanKind: "TOOL",
-          nodeType: isSkill ? "skill" : "tool",
-          tags: OBSERVATION_TAGS,
-          ...(childSubagentType ? { subagent_type: childSubagentType } : {}),
-          input: {
-            tool: input.tool,
-            args: output.args,
+        metadata: withToolCallIdMetadata(
+          {
+            spanKind: "TOOL",
+            nodeType: isSkill ? "skill" : "tool",
+            tags: OBSERVATION_TAGS,
+            ...(childSubagentType ? { subagent_type: childSubagentType } : {}),
+            input: {
+              tool: input.tool,
+              args: output.args,
+            },
+            ...baseMetadata(),
           },
-          ...baseMetadata(),
-        },
+          input,
+        ),
         tags: OBSERVATION_TAGS,
       }
 
@@ -5613,10 +5713,7 @@ export const LangfusePlugin: Plugin = async (ctx) => {
       // before a late step-finish supplies provider usage and finish reason.
       const partialOutput = {
         text: buildGenerationText(g),
-        tool_calls: g.toolCalls.map((tc) => ({
-          type: "function",
-          function: { name: tc.name, arguments: tc.args || {} },
-        })),
+        tool_calls: formatGenerationToolCalls(g.toolCalls),
         usage: toOutputUsage({ input: 0, output: 0, total: 0 }),
         finish_reason: "unknown",
       }
@@ -5685,8 +5782,9 @@ export const LangfusePlugin: Plugin = async (ctx) => {
         const part = evt.properties.part
         const sessionId = part.sessionID || currentSessionId
         if (!sessionId) return
+        const partToolCallId = getToolCallId(part)
 
-        if (part.type === "tool" && part.callID && part.state?.status === "completed" && hasOwn(part.state, "output")) {
+        if (part.type === "tool" && partToolCallId && part.state?.status === "completed" && hasOwn(part.state, "output")) {
           const snapshot = {
             output: part.state.output,
             metadata: part.metadata,
@@ -5696,10 +5794,10 @@ export const LangfusePlugin: Plugin = async (ctx) => {
             toolPartCompleted: true,
             toolCompletionSource: "message.part.updated",
           }
-          toolResultSnapshots.set(part.callID, snapshot)
+          toolResultSnapshots.set(partToolCallId, snapshot)
 
           await updateToolSpanOutputFromSnapshot(
-            part.callID,
+            partToolCallId,
             sessionToTrace.get(sessionId) || currentTraceId,
             snapshot.completedAt,
             snapshot,
@@ -5720,7 +5818,7 @@ export const LangfusePlugin: Plugin = async (ctx) => {
             if (part.type === "text" && getPartTimestamp(part, "end")) {
               syncCompletedVisibleText(g)
             }
-            refreshFinalizedGenerationText(g)
+            refreshFinalizedGenerationOutput(g)
             scheduleGenerationObservationCompletion(g)
           }
           if (part.type === "tool" && part.state?.status === "running") {
@@ -5731,26 +5829,21 @@ export const LangfusePlugin: Plugin = async (ctx) => {
             if (!g.parts.some((p) => p.startsWith(`Tool Call: ${toolName}(`))) {
               g.parts.push(toolStr)
             }
-            if (!g.toolCalls.some((tc) => tc.toolCallId === (part.callID || ""))) {
-              g.toolCalls.push({
-                toolCallId: part.callID || "",
-                name: toolName,
-                args: toolArgs,
-              })
-            }
+            upsertGenerationToolCall(g.toolCalls, part, toolName, toolArgs)
+            refreshFinalizedGenerationOutput(g)
           }
           if (part.type === "tool" && part.state?.status === "completed" && hasOwn(part.state, "output")) {
             const resultText = part.state.output === undefined ? "" : stringifyToolOutput(part.state.output)
             if (!g.toolResults) g.toolResults = []
-            const toolCallId = part.callID || ""
+            const toolCallId = partToolCallId || ""
             const existingToolResult = g.toolResults.find((tr) => tr.toolCallId === toolCallId && toolCallId)
             const toolResult = {
-              toolCallId: part.callID || "",
+              toolCallId,
               name: part.tool || "",
               output: resultText,
               metadata: part.metadata,
-              index: g.toolCalls.findIndex((tc) => tc.toolCallId === (part.callID || "")),
-              args: g.toolCalls.find((tc) => tc.toolCallId === (part.callID || ""))?.args || {},
+              index: g.toolCalls.findIndex((tc) => tc.toolCallId === toolCallId),
+              args: g.toolCalls.find((tc) => tc.toolCallId === toolCallId)?.args || {},
             }
             if (existingToolResult) {
               Object.assign(existingToolResult, toolResult)
@@ -5795,7 +5888,7 @@ export const LangfusePlugin: Plugin = async (ctx) => {
 
         markGenerationCompletionStarted(g, getEventTimestamp(properties.time) ?? new Date())
         updateGenerationTextPart(g, partId, "unknown", delta, { delta: true })
-        refreshFinalizedGenerationText(g)
+        refreshFinalizedGenerationOutput(g)
         scheduleGenerationObservationCompletion(g)
       }
 
