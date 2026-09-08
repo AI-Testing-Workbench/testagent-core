@@ -732,6 +732,43 @@ function hydrate(rows: (typeof MessageTable.$inferSelect)[]) {
     // testagent_change end
     for (const row of partRows) {
       const next = part(row)
+      // testagent_change start - truncate large outputs when loading history
+      // If output was already truncated and saved to file, further reduce the preview
+      // to avoid memory/performance issues when loading history
+      if (next.type === "tool" && next.state?.status === "completed") {
+        const state = next.state as Record<string, unknown>
+        const metadata = state.metadata as Record<string, unknown> | undefined
+        if (metadata?.truncated === true && typeof metadata.outputPath === "string") {
+          const output = state.output
+          if (typeof output === "string" && output.length > 2000) {
+            // Keep first 10 lines of preview + hint section
+            const lines = output.split("\n")
+            const preview = lines.slice(0, 10).join("\n")
+            
+            // Find the hint section
+            const hintStartIndex = lines.findIndex((line) => 
+              line.includes("Full output saved to:") || 
+              line.includes("Use Grep to search") ||
+              line.includes("Use the Task tool")
+            )
+            
+            if (hintStartIndex !== -1) {
+              // Find the end of the hint block (usually ends with the file path)
+              let hintEndIndex = hintStartIndex
+              for (let i = hintStartIndex + 1; i < lines.length && i < hintStartIndex + 5; i++) {
+                if (lines[i].trim().length > 0) hintEndIndex = i
+                else break
+              }
+              // Extract hint section
+              const hint = lines.slice(hintStartIndex, hintEndIndex + 1).join("\n")
+              state.output = `${preview}\n......\n${hint}`
+            }
+            // If hint not found, it means the format is unexpected - just truncate
+            // to avoid loading huge content. This shouldn't happen in normal cases.
+          }
+        }
+      }
+      // testagent_change end
       const list = partByMessage.get(row.message_id)
       if (list) list.push(next)
       else partByMessage.set(row.message_id, [next])
