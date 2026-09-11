@@ -39,6 +39,11 @@ export const MessagesQuery = Schema.Struct({
   limit: Schema.optional(Schema.NumberFromString.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0))),
   before: Schema.optional(Schema.String),
 })
+// testagent_change start - contextExtract 查询参数（是否包含 reasoning 思考内容，默认 false）
+export const ContextExtractQuery = Schema.Struct({
+  reasoning: Schema.optional(QueryBoolean),
+})
+// testagent_change end
 export const StatusMap = Schema.Record(Schema.String, SessionStatus.Info)
 export const UpdatePayload = Schema.Struct({
   title: Schema.optional(Schema.String),
@@ -75,6 +80,28 @@ export const ResumePayload = Schema.Struct(Struct.omit(SessionPrompt.ResumeInput
 export const PermissionResponsePayload = Schema.Struct({
   response: Permission.Reply,
 })
+// testagent_change start - 投影后的轻量上下文条目（供 testflow 行为分析）
+export const ContextEntry = Schema.Struct({
+  role: Schema.Literals(["user", "assistant"]),
+  type: Schema.Literals(["text", "reasoning", "question"]),
+  text: Schema.optional(Schema.String),
+  state: Schema.optional(
+    Schema.Struct({
+      questions: Schema.Array(Schema.Any), // state.input.questions，透传不细化
+      answers: Schema.Array(Schema.Array(Schema.String)), // state.metadata.answers
+    }),
+  ),
+})
+// testagent_change end
+// testagent_change start - 上下文分块（主代理/一层子代理分段，便于行为分析子 agent 区分归属）
+export const ContextBlock = Schema.Struct({
+  scope: Schema.Literals(["main", "subagent"]),
+  sessionID: Schema.optional(Schema.String), // 子 agent 的 sessionID（scope=main 时省略）
+  agent: Schema.optional(Schema.String), // 子 agent 名（Session.Info.agent）
+  title: Schema.optional(Schema.String), // 子 session 标题（辅助识别）
+  entries: Schema.Array(ContextEntry),
+})
+// testagent_change end
 
 export const SessionPaths = {
   list: root,
@@ -101,6 +128,7 @@ export const SessionPaths = {
   unrevert: `${root}/:sessionID/unrevert`,
   resume: `${root}/:sessionID/resume`, // testagent_change - 添加 resume 路径
   clearContext: `${root}/:sessionID/context-clear`, // testagent_change - 清空上下文路径
+  contextExtract: `${root}/:sessionID/context-extract`, // testagent_change - 投影后的轻量上下文路径
   permissions: `${root}/:sessionID/permissions/:permissionID`,
   deleteMessage: `${root}/:sessionID/message/:messageID`,
   deletePart: `${root}/:sessionID/message/:messageID/part/:partID`,
@@ -400,6 +428,21 @@ export const SessionApi = HttpApi.make("session")
             identifier: "session.clearContext",
             summary: "Clear session context",
             description: "Clear all LLM context while preserving conversation history in the UI.",
+          }),
+        ),
+        // testagent_change end
+        // testagent_change start - 添加 contextExtract 端点（供 testflow 使用，返回投影后的轻量活跃上下文）
+        HttpApiEndpoint.get("contextExtract", SessionPaths.contextExtract, {
+          params: { sessionID: SessionID },
+          query: ContextExtractQuery,
+          success: described(Schema.Array(ContextBlock), "Extracted context blocks (main + subagent)"),
+          error: [HttpApiError.BadRequest, ApiNotFoundError],
+        }).annotateMerge(
+          OpenApi.annotations({
+            identifier: "session.contextExtract",
+            summary: "Extract session context (for testflow)",
+            description:
+              "Return a lightweight projection of the active context (messages after the last compaction), split into blocks by session: the main session first, then one layer of direct subagent sessions. Keeps only user/assistant text, optional assistant reasoning, and question-tool Q&A; drops base64/diffs/tool outputs. Provided specifically for testflow to analyze user behavior without large payloads.",
           }),
         ),
         // testagent_change end
