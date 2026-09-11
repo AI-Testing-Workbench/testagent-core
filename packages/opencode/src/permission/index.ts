@@ -17,6 +17,9 @@ import os from "os"
 import { z } from "zod" // kilocode_change
 import { evaluate as evalRule } from "./evaluate"
 import { PermissionID } from "./schema"
+// testagent_change start - YOLO 模式状态（进程级纯模块，无 Effect 上下文依赖）
+import { Yolo } from "@/testagent/yolo"
+// testagent_change end
 
 const log = Log.create({ service: "permission" })
 
@@ -190,6 +193,12 @@ export const layer = Layer.effect(
     )
 
     const ask = Effect.fn("Permission.ask")(function* (input: AskInput) {
+      // testagent_change start - YOLO 模式（全局开关）：绕过所有权限规则（包括 deny），直接放行
+      if (Yolo.isEnabled()) {
+        log.info("yolo bypass", { permission: input.permission, sessionID: input.sessionID })
+        return
+      }
+      // testagent_change end
       const { approved, pending } = yield* InstanceState.get(state)
       const { ruleset, ...request } = input
       let needsAsk = false

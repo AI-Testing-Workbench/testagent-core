@@ -40,6 +40,10 @@ import { NamedError } from "@opencode-ai/core/util/error"
 import { SessionProcessor } from "./processor"
 import { Tool } from "@/tool/tool"
 import { Permission } from "@/permission"
+// testagent_change start - YOLO 模式
+import { Yolo } from "@/testagent/yolo"
+import { YoloPrompt } from "@/testagent/yolo-prompt"
+// testagent_change end
 import { SessionStatus, type IdleReason } from "./status"
 import { LLM } from "./llm"
 import { thinkingEnabledStore } from "./llm" // testagent_change
@@ -1742,6 +1746,11 @@ NOTE: At any point in time through this workflow you should feel free to ask the
               MessageV2.toModelMessagesEffect(msgs, model),
             ])
             const system = [...env, ...instructions, ...(skills ? [skills] : [])]
+            // testagent_change start - YOLO 模式（全局开关）追加系统提示词约束段
+            if (Yolo.isEnabled()) {
+              system.push(YoloPrompt.SECTION)
+            }
+            // testagent_change end
             const format = lastUser.format ?? { type: "text" as const }
             if (format.type === "json_schema") system.push(STRUCTURED_OUTPUT_SYSTEM_PROMPT)
             const result = yield* handle.process({

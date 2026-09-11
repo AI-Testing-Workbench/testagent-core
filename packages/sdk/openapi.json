@@ -588,9 +588,6 @@
                           "value": {
                             "type": "string",
                             "minLength": 1
-                          },
-                          "description": {
-                            "type": "string"
                           }
                         },
                         "required": ["key", "value"],
@@ -609,9 +606,6 @@
                           "value": {
                             "type": "string",
                             "minLength": 1
-                          },
-                          "description": {
-                            "type": "string"
                           }
                         },
                         "required": ["key", "value"],
@@ -699,9 +693,6 @@
                           "value": {
                             "type": "string",
                             "minLength": 1
-                          },
-                          "description": {
-                            "type": "string"
                           }
                         },
                         "required": ["key", "value"],
@@ -720,9 +711,6 @@
                           "value": {
                             "type": "string",
                             "minLength": 1
-                          },
-                          "description": {
-                            "type": "string"
                           }
                         },
                         "required": ["key", "value"],
@@ -863,9 +851,6 @@
                     },
                     "value": {
                       "type": "string"
-                    },
-                    "description": {
-                      "type": "string"
                     }
                   },
                   "required": ["key", "value"],
@@ -963,9 +948,6 @@
                     },
                     "value": {
                       "type": "string"
-                    },
-                    "description": {
-                      "type": "string"
                     }
                   },
                   "required": ["key", "value"],
@@ -1035,6 +1017,344 @@
           {
             "lang": "js",
             "source": "import { createOpencodeClient } from \"@opencode-ai/sdk\n\nconst client = createOpencodeClient()\nawait client.testagent.customEnvVars.batchDelete({\n  ...\n})"
+          }
+        ]
+      }
+    },
+    "/testagent/zh-answer": {
+      "post": {
+        "tags": ["testagent"],
+        "operationId": "testagent.zhAnswer.set",
+        "parameters": [
+          {
+            "name": "directory",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "ZH answer toggle set successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "boolean",
+                  "description": "ZH answer toggle set successfully"
+                }
+              }
+            }
+          }
+        },
+        "description": "Enable or disable bridging of permission/question asks to enterprise ZH via relay.",
+        "summary": "Toggle ZH answer bridging",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "enabled": {
+                    "type": "boolean"
+                  }
+                },
+                "required": ["enabled"],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "js",
+            "source": "import { createOpencodeClient } from \"@opencode-ai/sdk\n\nconst client = createOpencodeClient()\nawait client.testagent.zhAnswer.set({\n  ...\n})"
+          }
+        ]
+      }
+    },
+    "/testagent/agent/override": {
+      "post": {
+        "tags": ["testagent"],
+        "operationId": "testagent.agent.override.set",
+        "parameters": [
+          {
+            "name": "directory",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Override set successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "applied": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": ["applied"],
+                  "additionalProperties": false,
+                  "description": "Override set successfully"
+                }
+              }
+            }
+          }
+        },
+        "description": "Override the prompt and/or permission rules of the sdt subagent for the given session.",
+        "summary": "Set per-stage subagent override for a session",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "sessionID": {
+                    "type": "string"
+                  },
+                  "prompt": {
+                    "type": "string"
+                  },
+                  "permission": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "permission": {
+                          "type": "string"
+                        },
+                        "pattern": {
+                          "type": "string"
+                        },
+                        "action": {
+                          "type": "string",
+                          "enum": ["allow", "deny", "ask"]
+                        }
+                      },
+                      "required": ["permission", "pattern", "action"],
+                      "additionalProperties": false
+                    }
+                  },
+                  "temperature": {
+                    "type": "number"
+                  },
+                  "topP": {
+                    "type": "number"
+                  },
+                  "steps": {
+                    "type": "number"
+                  }
+                },
+                "required": ["sessionID"],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "js",
+            "source": "import { createOpencodeClient } from \"@opencode-ai/sdk\n\nconst client = createOpencodeClient()\nawait client.testagent.agent.override.set({\n  ...\n})"
+          }
+        ]
+      },
+      "delete": {
+        "tags": ["testagent"],
+        "operationId": "testagent.agent.override.clear",
+        "parameters": [
+          {
+            "name": "directory",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Override cleared successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "boolean",
+                  "description": "Override cleared successfully"
+                }
+              }
+            }
+          }
+        },
+        "description": "Remove the transient override for the given session, restoring default sdt behavior.",
+        "summary": "Clear per-stage subagent override for a session",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "sessionID": {
+                    "type": "string"
+                  }
+                },
+                "required": ["sessionID"],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "js",
+            "source": "import { createOpencodeClient } from \"@opencode-ai/sdk\n\nconst client = createOpencodeClient()\nawait client.testagent.agent.override.clear({\n  ...\n})"
+          }
+        ]
+      }
+    },
+    "/testagent/yolo": {
+      "put": {
+        "tags": ["testagent"],
+        "operationId": "testagent.yolo.set",
+        "parameters": [
+          {
+            "name": "directory",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "YOLO mode set successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "applied": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": ["applied"],
+                  "additionalProperties": false,
+                  "description": "YOLO mode set successfully"
+                }
+              }
+            }
+          }
+        },
+        "description": "Enable or disable YOLO mode globally. When enabled, all sessions run unattended: every permission rule (including deny) is bypassed and the question tool becomes unavailable, mirroring cline's yolo mode. State resets on server restart.",
+        "summary": "Toggle YOLO mode (global)",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "enabled": {
+                    "type": "boolean"
+                  }
+                },
+                "required": ["enabled"],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "js",
+            "source": "import { createOpencodeClient } from \"@opencode-ai/sdk\n\nconst client = createOpencodeClient()\nawait client.testagent.yolo.set({\n  ...\n})"
+          }
+        ]
+      },
+      "get": {
+        "tags": ["testagent"],
+        "operationId": "testagent.yolo.get",
+        "parameters": [
+          {
+            "name": "directory",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current YOLO mode",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "enabled": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": ["enabled"],
+                  "additionalProperties": false,
+                  "description": "Current YOLO mode"
+                }
+              }
+            }
+          }
+        },
+        "description": "Query whether YOLO mode is currently enabled.",
+        "summary": "Get YOLO mode (global)",
+        "x-codeSamples": [
+          {
+            "lang": "js",
+            "source": "import { createOpencodeClient } from \"@opencode-ai/sdk\n\nconst client = createOpencodeClient()\nawait client.testagent.yolo.get({\n  ...\n})"
           }
         ]
       }
@@ -12133,6 +12453,9 @@
           },
           "tail_start_id": {
             "type": "string"
+          },
+          "clear_context": {
+            "type": "boolean"
           }
         },
         "required": ["id", "sessionID", "messageID", "type", "auto"],

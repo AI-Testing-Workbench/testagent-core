@@ -23,6 +23,9 @@ import { Auth } from "@/auth"
 import { Installation } from "@/installation"
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
 import { EffectBridge } from "@/effect/bridge"
+// testagent_change start - YOLO 模式状态
+import { Yolo } from "@/testagent/yolo"
+// testagent_change end
 import * as Option from "effect/Option"
 import * as OtelTracer from "@effect/opentelemetry/Tracer"
 // testagent_change start - Global fallback for thinkingEnabled when user message field is lost during rewrites
@@ -173,6 +176,14 @@ const live: Layer.Layer<
             ]
 
       const tools = resolveTools(input)
+      // testagent_change start - YOLO 模式（全局开关）：question 工具对模型不可用（与 cline yolo 一致）。
+      // 模型若仍臆造 question 调用，AI SDK 会抛 NoSuchToolError 并转为流内 tool-error 事件，
+      // 由 processor 的 failToolCall 把 "Unknown tool" 错误结果回灌给模型自主决策。
+      if (Yolo.isEnabled()) {
+        delete tools.question
+        l.info("yolo: question tool hidden")
+      }
+      // testagent_change end
       const activeTools = Object.keys(tools).filter((x) => x !== "invalid") // testagent_change
 
       const params = yield* plugin.trigger(
