@@ -20,9 +20,9 @@ export const MemoryConfig = z.object({
     memory: z
         .object({
         /** 记忆提取最大长度 */
-        autoExtractBatchToken: z.number().default(10000),
+        autoExtractMaxLength: z.number().default(10000),
         /** 记忆提取缓存大小 */
-        autoExtractBatchSize: z.number().default(10),
+        autoExtractBufferSize: z.number().default(10),
         /** 记忆提取每次从数据库读取的记录数 */
         autoExtractBatchSize: z.number().default(6),
         autoExtractBatchToken: z.number().default(10000),
@@ -35,7 +35,7 @@ export const MemoryConfig = z.object({
         autoExtractEnable: z.boolean().default(true),
         personalMemoryBackupSize: z.number().default(10),
     })
-        .default({ autoExtractBatchToken: 10000, autoExtractBatchSize: 10, autoExtractBatchSize: 6, personalMemoryEnable: true,
+        .default({ autoExtractMaxLength: 10000, autoExtractBufferSize: 10, autoExtractBatchSize: 6, personalMemoryEnable: true,
         personalMemoryPrompt: "", autoDreamEnable: true, autoExtractEnable: true, personalMemoryBackupSize: 10,
         autoExtractBatchToken: 10000 }),
     recall: z

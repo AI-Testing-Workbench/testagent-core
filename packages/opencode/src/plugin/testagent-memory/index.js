@@ -1,10 +1,12 @@
 import { tool } from "@opencode-ai/plugin";
-import { buildMemorySystemPrompt } from "./prompt.js";
+import { join, resolve } from "path";
+import { existsSync, statSync } from "fs";
+import { buildMemorySystemPrompt, shouldIncludeSaveGuide, buildSdtMemoryExtractionPrompt } from "./prompt.js";
 import { searchHybrid, recallRelevantMemoriesByLLM, formatRecalledMemories } from "./recall.js";
 import { cosineSimilarity, calcBm25KeywordBonus, buildCorpusStats } from "./vectorSearch.js";
 import { buildFtsTokens } from "./tokenizer.js";
-import { saveMemory, deleteMemory, listMemories, searchMemories, readMemory, MEMORY_TYPES, readPersonalMemory, savePersonalMemory, } from "./memory.js";
-import { getMemoryDir, getOpencodeConfigHomeDir } from "./paths.js";
+import { saveMemory, deleteMemory, listMemories, searchMemories, readMemory, MEMORY_TYPES, readPersonalMemory, savePersonalMemory, readMemoryByFilePath, } from "./memory.js";
+import { getMemoryDir, getOpencodeConfigHomeDir, getSkillsDir, getGlobalSkillsDir } from "./paths.js";
 import { createOpenCodeRecallLLMClient } from "./recall-llm-adapter.js";
 import { isWorkerSession } from "./core/worker.js";
 import * as log from "./core/log.js";
@@ -407,6 +409,75 @@ function getState(projectPath) {
     states.set(projectPath, state);
     return state;
 }
+// 判断路径是否为文件系统根路径（如 "/" 或 "C:\\"）
+function isFilesystemRoot(p) {
+    const resolved = resolve(p);
+    return resolved === resolve("/") || /^[A-Za-z]:[\\/]?$/.test(resolved);
+}
+// 编辑器/IDE 安装目录常见的可执行文件名（VS Code 家族：Code / VSCodium / Cursor / Windsurf / Trae ...）
+const EDITOR_BINARIES = [
+    "Code.exe",
+    "Code - OSS.exe",
+    "VSCodium.exe",
+    "Cursor.exe",
+    "Windsurf.exe",
+    "Trae.exe",
+];
+// 判断目录是否为「应用安装目录」（编辑器/IDE 安装目录）而非用户工作区。
+// 未打开任何文件夹时，testagent/vscode 扩展用 process.cwd() 作为目录传给插件，
+// 而扩展宿主进程的 cwd 正是编辑器安装目录（例如 D:\软件\Microsoft VS Code）。
+function isAppInstallDir(dir) {
+    try {
+        // VS Code 家族标准布局（Windows / Linux）：<安装目录>/resources/app/package.json
+        if (existsSync(join(dir, "resources", "app", "package.json")))
+            return true;
+        // macOS .app 包布局
+        if (existsSync(join(dir, "Contents", "Resources", "app", "package.json")))
+            return true;
+        // macOS .app 内的可执行目录：Foo.app/Contents/MacOS
+        if (/[\\/]Contents[\\/]MacOS$/i.test(resolve(dir)))
+            return true;
+        // 编辑器可执行文件（只按文件判断，避免与同名文件夹冲突）
+        for (const name of EDITOR_BINARIES) {
+            const binPath = join(dir, name);
+            if (existsSync(binPath) && statSync(binPath).isFile())
+                return true;
+        }
+        // testagent / opencode 扩展安装目录（如 ~/.vscode/extensions/test-tech.testagent-x.y.z）
+        const normalized = resolve(dir).replace(/\\/g, "/").toLowerCase() + "/";
+        if (/\/\.vscode[a-z-]*\/extensions\/[^/]*(testagent|opencode)/.test(normalized))
+            return true;
+        if (/\/\.TestAgent Studio[a-z-]*\/extensions\/[^/]*(testagent|opencode)/.test(normalized))
+            return true;
+    }
+    catch {
+        // 探测失败时按「不是应用目录」处理，避免误伤正常工作区
+    }
+    return false;
+}
+// 判断当前是否处于一个已打开的工作区（项目）中。
+// 注意：opencode 对不含 .git 的目录一律返回 project.id = "global"、worktree = "/"，
+// 所以「非 git 工作区」与「未打开工作区」在 project/worktree 上完全一致，不能据此判断。
+// 这里直接看 directory：文件系统根路径、或编辑器/IDE 安装目录 => 未打开工作区；
+// 其余目录（含非 git 的普通文件夹）都视为已打开的工作区。
+function isWorkspaceOpen(params) {
+    const directory = params.directory;
+    const worktree = params.worktree;
+    const target = typeof directory === "string" && directory.length > 0
+        ? directory
+        : typeof worktree === "string" && worktree.length > 0
+            ? worktree
+            : undefined;
+    if (!target) {
+        // 无法判断时保守处理：视为未打开工作区，避免在安装目录下创建文件
+        return false;
+    }
+    if (isFilesystemRoot(target))
+        return false;
+    if (isAppInstallDir(target))
+        return false;
+    return true;
+}
 export const MemoryPlugin = async (params) => {
     // 设置外部日志适配器，使 log.info/log.error 等自动转发到 params.log
     setExternalLog(params.log);
@@ -415,19 +486,29 @@ export const MemoryPlugin = async (params) => {
     const directory = params.directory || params;
     const projectPath = directory || worktreeOrigin;
     const worktree = projectPath;
-    log.info(`[prjPath]worktreeOrigin=${worktreeOrigin}, directory=${directory}`);
+    // 是否已打开工作区（非 git 的普通文件夹同样算已打开）：未打开时不在目录下创建任何文件夹
+    const workspaceOpen = isWorkspaceOpen(params);
+    log.info(`[prjPath]worktreeOrigin=${worktreeOrigin}, directory=${directory}, workspaceOpen=${workspaceOpen}`);
     // 等待配置加载完成
     await load(getOpencodeConfigHomeDir());
     log.info(`记忆插件配置`, JSON.stringify(config()));
-    // 初始化或删除命令
-    initMemCmd(projectPath);
-    // 如果插件完全未启用（既未开启记忆，也未开启相似答案注入），直接返回空插件
-    if (!config().enable && !config().similarAnswer.enable) {
-        log.info("[MemoryPlugin] plugin is disabled, skipping initialization");
+    // 未打开工作区（IDE 未打开任何文件夹，directory 落到编辑器安装目录）：
+    // 不做任何目录初始化，也不注册记忆相关 hook，避免在安装目录下创建 .testagent 文件夹。
+    if (!workspaceOpen) {
+        log.info(`[MemoryPlugin] no workspace open, skip initialization and hooks`);
         return {};
     }
-    // 初始化工作区记忆目录
-    getMemoryDir(worktree);
+    // 初始化或删除命令（仅在打开工作区时操作项目目录）
+    initMemCmd(projectPath, workspaceOpen);
+    // 如果插件完全未启用（既未开启记忆，也未开启相似答案注入），直接返回空插件
+    // if (!config().enable && !config().similarAnswer.enable) {
+    //   log.info("[MemoryPlugin] plugin is disabled, skipping initialization");
+    //   return {} as any;
+    // }
+    if (config().enable && workspaceOpen) {
+        // 初始化工作区记忆目录
+        getMemoryDir(worktree);
+    }
     const state = getState(projectPath);
     const activeSessions = state.activeSessions;
     const skipSessions = state.skipSessions;
@@ -481,7 +562,7 @@ export const MemoryPlugin = async (params) => {
         //state.distilling = true;
         // 缓存满足判断
         // log.info(`[autoExtraction] buffer.size: ${buffer.size}`);
-        // if (buffer.size < config().memory.autoExtractBatchSize) {
+        // if (buffer.size < config().memory.autoExtractBufferSize) {
         //   state.distilling = false;
         //   return;
         // }
@@ -584,33 +665,53 @@ export const MemoryPlugin = async (params) => {
                         if (!callID)
                             return;
                         const st = p.state || {};
-                        const questionText = extractQuestionText(st.input);
-                        const outputText = st.output ? JSON.stringify(st.output) : (st.error ? JSON.stringify(st.error) : null);
+                        const outputText = typeof st.output === "string" ? st.output : (st.output ? JSON.stringify(st.output) : (st.error ? JSON.stringify(st.error) : null));
                         // build content: question + options + answer
                         const content = buildQuestionContent(st.input, outputText);
-                        // 判断用户是否选择了推荐答案（仅日志）
-                        const recommended = recByCallID.get(callID);
-                        if (recommended != null) {
-                            const userAnswer = extractAnswerText(content);
-                            const adopted = userAnswer === recommended;
-                            // log.info("[question recommend] user selected recommended = " + adopted, { callID, recommended, userAnswer, sessionID: part.sessionID });
+                        // 判断用户是否选择了推荐答案，多问题逐题判定
+                        const recs = recByCallID.get(callID);
+                        if (recs && recs.length > 0) {
+                            const pairs = extractAnswersByQuestion(content);
+                            const inputQuestions = st.input?.questions ?? [];
                             const model = modelCache.get("currentModel");
-                            if (adopted) {
-                                sendTraceLog({
-                                    user_query: buildQuestionContent(st.input, null),
-                                    provider_id: model?.providerID ?? "",
-                                    model_id: model?.modelID ?? "",
-                                    session_id: part.sessionID || "",
-                                    agent_name: "tool_question",
-                                    op_type: "similar-answer-inject-use",
-                                    op_flag: "S",
-                                    event_source: "message.part.updated",
-                                    input_content: recommended,
-                                    output_content: userAnswer ?? "",
-                                    other_content: JSON.stringify({ callID, recommended, userAnswer, adopted }),
-                                    message_id: p.messageID || "",
-                                    part_id: part.id || "",
-                                });
+                            const results = [];
+                            for (const rec of recs) {
+                                const qText = inputQuestions[rec.qi]?.question;
+                                const userAnswer = qText != null ? (pairs.find(p => p.question === qText)?.answer ?? null) : null;
+                                results.push({ qi: rec.qi, recommended: rec.answer, userAnswer, adopted: userAnswer != null && userAnswer === rec.answer });
+                            }
+                            const adoptedCount = results.filter(r => r.adopted).length;
+                            // 记录埋点日志；全部未命中则不记录
+                            if (adoptedCount > 0) {
+                                const hitType = adoptedCount === recs.length ? "full" : "partial";
+                                // 每条被采用的推荐各发一条埋点
+                                for (const r of results) {
+                                    if (!r.adopted)
+                                        continue;
+                                    sendTraceLog({
+                                        user_query: buildQuestionContent(st.input, null),
+                                        provider_id: model?.providerID ?? "",
+                                        model_id: model?.modelID ?? "",
+                                        session_id: part.sessionID || "",
+                                        agent_name: "tool_question",
+                                        op_type: "similar-answer-inject-use",
+                                        op_flag: "S",
+                                        event_source: "message.part.updated",
+                                        input_content: r.recommended,
+                                        output_content: r.userAnswer ?? "",
+                                        other_content: JSON.stringify({
+                                            callID,
+                                            qi: r.qi,
+                                            recommended: r.recommended,
+                                            userAnswer: r.userAnswer,
+                                            totalRecommended: recs.length,
+                                            adoptedCount,
+                                            hitType,
+                                        }),
+                                        message_id: p.messageID || "",
+                                        part_id: part.id || "",
+                                    });
+                                }
                             }
                             recByCallID.delete(callID);
                         }
@@ -630,6 +731,8 @@ export const MemoryPlugin = async (params) => {
                 })();
                 return;
             }
+            if (!config().enable)
+                return;
             if (part.type !== "text")
                 return;
             const text = typeof part.text === "string" ? part.text.trim() : "";
@@ -666,55 +769,68 @@ export const MemoryPlugin = async (params) => {
             const cfg = input;
             cfg.agent = {
                 ...cfg.agent,
-                "auto-extraction": {
+                "sdt-memory-extraction": {
                     hidden: true,
                     mode: "subagent",
                     description: "Review conversation message and extract any information worth remembering for future sessions",
                     permission: {
                         "*": "deny",
                         "memory_list": "allow",
-                        "memory_search": "allow",
-                        "memory_read": "allow",
                         "memory_save": "allow",
-                        "memory_delete": "allow",
                     },
+                    prompt: buildSdtMemoryExtractionPrompt(getSkillsDir(projectPath), getGlobalSkillsDir()),
                 },
-                "auto-dream": {
-                    hidden: true,
-                    mode: "subagent",
-                    description: "You are performing an auto-dream memory consolidation pass",
-                    permission: {
-                        "*": "deny",
-                        "memory_list": "allow",
-                        "memory_search": "allow",
-                        "memory_read": "allow",
-                        "memory_save": "allow",
-                        "memory_delete": "allow",
+                ...(config().enable ? {
+                    "auto-extraction": {
+                        hidden: true,
+                        mode: "subagent",
+                        description: "Review conversation message and extract any information worth remembering for future sessions",
+                        permission: {
+                            "*": "deny",
+                            "memory_list": "allow",
+                            "memory_search": "allow",
+                            "memory_read": "allow",
+                            "memory_save": "allow",
+                            "memory_delete": "allow",
+                        },
                     },
-                },
-                "auto-personal-memory": {
-                    hidden: true,
-                    mode: "subagent",
-                    description: "负责整理合并项目记忆，输出标准个人全局记忆",
-                    permission: {
-                        "*": "deny",
-                        "memory_read": "allow",
-                        "memory_personal_read": "allow",
-                        "memory_list": "allow",
-                        "memory_personal_save": "allow",
-                    }
-                },
-                "memory-recall": {
-                    hidden: true,
-                    mode: "subagent",
-                    description: "You are a file/memory matching engine.",
-                    permission: {
-                        "grep": "deny",
-                        "glob": "deny",
-                        "memory_search": "deny",
+                    "auto-dream": {
+                        hidden: true,
+                        mode: "subagent",
+                        description: "You are performing an auto-dream memory consolidation pass",
+                        permission: {
+                            "*": "deny",
+                            "memory_list": "allow",
+                            "memory_search": "allow",
+                            "memory_read": "allow",
+                            "memory_save": "allow",
+                            "memory_delete": "allow",
+                        },
                     },
-                    prompt: "You are a file/memory matching engine. Select the top 5 most semantically relevant items from [memories List] that match the [Query].You may only match based on filename / name / description / type",
-                },
+                    "auto-personal-memory": {
+                        hidden: true,
+                        mode: "subagent",
+                        description: "负责整理合并项目记忆，输出标准个人全局记忆",
+                        permission: {
+                            "*": "deny",
+                            "memory_read": "allow",
+                            "memory_personal_read": "allow",
+                            "memory_list": "allow",
+                            "memory_personal_save": "allow",
+                        }
+                    },
+                    "memory-recall": {
+                        hidden: true,
+                        mode: "subagent",
+                        description: "You are a file/memory matching engine.",
+                        permission: {
+                            "grep": "deny",
+                            "glob": "deny",
+                            "memory_search": "deny",
+                        },
+                        prompt: "You are a file/memory matching engine. Select the top 5 most semantically relevant items from [memories List] that match the [Query].You may only match based on filename / name / description / type",
+                    },
+                } : {}),
             };
         },
         event: async ({ event }) => {
@@ -751,17 +867,15 @@ export const MemoryPlugin = async (params) => {
                 const part = event.properties.part;
                 if (!part || !part.sessionID)
                     return;
-                if (config().enable || config().similarAnswer.enable) {
-                    try {
-                        // 子Agent的子session 跳过
-                        if (await shouldSkip(part.sessionID))
-                            return;
-                        await appendBufferMessage(part);
-                    }
-                    catch (e) {
-                        // Message may not be fetchable yet during streaming
-                        log.warn(`message.part.updated: failed to fetch part ${part.id} from message ${part.messageID} for session ${part.sessionID.substring(0, 16)}:`, e);
-                    }
+                try {
+                    // 子Agent的子session 跳过
+                    if (await shouldSkip(part.sessionID))
+                        return;
+                    await appendBufferMessage(part);
+                }
+                catch (e) {
+                    // Message may not be fetchable yet during streaming
+                    log.warn(`message.part.updated: failed to fetch part ${part.id} from message ${part.messageID} for session ${part.sessionID.substring(0, 16)}:`, e);
                 }
             }
             if (event.type === "session.idle") {
@@ -797,6 +911,47 @@ export const MemoryPlugin = async (params) => {
             }
         },
         "tool.execute.before": async (input, output) => {
+            // 过滤task工具调用
+            if (input.tool === "task") {
+                if (!output.args)
+                    return;
+                const args = output.args;
+                if (!args?.subagent_type || args?.subagent_type !== 'sdt-memory-extraction')
+                    return;
+                // 兼容agent一层嵌套的场景：子Agent(sdt-memory-extraction)会话ID
+                let messageSessionId = null;
+                const { data: childSession } = await params.client.session.get({ path: { id: input.sessionID } });
+                const parentSessionId = childSession?.parentID;
+                if (parentSessionId) {
+                    messageSessionId = parentSessionId;
+                }
+                else {
+                    messageSessionId = input.sessionID;
+                }
+                // === 前置埋点：记录 sdt-memory-extraction 子agent 调用开始 ===
+                const model = modelCache.get("currentModel");
+                log.info({
+                    user_query: "",
+                    provider_id: model?.providerID ?? "",
+                    model_id: model?.modelID ?? "",
+                    session_id: input.sessionID || "",
+                    p_session_id: parentSessionId || "",
+                    agent_name: "sdt-memory-extraction",
+                    op_type: "sdt-memory-extraction",
+                    op_flag: "S",
+                    event_source: "tool.execute.before",
+                    start_time: new Date(),
+                    input_content: JSON.stringify({
+                        parentSessionId: parentSessionId || "",
+                        prompt: args.prompt,
+                        description: args.description,
+                    }),
+                    output_content: "",
+                    message_id: "",
+                    part_id: "",
+                });
+                // === 前置埋点结束 ===
+            }
             // 检查相似答案注入开关
             if (!config().similarAnswer.enable)
                 return;
@@ -809,136 +964,161 @@ export const MemoryPlugin = async (params) => {
                 const qs = args.questions;
                 if (!qs || qs.length === 0)
                     return;
-                const questionText = qs[0].question;
-                if (!questionText)
-                    return;
                 const db = await getDatabase();
                 const candidates = await db.queryQuestionCandidates(input.callID, projectPath);
                 if (candidates.length === 0)
                     return;
                 const now = Date.now();
-                // 1) exact match, same session
+                // 批量预处理：把每条候选记录按 "题"="答" 拆成单题 unit，逐题参与打分
+                const units = [];
                 for (const c of candidates) {
-                    if (c.session_id !== input.sessionID)
-                        continue;
-                    const qMatch = c.content?.match(/^Question: (.+)$/m);
-                    if (qMatch && qMatch[1].trim() === questionText) {
-                        const aMatch = c.content?.match(/="([^"]+)"/);
-                        const answer = aMatch?.[1]?.trim();
-                        if (answer) {
-                            if (args.questions?.[0]?.options)
-                                recByCallID.set(input.callID, answer);
-                            sendSimilarAnswerInjectTrace({
-                                callID: input.callID,
-                                sessionID: input.sessionID,
-                                questionText,
-                                options: qs[0].options ?? [],
-                                score: 999,
-                                candidate: c.content,
-                                recommended: answer,
-                            });
-                            applyRecommendation(args, answer, 999);
-                            return;
-                        }
+                    const pairs = extractAnswersByQuestion(c.content);
+                    for (const p of pairs) {
+                        if (!p.question.trim())
+                            continue;
+                        units.push({
+                            partId: c.part_id,
+                            sessionId: c.session_id,
+                            timeCreated: c.time_created,
+                            content: c.content,
+                            text: p.question.trim(),
+                            answer: p.answer,
+                        });
                     }
                 }
-                // 2) hybrid RRF across recent records
-                const queryTokens = buildFtsTokens(questionText, false);
-                log.info("Recommend Quesitons queryTokens", queryTokens);
-                const embedService = await getEmbeddingService();
-                const candidateTexts = candidates.map(c => c.content?.match(/^Question: (.+)$/m)?.[1]?.trim() || "");
-                let queryVec = null;
-                let candidateVecs = null;
+                if (units.length === 0)
+                    return;
+                const unitTexts = units.map(u => u.text);
+                let unitVecs = null;
                 try {
-                    [queryVec, candidateVecs] = await Promise.all([
-                        embedService.getSingleEmbedding(questionText),
-                        embedService.getBatchEmbedding(candidateTexts),
-                    ]);
+                    const embedService = await getEmbeddingService();
+                    unitVecs = await embedService.getBatchEmbedding(unitTexts);
                 }
                 catch (e) {
                     const err = e;
                     log.error(`[tool.execute.before] embedService error:`, { message: err.message, stack: err.stack, error: err });
                 }
-                // 预先构建语料库统计信息（用于 BM25 计算）
-                const allCandidateTokens = candidates.map(c => {
-                    const text = c.content?.match(/^Question: (.+)$/m)?.[1]?.trim() || "";
-                    return buildFtsTokens(text, false);
-                });
-                const corpusStats = buildCorpusStats(allCandidateTokens);
+                const allUnitTokens = unitTexts.map(text => buildFtsTokens(text, false));
+                const corpusStats = buildCorpusStats(allUnitTokens);
                 log.info("Recommend Quesitons corpusStats", JSON.stringify({
                     docCount: corpusStats.docCount,
                     avgDocLength: corpusStats.avgDocLength,
                     sampleDocFreq: Array.from(corpusStats.docFreq.entries()).slice(0, 10)
                 }));
-                const scored = [];
-                if (!queryVec) {
-                    log.warn("query vector is null, skip normalize");
-                    return; // 或者抛出错误、终止逻辑
-                }
-                const queryNormalize = Array.from(normalizeVector(queryVec));
-                for (let ci = 0; ci < candidates.length; ci++) {
-                    const text = candidateTexts[ci];
-                    const textTokens = allCandidateTokens[ci];
-                    const kw = calcBm25KeywordBonus(queryTokens, textTokens, corpusStats);
-                    if (kw < 0.35)
+                // 逐题推荐
+                const recs = [];
+                for (let qi = 0; qi < qs.length; qi++) {
+                    const q = qs[qi];
+                    const questionText = q.question;
+                    if (!questionText)
                         continue;
-                    const vec = (queryVec && candidateVecs?.[ci]) ? cosineSimilarity(queryNormalize, Array.from(normalizeVector(candidateVecs[ci]))) : 0;
-                    if (vec < 0.65)
-                        continue;
-                    const ageHours = (now - candidates[ci].time_created) / 3600000;
-                    const time = Math.max(0, 1 - ageHours / 720);
-                    scored.push({ idx: ci, text, kw, vec, time });
-                }
-                if (scored.length === 0)
-                    return;
-                log.info("Recommend Quesitons Scored", { questionText, scored });
-                const N = scored.length;
-                // RRF (Reciprocal Rank Fusion) 融合排序
-                // 公式：score = Σ (1 / (k + rank))，k 是常数参数
-                const RRF_K = 60;
-                const rankBy = (fn) => {
-                    const ids = Array.from({ length: N }, (_, i) => i).sort((a, b) => fn(b) - fn(a));
-                    const r = new Array(N);
-                    for (let i = 0; i < N; i++)
-                        r[ids[i]] = i + 1;
-                    return r;
-                };
-                const kwR = rankBy(i => scored[i].kw);
-                const vecR = rankBy(i => scored[i].vec);
-                const timeR = rankBy(i => scored[i].time);
-                // 计算每个候选的 RRF 融合得分
-                let bestIdx = -1, bestScore = -1;
-                for (let i = 0; i < N; i++) {
-                    let s = (3 / (RRF_K + kwR[i])) + (6 / (RRF_K + vecR[i])) + (1 / (RRF_K + timeR[i]));
-                    // 同 session 的候选给予额外奖励
-                    if (candidates[scored[i].idx].session_id === input.sessionID)
-                        s += 1 / (RRF_K + 1);
-                    log.info("Recommend Quesitons 最终得分", { content: scored[i].text, s, kw: scored[i].kw, vec: scored[i].vec, time: scored[i].time });
-                    if (s > bestScore) {
-                        bestScore = s;
-                        bestIdx = i;
+                    const options = q.options ?? [];
+                    let matched = null;
+                    // 1) exact match, same session
+                    for (const c of candidates) {
+                        if (c.session_id !== input.sessionID)
+                            continue;
+                        const hit = extractAnswersByQuestion(c.content).find(p => p.question === questionText);
+                        if (hit) {
+                            matched = { answer: hit.answer, score: 999, candidate: c.content };
+                            break;
+                        }
+                    }
+                    // 2) hybrid RRF across recent records
+                    if (!matched) {
+                        const queryTokens = buildFtsTokens(questionText, false);
+                        log.info("Recommend Quesitons queryTokens", queryTokens);
+                        let queryVec = null;
+                        try {
+                            const embedService = await getEmbeddingService();
+                            queryVec = await embedService.getSingleEmbedding(questionText);
+                        }
+                        catch (e) {
+                            const err = e;
+                            log.error(`[tool.execute.before] embedService error:`, { message: err.message, stack: err.stack, error: err });
+                        }
+                        if (!queryVec) {
+                            log.warn("query vector is null, skip normalize");
+                            continue; // 仅跳过当前问题，继续下一个
+                        }
+                        const queryNormalize = Array.from(normalizeVector(queryVec));
+                        const scored = [];
+                        const excludeQuesitons = [];
+                        for (let ui = 0; ui < units.length; ui++) {
+                            let excludeFlag = false;
+                            const text = unitTexts[ui];
+                            const vec = (unitVecs?.[ui]) ? cosineSimilarity(queryNormalize, Array.from(normalizeVector(unitVecs[ui]))) : 0;
+                            if (vec < 0.65) {
+                                excludeFlag = true;
+                            }
+                            const textTokens = allUnitTokens[ui];
+                            const kw = calcBm25KeywordBonus(queryTokens, textTokens, corpusStats);
+                            if (vec < 0.8 && kw < 0.35) {
+                                excludeFlag = true;
+                            }
+                            if (excludeFlag) {
+                                excludeQuesitons.push({ idx: ui, text, kw, vec });
+                                continue;
+                            }
+                            const ageHours = (now - units[ui].timeCreated) / 3600000;
+                            const time = Math.max(0, 1 - ageHours / 720);
+                            scored.push({ idx: ui, text, kw, vec, time });
+                        }
+                        log.info("Recommend Quesitons Scored", { userQuestion: questionText, scored });
+                        log.info("ExcludeQuesitons Scored", { userQuestion: questionText, excludeQuesitons });
+                        if (scored.length === 0)
+                            continue;
+                        const N = scored.length;
+                        // RRF (Reciprocal Rank Fusion) 融合排序
+                        // 公式：score = Σ (1 / (k + rank))，k 是常数参数
+                        const RRF_K = 60;
+                        const rankBy = (fn) => {
+                            const ids = Array.from({ length: N }, (_, i) => i).sort((a, b) => fn(b) - fn(a));
+                            const r = new Array(N);
+                            for (let i = 0; i < N; i++)
+                                r[ids[i]] = i + 1;
+                            return r;
+                        };
+                        const kwR = rankBy(i => scored[i].kw);
+                        const vecR = rankBy(i => scored[i].vec);
+                        const timeR = rankBy(i => scored[i].time);
+                        // 计算每个候选的 RRF 融合得分
+                        let bestIdx = -1, bestScore = -1;
+                        for (let i = 0; i < N; i++) {
+                            let s = (3 / (RRF_K + kwR[i])) + (6 / (RRF_K + vecR[i])) + (1 / (RRF_K + timeR[i]));
+                            // 同 session 的候选给予额外奖励
+                            if (units[scored[i].idx].sessionId === input.sessionID)
+                                s += 1 / (RRF_K + 1);
+                            log.info("Recommend Quesitons 最终得分", { content: scored[i].text, s, kw: scored[i].kw, vec: scored[i].vec, time: scored[i].time });
+                            if (s > bestScore) {
+                                bestScore = s;
+                                bestIdx = i;
+                            }
+                        }
+                        // 阈值设为 0.04（约等于最好情况的 85%）
+                        if (bestIdx === -1 || bestScore < 0.04)
+                            continue;
+                        const bestUnit = units[scored[bestIdx].idx];
+                        log.info("Recommend Quesitons 推荐答案", bestUnit.content);
+                        matched = { answer: bestUnit.answer, score: bestScore, candidate: bestUnit.content };
+                    }
+                    if (matched && options.length > 0) {
+                        recs.push({ qi, answer: matched.answer });
+                        sendSimilarAnswerInjectTrace({
+                            callID: input.callID,
+                            sessionID: input.sessionID,
+                            questionText,
+                            questionIndex: qi,
+                            options,
+                            score: matched.score,
+                            candidate: matched.candidate,
+                            recommended: matched.answer,
+                        });
+                        applyRecommendation(args, matched.answer, matched.score, qi);
                     }
                 }
-                // 阈值设为 0.04（约等于最好情况的 85%）
-                if (bestIdx === -1 || bestScore < 0.04)
-                    return;
-                const bestCandidate = candidates[scored[bestIdx].idx];
-                log.info("Recommend Quesitons 推荐答案", bestCandidate.content);
-                const aMatch = bestCandidate.content?.match(/="([^"]+)"/);
-                const answer = aMatch?.[1]?.trim();
-                if (answer) {
-                    if (args.questions?.[0]?.options)
-                        recByCallID.set(input.callID, answer);
-                    sendSimilarAnswerInjectTrace({
-                        callID: input.callID,
-                        sessionID: input.sessionID,
-                        questionText,
-                        options: qs[0].options ?? [],
-                        score: bestScore,
-                        candidate: bestCandidate.content,
-                        recommended: answer,
-                    });
-                    applyRecommendation(args, answer, bestScore);
+                if (recs.length > 0) {
+                    recByCallID.set(input.callID, recs);
                 }
             }
             catch (e) {
@@ -1057,7 +1237,8 @@ export const MemoryPlugin = async (params) => {
             const recalled = ignoreMemoryContext ? [] : consumeRecallPrefetch(ctx);
             const recalledSection = formatRecalledMemories(recalled);
             log.info(`[system_prompt_build_for_recalled_memories] `, { sessionID: sessionID, partId: partId, messageId: messageId, recalledMemories: recalledSection });
-            const memoryPrompt = buildMemorySystemPrompt(worktree, recalledSection, isLoadSystemPrompt, { includeIndex: !ignoreMemoryContext, });
+            const memoryPrompt = buildMemorySystemPrompt(worktree, recalledSection, isLoadSystemPrompt, { includeIndex: !ignoreMemoryContext,
+                needSaveGuide: !ignoreMemoryContext && shouldIncludeSaveGuide(query, recalled.length > 0), });
             // 提示词不为空才追加
             if (typeof memoryPrompt === "string" && memoryPrompt.trim().length > 0) {
                 // 不用判断query是否为空，解决压缩
@@ -1072,112 +1253,154 @@ export const MemoryPlugin = async (params) => {
                 }
             }
         },
-        ...(config().enable
-            ? {
-                tool: {
-                    memory_save: tool({
-                        description: "Save or update a memory for future conversations. " +
-                            "Each memory is stored as a markdown file with frontmatter. " +
-                            "Use this when the user explicitly asks you to remember something, " +
-                            "or when you observe important information worth preserving across sessions " +
-                            "(user preferences, feedback, project context, external references). " +
-                            "Check existing memories first with memory_list or memory_search to avoid duplicates." +
-                            "Respond in the same language the user used in the conversation.",
-                        args: {
-                            file_name: tool.schema
-                                .string()
-                                .describe('File name for the memory (without .md extension). Use snake_case, e.g. "user_role", "feedback_testing_style", "project_auth_rewrite"'),
-                            name: tool.schema.string().describe("Human-readable name for this memory"),
-                            description: tool.schema
-                                .string()
-                                .describe("One-line description — used to decide relevance in future conversations, so be specific"),
-                            type: tool.schema
-                                .enum(MEMORY_TYPES)
-                                .describe("Memory type: user (about the person), feedback (guidance on approach), project (ongoing work context), reference (pointers to external systems)"),
-                            content: tool.schema
-                                .string()
-                                .describe("Memory content. For feedback/project types, structure as: rule/fact, then **Why:** and **How to apply:** lines"),
-                        },
-                        async execute(args) {
-                            const filePath = await saveMemory(worktree, args.file_name, args.name, args.description, args.type, args.content);
-                            return `Memory saved to ${filePath}`;
-                        },
-                    }),
-                    memory_delete: tool({
-                        description: "Delete a memory that is outdated, wrong, or no longer relevant. Also removes it from the index.",
-                        args: {
-                            file_name: tool.schema.string().describe("File name of the memory to delete (with or without .md extension)"),
-                        },
-                        async execute(args) {
-                            const deleted = await deleteMemory(worktree, args.file_name);
-                            return deleted ? `Memory "${args.file_name}" deleted.` : `Memory "${args.file_name}" not found.`;
-                        },
-                    }),
-                    memory_list: tool({
-                        description: "List all saved memories with their names, types, and descriptions. " +
-                            "Use this to check what memories exist before saving a new one (to avoid duplicates).",
-                        args: {},
-                        async execute() {
-                            const entries = listMemories(worktree);
-                            if (entries.length === 0) {
-                                return "No memories saved yet.";
-                            }
-                            const lines = entries.map((e) => `- **${e.name}** (${e.type}) [${e.fileName}]: ${e.description}`);
-                            return `${entries.length} memories found:\n${lines.join("\n")}`;
-                        },
-                    }),
-                    memory_search: tool({
-                        description: "Search memories by keyword. Searches across names, descriptions, and content. " +
-                            "Use this to find relevant memories before answering questions or when the user references past conversations.",
-                        //"Use this only when no recalled memories are available — run memory search before answering questions or when the user references past conversations.",
-                        args: {
-                            query: tool.schema.string().describe("Search query — searches across name, description, and content"),
-                        },
-                        async execute(args) {
-                            const results = searchMemories(worktree, args.query);
-                            if (results.length === 0) {
-                                return `No memories matching "${args.query}".`;
-                            }
-                            const lines = results.map((e) => `- **${e.name}** (${e.type}) [${e.fileName}]: ${e.description}\n  Content: ${e.content.slice(0, 200)}${e.content.length > 200 ? "..." : ""}`);
-                            return `${results.length} matches for "${args.query}":\n${lines.join("\n")}`;
-                        },
-                    }),
-                    memory_read: tool({
-                        description: "Read the full content of a specific memory file.",
-                        args: {
-                            file_name: tool.schema.string().describe("File name of the memory to read (with or without .md extension)"),
-                        },
-                        async execute(args) {
-                            const entry = readMemory(worktree, args.file_name);
-                            if (!entry) {
-                                return `Memory "${args.file_name}" not found.`;
-                            }
-                            return `# ${entry.name}\n**Type:** ${entry.type}\n**Description:** ${entry.description}\n\n${entry.content}`;
-                        },
-                    }),
-                    memory_personal_read: tool({
-                        description: "Read content from personal global memory file.",
-                        args: {},
-                        async execute(args) {
-                            const memoryContent = readPersonalMemory();
-                            if (!memoryContent) {
-                                return "the personal global memory is empty";
-                            }
-                            return memoryContent;
-                        },
-                    }),
-                    memory_personal_save: tool({
-                        description: "Save or update personal global memory file." +
-                            "Check existing personal global memory first with memory_personal_read to avoid duplicates.",
-                        args: {
-                            content: tool.schema.string().describe("personal global memory content")
-                        },
-                        async execute(args) {
-                            return `Memory saved to ${savePersonalMemory(args.content)}`;
-                        },
-                    }),
+        tool: {
+            memory_save: tool({
+                description: "Save or update a memory for future conversations. " +
+                    "Each memory is stored as a markdown file with frontmatter. " +
+                    "Use this when the user explicitly asks you to remember something, " +
+                    "or when you observe important information worth preserving across sessions " +
+                    "(user preferences, feedback, project context, external references). " +
+                    "Check existing memories first with memory_list or memory_search to avoid duplicates." +
+                    "Respond in the same language the user used in the conversation.",
+                args: {
+                    file_name: tool.schema
+                        .string()
+                        .describe('File name for the memory (without .md extension). Use snake_case, e.g. "user_role", "feedback_testing_style", "project_auth_rewrite"'),
+                    name: tool.schema.string().describe("Human-readable name for this memory"),
+                    description: tool.schema
+                        .string()
+                        .describe("One-line description — used to decide relevance in future conversations, so be specific"),
+                    type: tool.schema
+                        .enum(MEMORY_TYPES)
+                        .describe("Memory type: user (about the person), feedback (guidance on approach), project (ongoing work context), reference (pointers to external systems)"),
+                    content: tool.schema
+                        .string()
+                        .describe("Memory content. For feedback/project types, structure as: rule/fact, then **Why:** and **How to apply:** lines"),
                 },
-            } : {}),
+                async execute(args, ctx) {
+                    log.info(`[tool-invoke]`, `agent:${JSON.stringify(ctx.agent)}，调用工具memory_save`);
+                    if (!config().enable && ctx.agent !== 'sdt-memory-extraction') {
+                        return "no permission use memory_save tool";
+                    }
+                    let source = undefined;
+                    if (ctx.agent === 'sdt-memory-extraction') {
+                        source = 'sdt';
+                    }
+                    const filePath = await saveMemory(worktree, args.file_name, args.name, args.description, args.type, args.content, source);
+                    const result = `Memory saved to ${filePath}`;
+                    // === 后置埋点：记录 sdt-memory-extraction 子agent 调用结果 ===
+                    if (ctx.agent === 'sdt-memory-extraction') {
+                        const model = modelCache.get("currentModel");
+                        await sendTraceLog({
+                            user_query: "",
+                            provider_id: model?.providerID ?? "",
+                            model_id: model?.modelID ?? "",
+                            session_id: ctx.sessionID || "",
+                            agent_name: "sdt-memory-extraction",
+                            op_type: "sdt-memory-extraction",
+                            op_flag: "S",
+                            event_source: "memory_save.execute",
+                            end_time: new Date(),
+                            input_content: JSON.stringify({
+                                file_name: args.file_name,
+                                name: args.name,
+                                description: args.description,
+                                type: args.type,
+                                content: args.content,
+                            }),
+                            output_content: readMemoryByFilePath(worktree, args.file_name),
+                            other_content: JSON.stringify({
+                                filePath: filePath,
+                                result: result,
+                            }),
+                            message_id: "",
+                            part_id: "",
+                        });
+                    }
+                    // === 后置埋点结束 ===
+                    return result;
+                },
+            }),
+            memory_list: tool({
+                description: "List all saved memories with their names, types, and descriptions. " +
+                    "Use this to check what memories exist before saving a new one (to avoid duplicates).",
+                args: {},
+                async execute(args, ctx) {
+                    log.info(`[tool-invoke]`, `agent:${JSON.stringify(ctx.agent)}，调用工具memory_list`);
+                    if (!config().enable && ctx.agent !== 'sdt-memory-extraction') {
+                        return "no permission use memory_list tool";
+                    }
+                    const entries = listMemories(worktree);
+                    if (entries.length === 0) {
+                        return "No memories saved yet.";
+                    }
+                    const lines = entries.map((e) => `- **${e.name}** (${e.type}) [${e.fileName}]: ${e.description}`);
+                    return `${entries.length} memories found:\n${lines.join("\n")}`;
+                },
+            }),
+            ...(config().enable ? {
+                memory_delete: tool({
+                    description: "Delete a memory that is outdated, wrong, or no longer relevant. Also removes it from the index.",
+                    args: {
+                        file_name: tool.schema.string().describe("File name of the memory to delete (with or without .md extension)"),
+                    },
+                    async execute(args) {
+                        const deleted = await deleteMemory(worktree, args.file_name);
+                        return deleted ? `Memory "${args.file_name}" deleted.` : `Memory "${args.file_name}" not found.`;
+                    },
+                }),
+                memory_read: tool({
+                    description: "Read the full content of a specific memory file.",
+                    args: {
+                        file_name: tool.schema.string().describe("File name of the memory to read (with or without .md extension)"),
+                    },
+                    async execute(args) {
+                        const entry = readMemory(worktree, args.file_name);
+                        if (!entry) {
+                            return `Memory "${args.file_name}" not found.`;
+                        }
+                        return `# ${entry.name}\n**Type:** ${entry.type}\n**Description:** ${entry.description}\n\n${entry.content}`;
+                    },
+                }),
+                memory_search: tool({
+                    description: "Search memories by keyword. Searches across names, descriptions, and content. " +
+                        "Use this to find relevant memories before answering questions or when the user references past conversations.",
+                    //"Use this only when no recalled memories are available — run memory search before answering questions or when the user references past conversations.",
+                    args: {
+                        query: tool.schema.string().describe("Search query — searches across name, description, and content"),
+                    },
+                    async execute(args) {
+                        const results = searchMemories(worktree, args.query);
+                        if (results.length === 0) {
+                            return `No memories matching "${args.query}".`;
+                        }
+                        const lines = results.map((e) => `- **${e.name}** (${e.type}) [${e.fileName}]: ${e.description}\n  Content: ${e.content.slice(0, 200)}${e.content.length > 200 ? "..." : ""}`);
+                        return `${results.length} matches for "${args.query}":\n${lines.join("\n")}`;
+                    },
+                }),
+                memory_personal_read: tool({
+                    description: "Read content from personal global memory file.",
+                    args: {},
+                    async execute(args) {
+                        const memoryContent = readPersonalMemory();
+                        if (!memoryContent) {
+                            return "the personal global memory is empty";
+                        }
+                        return memoryContent;
+                    },
+                }),
+                memory_personal_save: tool({
+                    description: "Save or update personal global memory file." +
+                        "Check existing personal global memory first with memory_personal_read to avoid duplicates.",
+                    args: {
+                        content: tool.schema.string().describe("personal global memory content")
+                    },
+                    async execute(args) {
+                        return `Memory saved to ${savePersonalMemory(args.content)}`;
+                    },
+                }),
+            } : {})
+        },
     };
     function extractQuestionText(input) {
         if (!input)
@@ -1204,19 +1427,26 @@ export const MemoryPlugin = async (params) => {
                 }
             }
         }
-        if (outputText) {
-            const answer = (() => {
-                try {
-                    const p = JSON.parse(outputText);
-                    return typeof p === "string" ? p : JSON.stringify(p);
-                }
-                catch {
-                    return outputText;
-                }
-            })();
-            parts.push(`Answer: ${answer}`);
+        const pairs = extractAnswersByQuestion(outputText);
+        if (pairs.length > 0) {
+            pairs.forEach((p, i) => parts.push(`Answer[${i + 1}]: "${p.question}"="${p.answer}"`));
+        }
+        else if (outputText) {
+            parts.push(`Answer: ${outputText}`);
         }
         return parts.join("\n") || "";
+    }
+    function extractAnswersByQuestion(content) {
+        const out = [];
+        if (!content)
+            return out;
+        const unescaped = content.replace(/\\"/g, '"');
+        const re = /"([^"]*)"="([^"]*)"/g;
+        let m;
+        while ((m = re.exec(unescaped)) !== null) {
+            out.push({ question: m[1], answer: m[2] });
+        }
+        return out;
     }
     function extractAnswerText(content) {
         if (!content)
@@ -1230,8 +1460,8 @@ export const MemoryPlugin = async (params) => {
         const m = content.match(/^Question: (.+)$/m);
         return m ? m[1].trim() : null;
     }
-    function applyRecommendation(args, answerText, score) {
-        const firstOptions = args.questions?.[0]?.options;
+    function applyRecommendation(args, answerText, score, questionIndex = 0) {
+        const firstOptions = args.questions?.[questionIndex]?.options;
         if (!firstOptions)
             return;
         const matched = firstOptions.find(o => o.label === answerText);
@@ -1269,6 +1499,7 @@ export const MemoryPlugin = async (params) => {
             output_content: opts.recommended,
             other_content: JSON.stringify({
                 callID: opts.callID,
+                questionIndex: opts.questionIndex,
                 candidate: opts.candidate,
                 recommended: opts.recommended,
                 options: opts.options,
