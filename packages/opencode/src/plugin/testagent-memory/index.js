@@ -796,6 +796,19 @@ export const MemoryPlugin = async (params) => {
                             "memory_delete": "allow",
                         },
                     },
+                    "auto-dream": {
+                        hidden: true,
+                        mode: "subagent",
+                        description: "You are performing an auto-dream memory consolidation pass",
+                        permission: {
+                            "*": "deny",
+                            "memory_list": "allow",
+                            "memory_search": "allow",
+                            "memory_read": "allow",
+                            "memory_save": "allow",
+                            "memory_delete": "allow",
+                        },
+                    },
                     "auto-personal-memory": {
                         hidden: true,
                         mode: "subagent",

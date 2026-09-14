@@ -386,6 +386,66 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       return true
     })
     // testagent_change end
+    // testagent_change start - 添加 contextExtract handler（投影后的轻量活跃上下文，主+一层子 agent 分块，供 testflow 行为分析）
+    const contextExtract = Effect.fn("SessionHttpApi.contextExtract")(function* (ctx: {
+      params: { sessionID: SessionID }
+      query: { reasoning?: boolean }
+    }) {
+      const includeReasoning = ctx.query.reasoning === true
+      // 投影函数：messages → entries（主/子 agent 共用同一规则；onlyQuestion=true 时仅保留 question，丢弃 user/assistant 文本）
+      const project = (messages: any[], onlyQuestion = false) => {
+        const entries: Array<{
+          role: "user" | "assistant"
+          type: "text" | "reasoning" | "question"
+          text?: string
+          state?: { questions: unknown[]; answers: string[][] }
+        }> = []
+        for (const msg of messages) {
+          const role = msg.info.role
+          for (const part of msg.parts) {
+            if (part.type === "text") {
+              if (!onlyQuestion && part.text.trim().length > 0) entries.push({ role, type: "text", text: part.text })
+            } else if (includeReasoning && part.type === "reasoning") {
+              if (!onlyQuestion && part.text.trim().length > 0) entries.push({ role, type: "reasoning", text: part.text })
+            } else if (part.type === "tool" && part.tool === "question" && part.state.status === "completed") {
+              const st = part.state
+              entries.push({
+                role,
+                type: "question",
+                state: {
+                  questions: st.input.questions ?? [],
+                  answers: st.metadata.answers ?? [],
+                },
+              })
+            }
+          }
+        }
+        return entries
+      }
+      // 主代理上下文
+      const mainMessages = yield* MessageV2.filterCompactedEffect(ctx.params.sessionID)
+      const blocks: Array<{
+        scope: "main" | "subagent"
+        sessionID?: string
+        agent?: string
+        title?: string
+        entries: ReturnType<typeof project>
+      }> = [{ scope: "main", entries: project(mainMessages) }]
+      // 一层直接子 agent（不递归；分段追加，便于行为分析子 agent 区分归属）
+      const kids = yield* session.children(ctx.params.sessionID)
+      for (const kid of kids) {
+        const kidMessages = yield* MessageV2.filterCompactedEffect(kid.id)
+        blocks.push({
+          scope: "subagent",
+          sessionID: kid.id,
+          agent: kid.agent ?? undefined,
+          title: kid.title,
+          entries: project(kidMessages, true), // 子代理只要 question 部分，不要 user/assistant 文本
+        })
+      }
+      return blocks
+    })
+    // testagent_change end
 
     const permissionRespond = Effect.fn("SessionHttpApi.permissionRespond")(function* (ctx: {
       params: { permissionID: PermissionID }
@@ -453,6 +513,7 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       .handle("unrevert", unrevert)
       .handle("resume", resume) // testagent_change - 添加 resume handler
       .handle("clearContext", clearContext) // testagent_change - 添加 clearContext handler
+      .handle("contextExtract", contextExtract) // testagent_change - 添加 contextExtract handler
       .handle("permissionRespond", permissionRespond)
       .handle("deleteMessage", deleteMessage)
       .handle("deletePart", deletePart)
