@@ -709,6 +709,7 @@ export type CompactionPart = {
   auto: boolean
   overflow?: boolean
   tail_start_id?: string
+  clear_context?: boolean
 }
 
 export type Part =
@@ -3668,14 +3669,12 @@ export type TestagentEnvVarsListResponses = {
       [key: string]: {
         key: string
         value: string
-        description?: string
       }
     }
     custom: {
       [key: string]: {
         key: string
         value: string
-        description?: string
       }
     }
   }
@@ -3715,14 +3714,12 @@ export type TestagentEnvVarsBatchQueryResponses = {
       [key: string]: {
         key: string
         value: string
-        description?: string
       }
     }
     custom: {
       [key: string]: {
         key: string
         value: string
-        description?: string
       }
     }
   }
@@ -3755,7 +3752,6 @@ export type TestagentCustomEnvVarsBatchCreateData = {
   body?: Array<{
     key: string
     value: string
-    description?: string
   }>
   path?: never
   query?: {
@@ -3786,7 +3782,6 @@ export type TestagentCustomEnvVarsBatchUpdateData = {
   body?: Array<{
     key: string
     value: string
-    description?: string
   }>
   path?: never
   query?: {
@@ -3813,44 +3808,26 @@ export type TestagentCustomEnvVarsBatchUpdateResponses = {
 export type TestagentCustomEnvVarsBatchUpdateResponse =
   TestagentCustomEnvVarsBatchUpdateResponses[keyof TestagentCustomEnvVarsBatchUpdateResponses]
 
-export type AgentOverrideRule = {
-  permission: string
-  pattern: string
-  action: "allow" | "deny" | "ask"
-}
-
-export type TestagentAgentOverrideSetData = {
+export type TestagentZhAnswerSetData = {
   body?: {
-    sessionID: string
-    prompt?: string
-    permission?: Array<AgentOverrideRule>
-    temperature?: number
-    topP?: number
-    steps?: number
+    enabled: boolean
   }
   path?: never
   query?: {
     directory?: string
     workspace?: string
   }
-  url: "/testagent/agent/override"
+  url: "/testagent/zh-answer"
 }
 
-export type TestagentAgentOverrideSetErrors = unknown
-
-export type TestagentAgentOverrideSetError = TestagentAgentOverrideSetErrors[keyof TestagentAgentOverrideSetErrors]
-
-export type TestagentAgentOverrideSetResponses = {
+export type TestagentZhAnswerSetResponses = {
   /**
-   * Override set successfully
+   * ZH answer toggle set successfully
    */
-  200: {
-    applied: boolean
-  }
+  200: boolean
 }
 
-export type TestagentAgentOverrideSetResponse =
-  TestagentAgentOverrideSetResponses[keyof TestagentAgentOverrideSetResponses]
+export type TestagentZhAnswerSetResponse = TestagentZhAnswerSetResponses[keyof TestagentZhAnswerSetResponses]
 
 export type TestagentAgentOverrideClearData = {
   body?: {
@@ -3864,10 +3841,6 @@ export type TestagentAgentOverrideClearData = {
   url: "/testagent/agent/override"
 }
 
-export type TestagentAgentOverrideClearErrors = unknown
-
-export type TestagentAgentOverrideClearError = TestagentAgentOverrideClearErrors[keyof TestagentAgentOverrideClearErrors]
-
 export type TestagentAgentOverrideClearResponses = {
   /**
    * Override cleared successfully
@@ -3877,6 +3850,39 @@ export type TestagentAgentOverrideClearResponses = {
 
 export type TestagentAgentOverrideClearResponse =
   TestagentAgentOverrideClearResponses[keyof TestagentAgentOverrideClearResponses]
+
+export type TestagentAgentOverrideSetData = {
+  body?: {
+    sessionID: string
+    prompt?: string
+    permission?: Array<{
+      permission: string
+      pattern: string
+      action: "allow" | "deny" | "ask"
+    }>
+    temperature?: number
+    topP?: number
+    steps?: number
+  }
+  path?: never
+  query?: {
+    directory?: string
+    workspace?: string
+  }
+  url: "/testagent/agent/override"
+}
+
+export type TestagentAgentOverrideSetResponses = {
+  /**
+   * Override set successfully
+   */
+  200: {
+    applied: boolean
+  }
+}
+
+export type TestagentAgentOverrideSetResponse =
+  TestagentAgentOverrideSetResponses[keyof TestagentAgentOverrideSetResponses]
 
 export type EventSubscribeData = {
   body?: never
@@ -6655,6 +6661,55 @@ export type SessionClearContextResponses = {
 }
 
 export type SessionClearContextResponse = SessionClearContextResponses[keyof SessionClearContextResponses]
+
+export type SessionContextExtractData = {
+  body?: never
+  path: {
+    sessionID: string
+  }
+  query?: {
+    directory?: string
+    workspace?: string
+    reasoning?: "true" | "false"
+  }
+  url: "/session/{sessionID}/context-extract"
+}
+
+export type SessionContextExtractErrors = {
+  /**
+   * Bad request
+   */
+  400: BadRequestError
+  /**
+   * NotFoundError
+   */
+  404: NotFoundError
+}
+
+export type SessionContextExtractError = SessionContextExtractErrors[keyof SessionContextExtractErrors]
+
+export type SessionContextExtractResponses = {
+  /**
+   * Extracted context blocks (main + subagent)
+   */
+  200: Array<{
+    scope: "main" | "subagent"
+    sessionID?: string
+    agent?: string
+    title?: string
+    entries: Array<{
+      role: "user" | "assistant"
+      type: "text" | "reasoning" | "question"
+      text?: string
+      state?: {
+        questions: Array<unknown>
+        answers: Array<Array<string>>
+      }
+    }>
+  }>
+}
+
+export type SessionContextExtractResponse = SessionContextExtractResponses[keyof SessionContextExtractResponses]
 
 export type PermissionRespondData = {
   body?: {
