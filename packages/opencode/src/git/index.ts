@@ -16,6 +16,14 @@ const cfg = [
   "core.quotepath=false",
 ] as const
 
+// testagent_change start
+// `cfg` forces `core.autocrlf=false`, so git compares raw bytes. On Windows a
+// CRLF working tree against an LF blob in the repository then reports every
+// line as changed. Ignoring CR at end of line keeps counts and patches aligned
+// with `git diff` run under the user's own configuration.
+const flags = ["--ignore-cr-at-eol"] as const
+// testagent_change end
+
 const out = (result: { text(): string }) => result.text().trim()
 const nuls = (text: string) => text.split("\0").filter(Boolean)
 const fail = (err: unknown) =>
@@ -244,7 +252,9 @@ export const layer = Layer.effect(
 
     const diff = Effect.fn("Git.diff")(function* (cwd: string, ref: string) {
       const list = nuls(
-        yield* text(["diff", "--no-ext-diff", "--no-renames", "--name-status", "-z", ref, "--", "."], { cwd }),
+        yield* text(["diff", ...flags, "--no-ext-diff", "--no-renames", "--name-status", "-z", ref, "--", "."], {
+          cwd,
+        }),
       )
       return list.flatMap((code, idx) => {
         if (idx % 2 !== 0) return []
@@ -256,7 +266,9 @@ export const layer = Layer.effect(
 
     const stats = Effect.fn("Git.stats")(function* (cwd: string, ref: string) {
       return nuls(
-        yield* text(["diff", "--no-ext-diff", "--no-renames", "--numstat", "-z", ref, "--", "."], { cwd }),
+        yield* text(["diff", ...flags, "--no-ext-diff", "--no-renames", "--numstat", "-z", ref, "--", "."], {
+          cwd,
+        }),
       ).flatMap((item) => {
         const a = item.indexOf("\t")
         const b = item.indexOf("\t", a + 1)
@@ -279,7 +291,17 @@ export const layer = Layer.effect(
 
     const patch = Effect.fn("Git.patch")(function* (cwd: string, ref: string, file: string, options?: PatchOptions) {
       const result = yield* run(
-        ["diff", "--patch", "--no-ext-diff", "--no-renames", `--unified=${options?.context ?? 3}`, ref, "--", file],
+        [
+          "diff",
+          ...flags,
+          "--patch",
+          "--no-ext-diff",
+          "--no-renames",
+          `--unified=${options?.context ?? 3}`,
+          ref,
+          "--",
+          file,
+        ],
         { cwd, maxOutputBytes: options?.maxOutputBytes },
       )
       return { text: result.truncated ? "" : result.text(), truncated: result.truncated } satisfies Patch
@@ -287,7 +309,17 @@ export const layer = Layer.effect(
 
     const patchAll = Effect.fn("Git.patchAll")(function* (cwd: string, ref: string, options?: PatchOptions) {
       const result = yield* run(
-        ["diff", "--patch", "--no-ext-diff", "--no-renames", `--unified=${options?.context ?? 3}`, ref, "--", "."],
+        [
+          "diff",
+          ...flags,
+          "--patch",
+          "--no-ext-diff",
+          "--no-renames",
+          `--unified=${options?.context ?? 3}`,
+          ref,
+          "--",
+          ".",
+        ],
         { cwd, maxOutputBytes: options?.maxOutputBytes },
       )
       return { text: result.text(), truncated: result.truncated } satisfies Patch

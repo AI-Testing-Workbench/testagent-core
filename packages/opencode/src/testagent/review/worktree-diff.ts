@@ -100,7 +100,12 @@ export namespace WorktreeDiff {
 
         for (const item of diffItems) {
           seen.add(item.file)
-          const counts = stat.get(item.file) ?? { additions: 0, deletions: 0 }
+          // `--name-status` can list a file that `--numstat` reports nothing for:
+          // that is exactly what a pure line-ending difference looks like. Dropping
+          // it keeps the list aligned with `git diff --stat` instead of showing a
+          // phantom `+0 -0` row.
+          const counts = stat.get(item.file)
+          if (!counts) continue
           const stamp =
             item.status === "deleted" ? `deleted:${ancestorHash}` : yield* statStamp(dir, item.file)
           result.push({
@@ -207,6 +212,12 @@ export namespace WorktreeDiff {
         }
       })
 
+      // `before` is read from a git blob (always LF) while `after` comes from
+      // disk (CRLF on Windows checkouts). Normalizing both keeps the rendered
+      // diff consistent with the line counts instead of showing every line as
+      // changed.
+      const normalize = (text: string) => text.replace(/\r\n/g, "\n")
+
       const readBefore = Effect.fn("WorktreeDiff.readBefore")(function* (
         dir: string,
         ancestorHash: string,
@@ -215,7 +226,7 @@ export namespace WorktreeDiff {
       ) {
         if (status === "added") return ""
         const prefix = yield* git.prefix(dir)
-        return yield* git.show(dir, ancestorHash, file, prefix)
+        return normalize(yield* git.show(dir, ancestorHash, file, prefix))
       })
 
       const readAfter = Effect.fn("WorktreeDiff.readAfter")(function* (dir: string, file: string, status: Status) {
@@ -223,7 +234,8 @@ export namespace WorktreeDiff {
         const filePath = path.join(dir, file)
         const exists = yield* fs.exists(filePath).pipe(Effect.catch(() => Effect.succeed(false)))
         if (!exists) return ""
-        return yield* fs.readFileString(filePath).pipe(Effect.catch(() => Effect.succeed("")))
+        const content = yield* fs.readFileString(filePath).pipe(Effect.catch(() => Effect.succeed("")))
+        return normalize(content)
       })
 
       const lines = (text: string) => {
