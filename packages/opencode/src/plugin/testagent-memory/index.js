@@ -1,7 +1,7 @@
 import { tool } from "@opencode-ai/plugin";
 import { join, resolve } from "path";
 import { existsSync, statSync } from "fs";
-import { buildMemorySystemPrompt, shouldIncludeSaveGuide, buildSdtMemoryExtractionPrompt } from "./prompt.js";
+import { buildMemorySystemPrompt, shouldIncludeSaveGuide } from "./prompt.js";
 import { searchHybrid, recallRelevantMemoriesByLLM, formatRecalledMemories } from "./recall.js";
 import { cosineSimilarity, calcBm25KeywordBonus, buildCorpusStats } from "./vectorSearch.js";
 import { buildFtsTokens } from "./tokenizer.js";
@@ -769,17 +769,6 @@ export const MemoryPlugin = async (params) => {
             const cfg = input;
             cfg.agent = {
                 ...cfg.agent,
-                "sdt-memory-extraction": {
-                    hidden: true,
-                    mode: "subagent",
-                    description: "Review conversation message and extract any information worth remembering for future sessions",
-                    permission: {
-                        "*": "deny",
-                        "memory_list": "allow",
-                        "memory_save": "allow",
-                    },
-                    prompt: buildSdtMemoryExtractionPrompt(getSkillsDir(projectPath), getGlobalSkillsDir()),
-                },
                 ...(config().enable ? {
                     "auto-extraction": {
                         hidden: true,
