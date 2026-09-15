@@ -1461,6 +1461,8 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         const slog = elog.with({ sessionID })
         let structured: unknown
         let step = 0
+        // testagent_change - YOLO completion guard 注入计数（仅日志观测，不参与终止判定：提问即无限续跑）
+        let guard = 0
         const session = yield* sessions.get(sessionID).pipe(Effect.orDie)
 
         // testagent_change start - 估算下一次请求将发送的完整上下文（system + messages + tools）
@@ -1551,6 +1553,41 @@ NOTE: At any point in time through this workflow you should feel free to ask the
             lastUser.time.created < lastAssistant.time.created
             // testagent_change end
           ) {
+            // testagent_change start - YOLO completion guard（移植 cline agent-runtime 的
+            // requireCompletionTool 机制，见 agents/src/agent-runtime.ts L791-812）：
+            // cline 下模型零 tool_calls 且未调用 submit_and_exit 时注入 [SYSTEM] 提醒并 continue，
+            // 直到任务完成；我们无 submit_and_exit，等价信号 = "提问式文本收尾"（isAsking）。
+            // YOLO 语义即"自动续跑"：命中即注入提醒并 continue，不设次数上限，
+            // 直到模型完成任务自然收尾；用户可随时手动停止会话（abort）终止。
+            if (Yolo.isEnabled()) {
+              const text = (lastAssistantMsg?.parts ?? [])
+                .filter((p): p is MessageV2.TextPart => p.type === "text")
+                .map((p) => p.text)
+                .join("\n")
+              if (YoloPrompt.isAsking(text)) {
+                guard++
+                yield* slog.info("yolo completion guard 触发：提问式收尾，注入提醒自动续跑", { step, guard })
+                const notice: MessageV2.User = {
+                  id: MessageID.ascending(),
+                  sessionID,
+                  role: "user",
+                  time: { created: Date.now() },
+                  agent: lastUser.agent,
+                  model: lastUser.model,
+                }
+                yield* sessions.updateMessage(notice)
+                yield* sessions.updatePart({
+                  id: PartID.ascending(),
+                  messageID: notice.id,
+                  sessionID,
+                  type: "text",
+                  text: YoloPrompt.GUARD,
+                  synthetic: true,
+                } satisfies MessageV2.TextPart)
+                continue
+              }
+            }
+            // testagent_change end
             // testagent_change start - debug log: why loop exits immediately
             yield* slog.info("exiting loop", {
               lastUserID: lastUser.id,

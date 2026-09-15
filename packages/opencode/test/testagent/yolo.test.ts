@@ -16,6 +16,7 @@ import { Permission, type Ruleset } from "../../src/permission"
 import { Question } from "../../src/question"
 import { SessionID } from "../../src/session/schema"
 import { Yolo } from "../../src/testagent/yolo"
+import { YoloPrompt } from "../../src/testagent/yolo-prompt"
 import { provideTestInstance } from "../fixture/fixture"
 
 const sessionID = SessionID.make("ses_yolo_global_test")
@@ -133,5 +134,27 @@ describe("yolo question", () => {
       const answers = await Effect.runPromise(askQuestion([]))
       expect(answers).toEqual([[]])
     })
+  })
+})
+
+describe("yolo completion guard (isAsking)", () => {
+  test("提问式收尾命中：问号结尾 / 选项菜单 / 确认请求", () => {
+    expect(YoloPrompt.isAsking("...是否继续执行 **Task 2**？")).toBe(true)
+    expect(YoloPrompt.isAsking("- **继续** - 进入需求分析\n- **修改** - 修改后再继续\n- **暂停** - 稍后继续")).toBe(
+      true,
+    )
+    expect(YoloPrompt.isAsking("Should I continue with Task 2?")).toBe(true)
+    expect(YoloPrompt.isAsking("请确认后我再继续")).toBe(true)
+  })
+
+  test("正常收尾不误判：总结陈述 / 空文本 / 正文中间问号", () => {
+    expect(YoloPrompt.isAsking("Task 2 已完成，所有测试通过，变更已提交。")).toBe(false)
+    expect(YoloPrompt.isAsking("")).toBe(false)
+    expect(YoloPrompt.isAsking("分析如下：用户为何失败？因为缺少校验。修复方案已实施并通过测试。")).toBe(false)
+  })
+
+  test("GUARD 提醒文案存在（自动续跑注入内容）", () => {
+    expect(YoloPrompt.GUARD.length).toBeGreaterThan(0)
+    expect(YoloPrompt.GUARD).toContain("nobody will ever answer")
   })
 })
