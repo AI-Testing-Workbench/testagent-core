@@ -5,6 +5,11 @@ import semver from "semver"
 import { Filesystem } from "@/util/filesystem"
 import { isRecord } from "@/util/record"
 import { Npm } from "@opencode-ai/core/npm"
+// testagent_change
+import * as Log from "@opencode-ai/core/util/log"
+
+// testagent_change
+const log = Log.create({ service: "plugin.shared" })
 
 // Old npm package names for plugins that are now built-in
 export const DEPRECATED_PLUGIN_PACKAGES = ["opencode-openai-codex-auth", "opencode-copilot-auth"]
@@ -208,7 +213,14 @@ export async function resolvePluginTarget(spec: string) {
   if (isPathPluginSpec(spec)) return resolvePathPluginTarget(spec)
   const hit = parse(spec)
   const pkg = hit?.name && hit.raw === hit.name ? `${hit.name}@latest` : spec
-  const result = await Npm.add(pkg)
+  // testagent_change start - floating specs (latest, dist-tags, ranges) move over time, so they are
+  // re-resolved against the registry on every load instead of trusting the cached install
+  const refresh = !semver.valid(parsePluginSpecifier(spec).version)
+  if (refresh) log.info("resolving floating plugin version", { spec, pkg })
+  const started = Date.now()
+  const result = await Npm.add(pkg, { refresh })
+  if (refresh) log.info("floating plugin version resolved", { spec, pkg, duration: Date.now() - started })
+  // testagent_change end
   return result.directory
 }
 
