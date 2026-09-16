@@ -25,7 +25,12 @@ export interface EntryPoint {
 }
 
 export interface Interface {
-  readonly add: (pkg: string) => Effect.Effect<EntryPoint, InstallFailedError | EffectFlock.LockError>
+  // testagent_change start - refresh bypasses the cached install and re-resolves the spec against the registry
+  readonly add: (
+    pkg: string,
+    opts?: { refresh?: boolean },
+  ) => Effect.Effect<EntryPoint, InstallFailedError | EffectFlock.LockError>
+  // testagent_change end
   readonly install: (
     dir: string,
     input?: {
@@ -64,6 +69,7 @@ const resolveEntryPoint = (name: string, dir: string): EntryPoint => {
 interface ArboristNode {
   name: string
   path: string
+  package?: { version?: string } // testagent_change - used to log the version resolved by a refresh
 }
 
 interface ArboristTree {
@@ -78,7 +84,7 @@ export const layer = Layer.effect(
     const fs = yield* FileSystem.FileSystem
     const flock = yield* EffectFlock.Service
     const directory = (pkg: string) => path.join(global.cache, "packages", sanitize(pkg))
-    const reify = (input: { dir: string; add?: string[] }) =>
+    const reify = (input: { dir: string; add?: string[]; online?: boolean }) => // testagent_change
       Effect.gen(function* () {
         yield* flock.acquire(`npm-install:${input.dir}`)
         const { Arborist } = yield* Effect.promise(() => import("@npmcli/arborist"))
@@ -111,6 +117,9 @@ export const layer = Layer.effect(
           savePrefix: "",
           ignoreScripts: true,
           registry, // testagent_change
+          // testagent_change start - skip the cached registry metadata so the spec is resolved freshly
+          ...(input.online ? { preferOnline: true } : {}),
+          // testagent_change end
         })
         return yield* Effect.tryPromise({
           try: () =>
@@ -119,6 +128,8 @@ export const layer = Layer.effect(
               add,
               save: true,
               saveType: "prod",
+              // testagent_change
+              ...(input.online ? { preferOnline: true } : {}),
             }),
           catch: (cause) =>
             new InstallFailedError({
@@ -133,7 +144,7 @@ export const layer = Layer.effect(
         }),
       )
 
-    const add = Effect.fn("Npm.add")(function* (pkg: string) {
+    const add = Effect.fn("Npm.add")(function* (pkg: string, opts?: { refresh?: boolean }) {
       const dir = directory(pkg)
       const name = (() => {
         try {
@@ -143,12 +154,36 @@ export const layer = Layer.effect(
         }
       })()
 
-      if (yield* afs.existsSafe(path.join(dir, "node_modules", name))) {
-        return resolveEntryPoint(name, path.join(dir, "node_modules", name))
+      // testagent_change start - reuse the cached install unless the caller asked for a fresh resolve
+      const installed = path.join(dir, "node_modules", name)
+      const cached = yield* afs.existsSafe(installed)
+      if (cached && !opts?.refresh) {
+        log.debug("npm add served from cache", { pkg, dir })
+        return resolveEntryPoint(name, installed)
+      }
+      // testagent_change end
+
+      // testagent_change start - measure how long it takes to resolve/fetch the latest version
+      const started = Date.now()
+      if (opts?.refresh) log.info("npm refresh started", { pkg, dir, cached })
+      // testagent_change end
+
+      const tree = yield* reify({ dir, add: [pkg], online: opts?.refresh }).pipe(
+        // testagent_change start - keep the cached install usable when a refresh fails (offline, registry down)
+        Effect.catch((error) => (cached && opts?.refresh ? Effect.succeed(undefined) : Effect.fail(error))),
+        // testagent_change end
+      )
+      // testagent_change start
+      const duration = Date.now() - started
+      if (tree === undefined) {
+        log.warn("npm refresh failed, reusing cached install", { pkg, dir, duration })
+        return resolveEntryPoint(name, installed)
       }
 
-      const tree = yield* reify({ dir, add: [pkg] })
       const first = tree.edgesOut.values().next().value?.to
+      if (opts?.refresh) log.info("npm refresh finished", { pkg, dir, version: first?.package?.version, duration })
+      // testagent_change end
+
       if (!first) {
         const result = resolveEntryPoint(name, path.join(dir, "node_modules", name))
         if (Option.isSome(result.entrypoint)) return result
