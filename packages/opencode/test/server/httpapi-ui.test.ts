@@ -342,6 +342,23 @@ describe("HttpApi UI fallback", () => {
     }
   })
 
+  // testagent_change start - the browser loads the UI shell (scripts/styles/favicon)
+  // without app-managed credentials, so a 401 here makes the browser show a Basic
+  // auth prompt even when the page was opened with a valid `?auth_token=` link.
+  test("serves static UI assets without auth even when a server password is set", async () => {
+    Flag.OPENCODE_DISABLE_EMBEDDED_WEB_UI = true
+
+    for (const path of ["/index.html", "/oc-theme-preload.js", "/assets/app.js", "/favicon.png"]) {
+      const response = await uiApp({
+        password: "secret",
+        username: "opencode",
+        client: httpClient(new Response("ok")),
+      }).request(path)
+      expect(response.status).not.toBe(401)
+    }
+  })
+  // testagent_change end
+
   test("allows web UI preflight without auth", async () => {
     const response = await app({ password: "secret", username: "opencode" }).request("/", {
       method: "OPTIONS",

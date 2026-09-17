@@ -5,13 +5,16 @@ import { IconButton } from "@opencode-ai/ui/icon-button"
 import { Icon } from "@opencode-ai/ui/icon"
 import { Button } from "@opencode-ai/ui/button"
 import { Tooltip, TooltipKeybind } from "@opencode-ai/ui/tooltip"
+import { showToast } from "@opencode-ai/ui/toast" // testagent_change - cloud share link
 import { useTheme } from "@opencode-ai/ui/theme/context"
 
 import { useLayout } from "@/context/layout"
 import { usePlatform } from "@/context/platform"
 import { useCommand } from "@/context/command"
 import { useLanguage } from "@/context/language"
+import { useServer } from "@/context/server" // testagent_change - cloud share link
 import { useSettings } from "@/context/settings"
+import { authTokenFromCredentials } from "@/utils/server" // testagent_change - cloud share link
 import { applyPath, backPath, forwardPath } from "./titlebar-history"
 
 type TauriDesktopWindow = {
@@ -44,6 +47,7 @@ export function Titlebar() {
   const platform = usePlatform()
   const command = useCommand()
   const language = useLanguage()
+  const server = useServer() // testagent_change - cloud share link
   const settings = useSettings()
   const theme = useTheme()
   const navigate = useNavigate()
@@ -91,6 +95,37 @@ export function Titlebar() {
   const canForward = createMemo(() => history.index < history.stack.length - 1)
   const hasProjects = createMemo(() => layout.projects.list().length > 0)
   const nav = createMemo(() => import.meta.env.VITE_OPENCODE_CHANNEL !== "beta" || settings.general.showNavigation())
+
+  // testagent_change start - copy a shareable link (with auth_token when present) for cloud containers
+  const copyShareLink = () => {
+    const conn = server.current
+    if (!conn || conn.type !== "http") return
+    const url = new URL(conn.http.url)
+    if (conn.http.password) {
+      url.searchParams.set(
+        "auth_token",
+        authTokenFromCredentials({ username: conn.http.username, password: conn.http.password }),
+      )
+    }
+    const link = url.toString()
+    navigator.clipboard
+      .writeText(link)
+      .then(() => {
+        showToast({
+          variant: "success",
+          icon: "circle-check",
+          title: language.t("session.share.copy.copied"),
+          description: link,
+        })
+      })
+      .catch(() =>
+        showToast({
+          variant: "error",
+          title: language.t("toast.session.share.copyFailed.title"),
+        }),
+      )
+  }
+  // testagent_change end
 
   const back = () => {
     const next = backPath(history)
@@ -325,6 +360,20 @@ export function Titlebar() {
           onMouseDown={drag}
         >
           <div id="opencode-titlebar-right" class="flex items-center gap-1 shrink-0 justify-end" />
+          {/* testagent_change start - cloud share link */}
+          <Show when={server.current?.type === "http"}>
+            <Tooltip placement="bottom" value={language.t("session.share.copy.copyLink")}>
+              <Button
+                variant="ghost"
+                class="titlebar-icon w-8 h-6 p-0 box-border shrink-0 mr-1"
+                onClick={copyShareLink}
+                aria-label={language.t("session.share.copy.copyLink")}
+              >
+                <Icon size="small" name="link" />
+              </Button>
+            </Tooltip>
+          </Show>
+          {/* testagent_change end */}
           <Show when={windows()}>
             {!tauriApi() && <div class="shrink-0" style={{ width: windowsControlsWidth() }} />}
             <div data-tauri-decorum-tb class="flex flex-row" />
