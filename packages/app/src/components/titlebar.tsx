@@ -42,6 +42,27 @@ const titlebarHeight = 40
 const minTitlebarZoom = 0.25
 const windowsControlsBaseWidth = 138 // 3 native Windows caption buttons at 46px each.
 
+// testagent_change start - navigator.clipboard is unavailable on insecure origins (plain http)
+async function copyText(text: string) {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text)
+    return
+  }
+  const el = document.createElement("textarea")
+  el.value = text
+  el.setAttribute("readonly", "")
+  el.style.position = "fixed"
+  el.style.top = "-1000px"
+  document.body.appendChild(el)
+  try {
+    el.select()
+    if (!document.execCommand("copy")) throw new Error("copy failed")
+  } finally {
+    document.body.removeChild(el)
+  }
+}
+// testagent_change end
+
 export function Titlebar() {
   const layout = useLayout()
   const platform = usePlatform()
@@ -100,7 +121,12 @@ export function Titlebar() {
   const copyShareLink = () => {
     const conn = server.current
     if (!conn || conn.type !== "http") return
-    const url = new URL(conn.http.url)
+    // Keep the current route (e.g. /<dir>/session/<id>) so the link opens that session.
+    const url = new URL(window.location.href)
+    const target = new URL(conn.http.url)
+    url.protocol = target.protocol
+    url.host = target.host
+    url.searchParams.delete("auth_token")
     if (conn.http.password) {
       url.searchParams.set(
         "auth_token",
@@ -108,8 +134,7 @@ export function Titlebar() {
       )
     }
     const link = url.toString()
-    navigator.clipboard
-      .writeText(link)
+    copyText(link)
       .then(() => {
         showToast({
           variant: "success",
@@ -122,6 +147,7 @@ export function Titlebar() {
         showToast({
           variant: "error",
           title: language.t("toast.session.share.copyFailed.title"),
+          description: link,
         }),
       )
   }
