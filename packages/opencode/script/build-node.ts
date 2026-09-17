@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 
 import { Script } from "@opencode-ai/script"
+import { $ } from "bun"
 import fs from "fs"
 import path from "path"
 import { fileURLToPath } from "url"
@@ -12,6 +13,35 @@ const dir = path.resolve(__dirname, "..")
 process.chdir(dir)
 
 await import("./generate.ts")
+
+// testagent_change start - embed the web UI as real files in the node distribution
+const appDir = path.join(dir, "..", "app")
+const appDist = path.join(appDir, "dist")
+const webUiDir = path.join(dir, "dist/node/web-ui")
+const skipEmbedWebUi = process.argv.includes("--skip-embed-web-ui")
+
+const createEmbeddedWebUIBundle = async () => {
+  console.log("Building Web UI to embed in the node server")
+  if (!fs.existsSync(appDist)) {
+    await $`bun run --cwd ${appDir} build`
+  } else {
+    console.log("Web UI dist already exists, skipping vite build")
+  }
+  const files = (await Array.fromAsync(new Bun.Glob("**/*").scan({ cwd: appDist })))
+    .map((file) => file.replaceAll("\\", "/"))
+    .sort()
+  return [
+    `import { fileURLToPath } from "node:url"`,
+    `import { join } from "node:path"`,
+    `const base = fileURLToPath(new URL("./web-ui/", import.meta.url))`,
+    `export default {`,
+    ...files.map((file) => `  ${JSON.stringify(file)}: join(base, ${JSON.stringify(file)}),`),
+    `}`,
+  ].join("\n")
+}
+
+const embeddedFileMap = skipEmbedWebUi ? "" : await createEmbeddedWebUIBundle()
+// testagent_change end
 
 // Load migrations from migration directories
 const migrationDirs = (
@@ -56,9 +86,17 @@ await Bun.build({
     TESTAGENT_VERSION: '1.3.0', // testagent_change - match value from build.ts
   },
   files: {
-    "opencode-web-ui.gen.ts": "",
+    "opencode-web-ui.gen.ts": embeddedFileMap, // testagent_change - embed web UI map for node
   },
 })
+
+// testagent_change start - ship the web UI assets next to node.js
+await fs.promises.rm(webUiDir, { recursive: true, force: true })
+if (!skipEmbedWebUi) {
+  await fs.promises.cp(appDist, webUiDir, { recursive: true })
+  console.log(`Copied Web UI to ${path.relative(dir, webUiDir)}`)
+}
+// testagent_change end
 
 // Copy WASM assets to dist/node/chunks/ (tree-sitter parsers)
 const chunksDir = path.join(dir, "dist/node/chunks")
