@@ -196,12 +196,24 @@ export const ZhBridgePlugin: Plugin = async ({ client, directory, serverUrl, log
   function notifyCompletion(sessionID: string) {
     void (async () => {
       let title = ""
+      let parentID: string | undefined = undefined
       try {
         const result = await client.session.get({ path: { id: sessionID } })
         title = result.data?.title ?? ""
+        parentID = result.data?.parentID
       } catch (err) {
         zhLog("warn", "session title fetch failed", { sessionID, error: String(err) })
       }
+      
+      // 跳过子 agent（有 parentID）
+      if (parentID) {
+        zhLog("info", "skip notification for subagent", { 
+          sessionID, 
+          hasParent: !!parentID 
+        })
+        return
+      }
+      
       const text = title ? `${title} 任务完成` : "任务完成"
       const url = `${RELAY_URL}/message/testagent/notification/notify`
       const body = {

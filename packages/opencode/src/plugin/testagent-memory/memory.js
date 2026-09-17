@@ -37,8 +37,13 @@ function parseFrontmatter(raw) {
     }
     return { frontmatter, content };
 }
-function buildFrontmatter(name, description, type) {
-    return `---\nname: ${name}\ndescription: ${description}\ntype: ${type}\n---`;
+function buildFrontmatter(name, description, type, source) {
+    if (source) {
+        return `---\nname: ${name}\ndescription: ${description}\ntype: ${type}\nsource: ${source}\n---`;
+    }
+    else {
+        return `---\nname: ${name}\ndescription: ${description}\ntype: ${type}\n---`;
+    }
 }
 function parseMemoryType(raw) {
     if (!raw)
@@ -99,12 +104,12 @@ export function readMemory(worktree, fileName) {
         return null;
     }
 }
-export async function saveMemory(worktree, fileName, name, description, type, content) {
+export async function saveMemory(worktree, fileName, name, description, type, content, source) {
     const safeName = validateMemoryFileName(fileName);
     const memDir = getMemoryDir(worktree);
     const filePath = join(memDir, safeName);
     const nameNew = (name !== null && name !== undefined && name !== 'undefined' && name.length > 0) ? name : safeName.replace(/\.md$/, "").replace(/.*\//, "");
-    const fileContent = `${buildFrontmatter(nameNew, description, type)}\n\n${content.trim()}\n`;
+    const fileContent = `${buildFrontmatter(nameNew, description, type, source)}\n\n${content.trim()}\n`;
     if (Buffer.byteLength(fileContent, "utf-8") > MAX_MEMORY_FILE_BYTES) {
         throw new Error(`Memory file content exceeds the ${MAX_MEMORY_FILE_BYTES}-byte limit`);
     }
@@ -326,4 +331,15 @@ export function truncateEntrypoint(raw) {
         wasLineTruncated,
         wasByteTruncated,
     };
+}
+export function readMemoryByFilePath(worktree, fileName) {
+    const safeName = validateMemoryFileName(fileName);
+    const memDir = getMemoryDir(worktree);
+    const filePath = join(memDir, safeName);
+    try {
+        return readFileSync(filePath, "utf-8");
+    }
+    catch {
+        return "";
+    }
 }

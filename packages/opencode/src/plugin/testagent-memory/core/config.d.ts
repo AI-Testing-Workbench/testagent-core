@@ -15,9 +15,9 @@ export declare const MemoryConfig: z.ZodObject<{
     }>>;
     memory: z.ZodDefault<z.ZodObject<{
         /** 记忆提取最大长度 */
-        autoExtractBatchToken: z.ZodDefault<z.ZodNumber>;
+        autoExtractMaxLength: z.ZodDefault<z.ZodNumber>;
         /** 记忆提取缓存大小 */
-        autoExtractBatchSize: z.ZodDefault<z.ZodNumber>;
+        autoExtractBufferSize: z.ZodDefault<z.ZodNumber>;
         /** 记忆提取每次从数据库读取的记录数 */
         autoExtractBatchSize: z.ZodDefault<z.ZodNumber>;
         autoExtractBatchToken: z.ZodDefault<z.ZodNumber>;
@@ -30,8 +30,8 @@ export declare const MemoryConfig: z.ZodObject<{
         autoExtractEnable: z.ZodDefault<z.ZodBoolean>;
         personalMemoryBackupSize: z.ZodDefault<z.ZodNumber>;
     }, "strip", z.ZodTypeAny, {
-        autoExtractBatchToken: number;
-        autoExtractBatchSize: number;
+        autoExtractMaxLength: number;
+        autoExtractBufferSize: number;
         autoExtractBatchSize: number;
         autoExtractBatchToken: number;
         personalMemoryEnable: boolean;
@@ -40,8 +40,8 @@ export declare const MemoryConfig: z.ZodObject<{
         autoExtractEnable: boolean;
         personalMemoryBackupSize: number;
     }, {
-        autoExtractBatchToken?: number | undefined;
-        autoExtractBatchSize?: number | undefined;
+        autoExtractMaxLength?: number | undefined;
+        autoExtractBufferSize?: number | undefined;
         autoExtractBatchSize?: number | undefined;
         autoExtractBatchToken?: number | undefined;
         personalMemoryEnable?: boolean | undefined;
@@ -99,8 +99,8 @@ export declare const MemoryConfig: z.ZodObject<{
     }>>;
 }, "strip", z.ZodTypeAny, {
     memory: {
-        autoExtractBatchToken: number;
-        autoExtractBatchSize: number;
+        autoExtractMaxLength: number;
+        autoExtractBufferSize: number;
         autoExtractBatchSize: number;
         autoExtractBatchToken: number;
         personalMemoryEnable: boolean;
@@ -134,8 +134,8 @@ export declare const MemoryConfig: z.ZodObject<{
     };
 }, {
     memory?: {
-        autoExtractBatchToken?: number | undefined;
-        autoExtractBatchSize?: number | undefined;
+        autoExtractMaxLength?: number | undefined;
+        autoExtractBufferSize?: number | undefined;
         autoExtractBatchSize?: number | undefined;
         autoExtractBatchToken?: number | undefined;
         personalMemoryEnable?: boolean | undefined;

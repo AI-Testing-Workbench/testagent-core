@@ -8225,6 +8225,149 @@
         ]
       }
     },
+    "/session/{sessionID}/context-extract": {
+      "get": {
+        "tags": ["session"],
+        "operationId": "session.contextExtract",
+        "parameters": [
+          {
+            "name": "directory",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "sessionID",
+            "in": "path",
+            "schema": {
+              "type": "string",
+              "pattern": "^ses.*"
+            },
+            "required": true
+          },
+          {
+            "name": "reasoning",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": ["true", "false"]
+            },
+            "required": false
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Extracted context blocks (main + subagent)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "scope": {
+                        "type": "string",
+                        "enum": ["main", "subagent"]
+                      },
+                      "sessionID": {
+                        "type": "string"
+                      },
+                      "agent": {
+                        "type": "string"
+                      },
+                      "title": {
+                        "type": "string"
+                      },
+                      "entries": {
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "properties": {
+                            "role": {
+                              "type": "string",
+                              "enum": ["user", "assistant"]
+                            },
+                            "type": {
+                              "type": "string",
+                              "enum": ["text", "reasoning", "question"]
+                            },
+                            "text": {
+                              "type": "string"
+                            },
+                            "state": {
+                              "type": "object",
+                              "properties": {
+                                "questions": {
+                                  "type": "array"
+                                },
+                                "answers": {
+                                  "type": "array",
+                                  "items": {
+                                    "type": "array",
+                                    "items": {
+                                      "type": "string"
+                                    }
+                                  }
+                                }
+                              },
+                              "required": ["questions", "answers"],
+                              "additionalProperties": false
+                            }
+                          },
+                          "required": ["role", "type"],
+                          "additionalProperties": false
+                        }
+                      }
+                    },
+                    "required": ["scope", "entries"],
+                    "additionalProperties": false
+                  },
+                  "description": "Extracted context blocks (main + subagent)"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BadRequestError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "NotFoundError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotFoundError"
+                }
+              }
+            }
+          }
+        },
+        "description": "Return a lightweight projection of the active context (messages after the last compaction), split into blocks by session: the main session first, then one layer of direct subagent sessions. Keeps only user/assistant text, optional assistant reasoning, and question-tool Q&A; drops base64/diffs/tool outputs. Provided specifically for testflow to analyze user behavior without large payloads.",
+        "summary": "Extract session context (for testflow)",
+        "x-codeSamples": [
+          {
+            "lang": "js",
+            "source": "import { createOpencodeClient } from \"@opencode-ai/sdk\n\nconst client = createOpencodeClient()\nawait client.session.contextExtract({\n  ...\n})"
+          }
+        ]
+      }
+    },
     "/session/{sessionID}/permissions/{permissionID}": {
       "post": {
         "tags": ["session"],
