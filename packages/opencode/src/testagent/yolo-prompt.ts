@@ -33,6 +33,19 @@ YOLO MODE is enabled for this session. You are working unattended in the backgro
 export const GUARD = `[SYSTEM] YOLO mode is enabled and the user is NOT present — nobody will ever answer. You ended the last turn with a question or an option menu (e.g. "Continue / Modify / Pause"), which leaves the task unfinished. Do NOT ask again. Pick the option that continues the work (usually 继续/continue/default next step), state the assumption briefly, and IMMEDIATELY proceed with the remaining steps using your tools. This reminder will keep being injected until you finish the task — asking only delays you. Only end the run when ALL requested work is complete, with a final summary listing the assumptions you resolved.`
 
 /**
+ * 非提问类"没干完"信号的续跑提醒：上一轮被 token 上限截断（finish=length）
+ * 或完全空轮（零文本零 tool call）。对齐 cline 的 MAX_TOKENS_INCOMPLETE_TURN /
+ * empty-response 处理，但由 YOLO guard 转为续跑而非失败。
+ */
+export const CONTINUE = `[SYSTEM] YOLO mode is enabled: your last turn ended truncated or empty (cut by the token limit, or produced no visible output at all). That is NOT task completion and the user is NOT present to resume you. Re-read the conversation, determine exactly where you stopped, and IMMEDIATELY continue the remaining work with your tools. Do not end another turn the same way.`
+
+/**
+ * 错误自动续跑（restart）提醒：上一轮请求以可重试错误终止（API/瞬断），
+ * YOLO 无人值守下系统在有限次数内自动恢复会话。指示模型重做失败的步骤。
+ */
+export const RESUME = `[SYSTEM] The previous model request failed with a transient error. YOLO mode is unattended, and this session has been automatically resumed. Retry the action that was in progress (same inputs if the request died before it completed) and continue with the remaining tasks. Do not stop and do not wait for the user.`
+
+/**
  * 检测 assistant 文本是否以"向用户提问/等待确认"式收尾。
  * 信号：① 以问号结尾；② 选项菜单特征词；③ 尾部同时出现 ≥2 个选项词
  * （继续/修改/暂停/重试/跳过 —— 正常总结几乎不会枚举这些，菜单式收尾必中）。

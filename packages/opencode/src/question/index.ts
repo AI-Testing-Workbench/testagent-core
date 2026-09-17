@@ -183,8 +183,22 @@ export const layer = Layer.effect(
       pending.set(id, { info, deferred })
       yield* bus.publish(Event.Asked, info)
 
+      // testagent_change start - YOLO 开启时唤醒存量挂起：与"新问题"一致，按第一个选项自动答复
+      const wake = Yolo.onEnabled().pipe(
+        Effect.flatMap(() =>
+          Effect.gen(function* () {
+            if (!pending.has(id)) return yield* Deferred.await(deferred)
+            const answers = input.questions.map((q) => (q.options.length > 0 ? [q.options[0].label] : []))
+            pending.delete(id)
+            yield* Deferred.succeed(deferred, answers)
+            yield* bus.publish(Event.Replied, { sessionID: info.sessionID, requestID: id, answers })
+            return answers
+          }),
+        ),
+      )
+      // testagent_change end
       return yield* Effect.ensuring(
-        Deferred.await(deferred),
+        Effect.raceFirst(Deferred.await(deferred), wake),
         Effect.sync(() => {
           pending.delete(id)
         }),

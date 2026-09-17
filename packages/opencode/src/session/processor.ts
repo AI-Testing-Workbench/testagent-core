@@ -90,6 +90,7 @@ interface ProcessorContext extends Input {
   reasoningMap: Record<string, MessageV2.ReasoningPart>
   tokenEstimates?: { system: number; messages: number; tools: number }
   streamStartTime?: number // testagent_change
+  emitted: boolean // testagent_change - 本轮是否已流出可见输出（文本/推理/工具入参）
 }
 
 type StreamEvent = Event
@@ -140,6 +141,7 @@ export const layer: Layer.Layer<
         needsCompaction: false,
         currentText: undefined,
         reasoningMap: {},
+        emitted: false, // testagent_change
       }
       let aborted = false
       const slog = log.clone().tag("session.id", input.sessionID).tag("messageID", input.assistantMessage.id)
@@ -244,6 +246,9 @@ export const layer: Layer.Layer<
       })
 
       const handleEvent = Effect.fnUntraced(function* (value: StreamEvent) {
+        // testagent_change - 记录本轮已产生可见输出：断流后不再整请求重试，避免重复吐字/重放工具
+        if (value.type === "text-start" || value.type === "text-delta" || value.type === "reasoning-start" || value.type === "tool-input-start")
+          ctx.emitted = true
         switch (value.type) {
           case "start":
             yield* status.set(ctx.sessionID, { type: "busy" })
@@ -755,6 +760,7 @@ export const layer: Layer.Layer<
         return yield* Effect.gen(function* () {
           yield* Effect.gen(function* () {
             ctx.currentText = undefined
+            ctx.emitted = false // testagent_change - 每次重试尝试重新计可见输出
             ctx.reasoningMap = {}
 
             // testagent_change start - Add stream timing logs
@@ -866,6 +872,8 @@ export const layer: Layer.Layer<
                 provider: input.model.providerID,
                 autoCompaction: (yield* config.get()).compaction?.auto,
                 parse,
+                // testagent_change - 本轮已流出内容后禁止重放重试（对齐 cline 传输层 !accepted 闸门）
+                stop: () => ctx.emitted,
                 set: (info) => {
                   // TODO(v2): Temporary dual-write while migrating session messages to v2 events.
                   EventV2.run(SessionEvent.Retried.Sync, {

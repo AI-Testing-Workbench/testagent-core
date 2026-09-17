@@ -9,9 +9,11 @@
  * 4. Permission：YOLO 开启时 ask 规则不挂起直接放行
  * 5. Question：YOLO 开启时新问题自动按第一个选项答复
  * 6. Question：YOLO 开启时无选项问题返回空答案
+ * 7. 存量挂起：开启 YOLO 时已挂起的权限/问题被自动放行答复（onEnabled 唤醒）
+ * 8. 存量挂起：用户先回复时保持原语义，wake 幂等
  */
 import { afterEach, describe, expect, test } from "bun:test"
-import { Effect, Exit } from "effect"
+import { Effect, Exit, Fiber } from "effect"
 import { Permission, type Ruleset } from "../../src/permission"
 import { Question } from "../../src/question"
 import { SessionID } from "../../src/session/schema"
@@ -133,6 +135,104 @@ describe("yolo question", () => {
       Yolo.set(true)
       const answers = await Effect.runPromise(askQuestion([]))
       expect(answers).toEqual([[]])
+    })
+  })
+})
+
+describe("yolo existing pending wake (存量挂起唤醒)", () => {
+  test("开启 YOLO 时已挂起的权限 ask 自动放行（不等用户回复、不留 pending）", async () => {
+    await withInstance(async () => {
+      Yolo.set(false)
+      const got = await Effect.runPromise(
+        Effect.scoped(
+          Effect.gen(function* () {
+            const svc = yield* Permission.Service
+            const fiber = yield* svc
+              .ask({
+                sessionID,
+                permission: "edit",
+                patterns: ["*"],
+                metadata: {},
+                always: [],
+                ruleset: [{ permission: "edit", pattern: "*", action: "ask" }],
+              })
+              .pipe(Effect.forkScoped)
+            yield* Effect.sleep("150 millis")
+            const before = (yield* svc.list()).filter((p) => p.sessionID === sessionID).length
+            Yolo.set(true)
+            const done = yield* Effect.timeout(Fiber.await(fiber), "3 seconds")
+            const after = (yield* svc.list()).filter((p) => p.sessionID === sessionID).length
+            return { before, done, after }
+          }),
+        ).pipe(Effect.provide(Permission.defaultLayer)),
+      )
+      expect(got.before).toBe(1)
+      expect(got.done !== undefined && Exit.isSuccess(got.done)).toBe(true)
+      expect(got.after).toBe(0)
+    })
+  })
+
+  test("开启 YOLO 时已挂起的问题自动按第一个选项答复", async () => {
+    await withInstance(async () => {
+      Yolo.set(false)
+      const answers = await Effect.runPromise(
+        Effect.scoped(
+          Effect.gen(function* () {
+            const svc = yield* Question.Service
+            const fiber = yield* svc
+              .ask({
+                sessionID,
+                questions: [
+                  {
+                    question: "选择方案？",
+                    header: "方案",
+                    options: [
+                      { label: "方案A", description: "a" },
+                      { label: "方案B", description: "b" },
+                    ],
+                  } as any,
+                ],
+              })
+              .pipe(Effect.forkScoped)
+            yield* Effect.sleep("150 millis")
+            Yolo.set(true)
+            const done = yield* Effect.timeout(Fiber.await(fiber), "3 seconds")
+            return done && Exit.isSuccess(done) ? done.value : null
+          }),
+        ).pipe(Effect.provide(Question.defaultLayer)),
+      )
+      expect(answers).toEqual([["方案A"]])
+    })
+  })
+
+  test("用户先回复时保持原语义（reject 仍失败），后续开启事件不复活", async () => {
+    await withInstance(async () => {
+      Yolo.set(false)
+      const got = await Effect.runPromise(
+        Effect.scoped(
+          Effect.gen(function* () {
+            const svc = yield* Permission.Service
+            const fiber = yield* svc
+              .ask({
+                sessionID,
+                permission: "webfetch",
+                patterns: ["*"],
+                metadata: {},
+                always: [],
+                ruleset: [{ permission: "webfetch", pattern: "*", action: "ask" }],
+              })
+              .pipe(Effect.forkScoped)
+            yield* Effect.sleep("150 millis")
+            const [request] = (yield* svc.list()).filter((p) => p.sessionID === sessionID)
+            yield* svc.reply({ requestID: request.id, reply: "reject" })
+            const done = yield* Effect.timeout(Fiber.await(fiber), "3 seconds")
+            Yolo.set(true)
+            yield* Effect.sleep("150 millis")
+            return done
+          }),
+        ).pipe(Effect.provide(Permission.defaultLayer)),
+      )
+      expect(got !== undefined && Exit.isFailure(got)).toBe(true)
     })
   })
 })
