@@ -11,7 +11,7 @@ export type MemoryEntry = {
 };
 export declare function listMemories(worktree: string): MemoryEntry[];
 export declare function readMemory(worktree: string, fileName: string): MemoryEntry | null;
-export declare function saveMemory(worktree: string, fileName: string, name: string, description: string, type: MemoryType, content: string): Promise<string>;
+export declare function saveMemory(worktree: string, fileName: string, name: string, description: string, type: MemoryType, content: string, source?: string): Promise<string>;
 export declare function deleteMemory(worktree: string, fileName: string): Promise<boolean>;
 export declare function searchMemories(worktree: string, query: string): MemoryEntry[];
 /**
@@ -43,3 +43,4 @@ export type EntrypointTruncation = {
     wasByteTruncated: boolean;
 };
 export declare function truncateEntrypoint(raw: string): EntrypointTruncation;
+export declare function readMemoryByFilePath(worktree: string, fileName: string): string;

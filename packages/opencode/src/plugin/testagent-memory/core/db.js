@@ -296,7 +296,7 @@ export class DatabaseManager {
       WHERE q.role = 'tool_question'
         AND q.project_id = ?
         AND q.part_id != ?
-        AND q.content LIKE '%Answer:%'
+        AND q.content LIKE '%Answer:%' OR q.content LIKE '%Answer[1]%'
       ORDER BY q.time_created DESC
       LIMIT ?
     `);

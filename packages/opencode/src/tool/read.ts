@@ -11,6 +11,10 @@ import { InstanceState } from "@/effect/instance-state"
 import { assertExternalDirectoryEffect } from "./external-directory"
 import { Instruction } from "../session/instruction"
 import { isPdfAttachment, sniffAttachmentMime } from "@/util/media"
+// testagent_change start
+import { Sheet } from "@/testagent/sheet"
+import { Doc } from "@/testagent/doc"
+// testagent_change end
 
 const DEFAULT_READ_LIMIT = 2000
 const MAX_LINE_LENGTH = 2000
@@ -241,6 +245,52 @@ export const ReadTool = Tool.define(
       }
 
       if (isBinaryFile(filepath, sample)) {
+        // testagent_change start - Excel 表格(.xls/.xlsx/.xlsm/.xlsb)解析为 TSV 文本，而非直接拒绝
+        if (Sheet.isSheet(filepath)) {
+          const bytes = yield* fs.readFile(filepath)
+          const output = yield* Effect.try({
+            try: () => Sheet.extract(filepath, bytes),
+            catch: (err) => err,
+          }).pipe(
+            Effect.map((v) => [`<path>${filepath}</path>`, `<type>spreadsheet</type>`, "<content>\n", v, "\n</content>"].join("\n")),
+            Effect.catch((err) =>
+              Effect.succeed(`无法解析表格文件: ${err instanceof Error ? err.message : String(err)}`),
+            ),
+          )
+          return {
+            title,
+            output,
+            metadata: {
+              preview: output.slice(0, 1000),
+              truncated: false,
+              loaded: loaded.map((item) => item.filepath),
+            },
+          }
+        }
+        // testagent_change end
+        // testagent_change start - Word 文档(.doc/.docx，含 HTML/RTF/XML 伪装的导出件)解析为文本
+        if (Doc.isDoc(filepath)) {
+          const bytes = yield* fs.readFile(filepath)
+          const output = yield* Effect.tryPromise({
+            try: () => Doc.extract(filepath, bytes),
+            catch: (err) => err,
+          }).pipe(
+            Effect.map((v) => [`<path>${filepath}</path>`, `<type>document</type>`, "<content>\n", v, "\n</content>"].join("\n")),
+            Effect.catch((err) =>
+              Effect.succeed(`无法解析文档: ${err instanceof Error ? err.message : String(err)}`),
+            ),
+          )
+          return {
+            title,
+            output,
+            metadata: {
+              preview: output.slice(0, 1000),
+              truncated: false,
+              loaded: loaded.map((item) => item.filepath),
+            },
+          }
+        }
+        // testagent_change end
         return yield* Effect.fail(new Error(`Cannot read binary file: ${filepath}`))
       }
 

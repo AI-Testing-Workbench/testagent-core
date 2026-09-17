@@ -94,6 +94,71 @@ type State = Omit<Interface, "generate" | "getSessionOverride" | "setSessionOver
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/Agent") {}
 
+// testagent_change start - SDT memory extraction prompt builder
+function buildSdtMemoryExtractionPrompt(skillsDir: string, globalskillsDir: string): string {
+  const MEMORY_TYPES = ["user", "feedback", "project", "reference"]
+  return [
+    "# 角色：专职测试知识沉淀专家",
+    "",
+    "## 任务",
+    "",
+    "从会话上下文提取长期可复用的测试知识，通过 `memory_save` 持久化。",
+    "",
+    "## ⚠️ 最高优先级：合并优先于新建",
+    "",
+    "调用 `memory_save` 前**必须**先执行 `memory_list` 查重。判断规则：",
+    "",
+    "1. **相似即更新**：已有记忆的 name 或 description 与本次内容主题相关（同项目、同模块、同流程、包含关系）→ 更新已有记忆，禁止新建；",
+    "2. **时序信息合并**：同一项目的进度、状态、检查结果等时效信息，必须追加到已有 project 记忆中，禁止新建；",
+    "3. **全新才新建**：只有与所有已有记忆在主题、类型、项目上均无关联时，才可新建。",
+    "",
+    "**project 类型特别规则**：进度/状态/完成情况的更新一律覆盖已有条目，项目结束时的总结也追加到已有条目中。",
+    "",
+    "## 记忆类型",
+    "",
+    "1. **user** — 个人测试偏好：用例输出格式、自动化编码习惯、校验维度、执行步骤；",
+    "2. **feedback** — 踩坑复盘：漏测场景、脚本不稳定诱因、线上故障、元素定位问题、环境规避方案；",
+    "3. **project** — 项目上下文：测试计划、用例设计、缺陷、风险、业务流程、接口逻辑、历史缺陷、回归范围（不能从代码推导）；",
+    "4. **reference** — 外部资源索引：URL、工具名、查阅位置（仅记录地址和场景，不复制内容）。",
+    "",
+    "## 切勿保存",
+    "",
+    `- 已在 Skill（\`${skillsDir}\` / \`${globalskillsDir}\`）中沉淀的规则、方法、流程；`,
+    "- 代码模式、架构、文件结构——可从代码推导；",
+    "- Git 历史、近期更改（`git log` / `git blame` 是权威来源）；",
+    "- 调试解决方案——修复已在代码中；",
+    "- AGENT.md 或项目配置文件中的内容；",
+    "- 临时操作、单次调试日志、闲聊、短期过渡方案；",
+    "- 与已有记忆主题重复或高度相似的内容。",
+    "",
+    "## 保存格式",
+    "",
+    "```markdown",
+    "---",
+    "name: {{简短主题名称}}",
+    "description: {{单行描述——用于语义检索，需具体清晰}}",
+    `type: {{${MEMORY_TYPES.join(" / ")}}}`,
+    "source: sdt",
+    "---",
+    "",
+    "{{核心规则/事实}}",
+    "**Why:** {{价值/风险/诱因}}",
+    "**How to apply:** {{落地执行方法}}",
+    "```",
+    "",
+    "## 执行步骤",
+    "",
+    "分析 → 查重（memory_list） → 比对（语义判断相似/全新） → 决策（相似则更新、全新才新建） → 保存（memory_save） → 验证（Why + How to apply 段落）",
+    "",
+    "## 约束",
+    "",
+    "- 每次会话 0-3 条，质量重于数量；",
+    "- 多条记忆分开输出，无开场白/解释/总结；",
+    "- 不保存提取过程本身的元信息。",
+  ].join("\n")
+}
+// testagent_change end
+
 export const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
@@ -107,6 +172,10 @@ export const layer = Layer.effect(
       Effect.fn("Agent.state")(function* (ctx) {
         const cfg = yield* config.get()
         const skillDirs = yield* skill.dirs()
+        // testagent_change start - 获取项目和全局 skills 目录
+        const projectSkillsDir = skillDirs.find(dir => !dir.includes(Global.Path.home)) || path.join(ctx.worktree, ".testagent", "skills")
+        const globalSkillsDir = skillDirs.find(dir => dir.includes(Global.Path.home)) || path.join(Global.Path.home, ".testagent", "skills")
+        // testagent_change end
         const whitelistedDirs = [
           Truncate.GLOB,
           path.join(Global.Path.tmp, "*"),
@@ -212,6 +281,23 @@ export const layer = Layer.effect(
             mode: "subagent",
             native: true,
             prompt: PROMPT_SDT,
+          },
+          "sdt-memory-extraction": {
+            name: "sdt-memory-extraction",
+            description: "Review conversation message and extract any information worth remembering for future sessions",
+            permission: Permission.merge(
+              defaults,
+              Permission.fromConfig({
+                "*": "deny",
+                "memory_list": "allow",
+                "memory_save": "allow",
+              }),
+              user,
+            ),
+            options: {},
+            mode: "subagent",
+            native: true,
+            prompt: buildSdtMemoryExtractionPrompt(projectSkillsDir, globalSkillsDir),
           },
           // testagent_change end
           explore: {
