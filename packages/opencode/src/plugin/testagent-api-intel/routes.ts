@@ -3,24 +3,30 @@
 
 import type { ToolContext } from "@opencode-ai/plugin"
 import { ApicolAdapter, type FetchAllInput, type FetchInput, type ListInput, type ScanInput } from "./platforms/apicol"
+import { FaAdapter, type FetchInput as FaFetchInput } from "./platforms/fa"
 
 export const ROUTES = {
   scan: "POST apicol.scan",
   list: "POST apicol.list",
   fetch: "POST apicol.fetch",
   fetchAll: "POST apicol.fetchAll",
+  faFetch: "GET fa.fetch",
 } as const
 
 export type Action = "scan" | "list" | "fetch" | "fetchAll"
+export type Platform = "apicol" | "fa"
 
 export type ApiIntelArgs = {
   action: Action
-  platform: "apicol"
+  platform: Platform
   systemId?: string
   deployUnit?: string
   keyword?: string
   appId?: string
   endpointRefs?: string[]
+  testProductNo?: string
+  testApiName?: string
+  testAppName?: string
 }
 
 function need(args: ApiIntelArgs, key: keyof ApiIntelArgs): string | null {
@@ -30,12 +36,24 @@ function need(args: ApiIntelArgs, key: keyof ApiIntelArgs): string | null {
 }
 
 export function validate(args: ApiIntelArgs): void {
+  if (args.platform === "fa") {
+    if (args.action !== "fetch") {
+      throw new Error('fa: 仅支持 action="fetch"（FA 无 scan/list/fetchAll 工作流）')
+    }
+    for (const key of ["testProductNo", "testApiName", "testAppName"] as const) {
+      const err = need(args, key)
+      if (err) throw new Error(err)
+    }
+    return
+  }
+
   switch (args.action) {
-    case "scan":
+    case "scan": {
       if (args.platform !== "apicol") {
         throw new Error(`action="scan" requires platform="apicol"`)
       }
       return
+    }
     case "list": {
       const err = need(args, "appId")
       if (err) throw new Error(err)
@@ -59,6 +77,18 @@ export function validate(args: ApiIntelArgs): void {
 
 export async function executeAction(args: ApiIntelArgs, ctx: ToolContext) {
   validate(args)
+
+  if (args.platform === "fa") {
+    const adapter = new FaAdapter()
+    const input: FaFetchInput = {
+      testProductNo: args.testProductNo!,
+      testApiName: args.testApiName!,
+      testAppName: args.testAppName!,
+    }
+    const out = await adapter.fetch(input, ctx.abort)
+    return { ...out, route: ROUTES.faFetch }
+  }
+
   const adapter = new ApicolAdapter()
 
   switch (args.action) {

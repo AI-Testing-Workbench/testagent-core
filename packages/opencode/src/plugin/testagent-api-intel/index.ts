@@ -8,15 +8,17 @@ import { z } from "zod"
 import { executeAction, type ApiIntelArgs } from "./routes"
 
 const API_INTEL_DESCRIPTION = [
-  "应用接口情报工具（API 协作平台 apicol）。在自动化测试场景下，先用本工具拿到目标应用的接口契约，再基于契约生成测试用例。",
-  "通过 `action` 区分四种调用：",
-  "  • action=\"scan\"      → 按 systemId(+可选 deployUnit/keyword) 找到应用（返回 appId = projectId）",
-  "  • action=\"list\"      → 列出指定 appId 的接口元信息（name/method/path/status 等）",
-  "  • action=\"fetch\"     → 按 endpointRefs 获取接口定义（ref 三种格式：name / 'METHOD path' / 'METHOD name'）",
-  "  • action=\"fetchAll\"  → 一键返回 appId 下全部接口清单（先返回清单，再调用 fetch 取定义）",
+  "应用接口情报工具。在自动化测试场景下，先用本工具拿到目标应用的接口契约，再基于契约生成测试用例。",
+  "通过 `platform` 选择平台：",
+  "  • platform=\"apicol\" → API 协作平台。用 appId + endpointRefs，支持 scan/list/fetch/fetchAll：",
+  "      action=\"scan\"      → 按 systemId(+可选 deployUnit/keyword) 找到应用（返回 appId = projectId）",
+  "      action=\"list\"      → 列出指定 appId 的接口元信息（name/method/path/status 等）",
+  "      action=\"fetch\"     → 按 endpointRefs 获取接口定义（ref 三种格式：name / 'METHOD path' / 'METHOD name'）",
+  "      action=\"fetchAll\"  → 一键返回 appId 下全部接口清单（先返回清单，再调用 fetch 取定义）",
+  "  • platform=\"fa\"     → FA 平台。仅支持 action=\"fetch\"（无 scan/list/fetchAll），用 testProductNo + testApiName + testAppName 查询平台已登记的接口定义。",
   "鉴权：工具从 User.get().sapId 取用户工号；token 接口为 GET /ed/openapi/token?sapId=...，不附加 Header；",
-  "      业务接口自动注入 Authorization: <token>。",
-  "返回：成功 {ok:true, platform:'apicol', route, data}；失败 {ok:false, platform:'apicol', route, error, hint}。",
+  "      业务接口自动注入 Authorization: <token>（FA 的 accessToken 与 apicol 同源）。FA 网关地址由环境变量 FA_BASE_URL 指定。",
+  "返回：成功 {ok:true, platform, route, data}；失败 {ok:false, platform, route, error, hint}。",
 ].join("\n")
 
 export const ApiIntelPlugin: Plugin = async () => {
@@ -29,8 +31,8 @@ export const ApiIntelPlugin: Plugin = async () => {
             .enum(["scan", "list", "fetch", "fetchAll"])
             .describe("四选一：scan 找应用、list 列接口、fetch 取定义、fetchAll 一键列清单"),
           platform: z
-            .literal("apicol")
-            .describe("平台标识，当前仅支持 apicol（API 协作平台）"),
+            .enum(["apicol", "fa"])
+            .describe("平台标识：apicol（API 协作平台）或 fa（FA 平台，仅支持 fetch）"),
 
           // scan
           systemId: z
@@ -49,18 +51,36 @@ export const ApiIntelPlugin: Plugin = async () => {
             .optional()
             .describe("scan 可选：模糊匹配发布单元/项目名"),
 
-          // list / fetch / fetchAll
+          // apicol: list / fetch / fetchAll
           appId: z
             .string()
             .min(1)
-            .describe("list/fetch/fetchAll 必填：来自 scan 的 appId（实际为 projectId，按 string 传递）"),
+            .optional()
+            .describe("apicol 的 list/fetch/fetchAll 必填：来自 scan 的 appId（实际为 projectId，按 string 传递）"),
 
-          // fetch
+          // apicol: fetch
           endpointRefs: z
             .array(z.string().min(1))
             .min(1)
             .optional()
-            .describe("fetch 必填：三种格式任选其一：name / 'METHOD path' / 'METHOD name'"),
+            .describe("apicol 的 fetch 必填：三种格式任选其一：name / 'METHOD path' / 'METHOD name'"),
+
+          // fa: fetch
+          testProductNo: z
+            .string()
+            .min(1)
+            .optional()
+            .describe("fa 的 fetch 必填：测试产品编号"),
+          testApiName: z
+            .string()
+            .min(1)
+            .optional()
+            .describe("fa 的 fetch 必填：测试接口名称"),
+          testAppName: z
+            .string()
+            .min(1)
+            .optional()
+            .describe("fa 的 fetch 必填：测试应用名称"),
         },
         async execute(args, ctx) {
           const a = args as ApiIntelArgs

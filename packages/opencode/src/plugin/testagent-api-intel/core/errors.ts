@@ -1,7 +1,7 @@
 // testagent_change - unified envelope for api_intel responses.
 // All actions return one of these shapes so the agent never sees an uncaught exception.
 
-export type PlatformId = "apicol"
+export type PlatformId = "apicol" | "fa"
 
 export type Envelope<T> =
   | { ok: true; platform: PlatformId; route?: string; data: T; hint?: string }
