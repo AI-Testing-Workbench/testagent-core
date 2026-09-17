@@ -40,6 +40,16 @@ import { NamedError } from "@opencode-ai/core/util/error"
 import { SessionProcessor } from "./processor"
 import { Tool } from "@/tool/tool"
 import { Permission } from "@/permission"
+// testagent_change start - YOLO 模式
+import { Yolo } from "@/testagent/yolo"
+import { YoloPrompt } from "@/testagent/yolo-prompt"
+import { Duration } from "effect"
+
+// YOLO 错误自动续跑：仅瞬态 API/未知流错误可恢复，≤3 次、2s 起指数退避；
+// abort/鉴权/结构化/溢出等确定性失败不复活（交给重试层或按原逻辑终止）
+const RESUMABLE = new Set(["APIError", "UnknownError"])
+const RESUME_MAX = 3
+const RESUME_WAIT = 2_000
 // testagent_change start
 import { Sheet } from "@/testagent/sheet"
 import { Doc } from "@/testagent/doc"
@@ -1472,6 +1482,10 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         const slog = elog.with({ sessionID })
         let structured: unknown
         let step = 0
+        // testagent_change - YOLO completion guard 注入计数（仅日志观测，不参与终止判定：提问即无限续跑）
+        let guard = 0
+        // testagent_change - YOLO 错误自动续跑计数（有上限：RESUME_MAX）
+        let resume = 0
         const session = yield* sessions.get(sessionID).pipe(Effect.orDie)
 
         // testagent_change start - 估算下一次请求将发送的完整上下文（system + messages + tools）
@@ -1562,6 +1576,49 @@ NOTE: At any point in time through this workflow you should feel free to ask the
             lastUser.time.created < lastAssistant.time.created
             // testagent_change end
           ) {
+            // testagent_change start - YOLO completion guard（移植 cline agent-runtime 的
+            // requireCompletionTool 机制，见 agents/src/agent-runtime.ts L791-812）：
+            // cline 下模型零 tool_calls 且未调用 submit_and_exit 时注入 [SYSTEM] 提醒并 continue，
+            // 直到任务完成；我们无 submit_and_exit，等价信号 = "提问式文本收尾"（isAsking）。
+            // YOLO 语义即"自动续跑"：命中即注入提醒并 continue，不设次数上限，
+            // 直到模型完成任务自然收尾；用户可随时手动停止会话（abort）终止。
+            if (Yolo.isEnabled()) {
+              const text = (lastAssistantMsg?.parts ?? [])
+                .filter((p): p is MessageV2.TextPart => p.type === "text")
+                .map((p) => p.text)
+                .join("\n")
+              // testagent_change start - guard 信号扩展：提问式收尾之外，识别 length 截断与空轮
+              // （对齐 cline：max-tokens/empty turn 不算完成）。压缩摘要消息不参与，避免误伤系统消息。
+              const systemish = lastAssistant.summary === true || lastUser.format?.type === "json_schema"
+              const truncated = lastAssistant.finish === "length"
+              const empty = !text.trim() && !(lastAssistantMsg?.parts ?? []).some((p) => p.type === "file")
+              const asking = YoloPrompt.isAsking(text)
+              const reason = asking ? "asking" : systemish ? "" : truncated ? "length" : empty ? "empty" : ""
+              if (reason) {
+                guard++
+                yield* slog.info("yolo completion guard 触发：注入提醒自动续跑", { step, guard, reason })
+                const notice: MessageV2.User = {
+                  id: MessageID.ascending(),
+                  sessionID,
+                  role: "user",
+                  time: { created: Date.now() },
+                  agent: lastUser.agent,
+                  model: lastUser.model,
+                }
+                yield* sessions.updateMessage(notice)
+                yield* sessions.updatePart({
+                  id: PartID.ascending(),
+                  messageID: notice.id,
+                  sessionID,
+                  type: "text",
+                  text: asking ? YoloPrompt.GUARD : YoloPrompt.CONTINUE,
+                  synthetic: true,
+                } satisfies MessageV2.TextPart)
+                continue
+              }
+              // testagent_change end
+            }
+            // testagent_change end
             // testagent_change start - debug log: why loop exits immediately
             yield* slog.info("exiting loop", {
               lastUserID: lastUser.id,
@@ -1757,6 +1814,11 @@ NOTE: At any point in time through this workflow you should feel free to ask the
               MessageV2.toModelMessagesEffect(msgs, model),
             ])
             const system = [...env, ...instructions, ...(skills ? [skills] : [])]
+            // testagent_change start - YOLO 模式（全局开关）追加系统提示词约束段
+            if (Yolo.isEnabled()) {
+              system.push(YoloPrompt.SECTION)
+            }
+            // testagent_change end
             const format = lastUser.format ?? { type: "text" as const }
             if (format.type === "json_schema") system.push(STRUCTURED_OUTPUT_SYSTEM_PROMPT)
             const result = yield* handle.process({
@@ -1791,7 +1853,36 @@ NOTE: At any point in time through this workflow you should feel free to ask the
               }
             }
 
-            if (result === "stop") return "break" as const
+            // testagent_change start - YOLO 错误终止有界续跑：瞬态失败退避后注入提醒重跑，
+            // 无人值守下 API 抖动不再让任务永久停住；连续计数、成功轮归零
+            if (result === "stop") {
+              const failed = handle.message.error?.name ?? ""
+              if (Yolo.isEnabled() && resume < RESUME_MAX && RESUMABLE.has(failed)) {
+                resume++
+                yield* slog.info("yolo error auto-resume：注入提醒退避续跑", { step, resume, error: failed })
+                yield* Effect.sleep(Duration.millis(RESUME_WAIT * 2 ** (resume - 1)))
+                const notice: MessageV2.User = {
+                  id: MessageID.ascending(),
+                  sessionID,
+                  role: "user",
+                  time: { created: Date.now() },
+                  agent: lastUser.agent,
+                  model: lastUser.model,
+                }
+                yield* sessions.updateMessage(notice)
+                yield* sessions.updatePart({
+                  id: PartID.ascending(),
+                  messageID: notice.id,
+                  sessionID,
+                  type: "text",
+                  text: YoloPrompt.RESUME,
+                  synthetic: true,
+                } satisfies MessageV2.TextPart)
+                return "continue" as const
+              }
+              return "break" as const
+            }
+            // testagent_change end
             if (result === "compact") {
               // testagent_change start - 记录推理返回 compact 的触发原因与 token 判定
               yield* Effect.logInfo("自动压缩触发(推理返回compact)", {
@@ -1814,6 +1905,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                 overflow: !handle.message.finish,
               })
             }
+            resume = 0 // testagent_change - 本轮取得进展（非错误终止），重置连续错误预算
             return "continue" as const
           }).pipe(Effect.ensuring(instruction.clear(handle.message.id)))
           if (outcome === "break") break

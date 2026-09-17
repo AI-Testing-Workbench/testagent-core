@@ -14,9 +14,15 @@ import {
   EnvVarBatchUpdatePayload,
   TestagentUserPayload,
   ZhAnswerTogglePayload, // testagent_change
+  YoloGetResult, // testagent_change
+  YoloSetPayload, // testagent_change
+  YoloSetResult, // testagent_change
 } from "../groups/testagent" // testagent_change
 import type { StoredToken } from "@/external-auth"
 import { EnvVarsConfigInvalidError } from "@/testagent/env-vars" // testagent_change
+// testagent_change start - YOLO 模式状态
+import { Yolo } from "@/testagent/yolo"
+// testagent_change end
 
 const log = Log.create({ service: "server" })
 
@@ -161,6 +167,22 @@ export const testagentHandlers = HttpApiBuilder.group(RootHttpApi, "testagent", 
     })
     // testagent_change end
 
+    // testagent_change start - YOLO 模式开关 handler（全局，与 session 无关）
+    const yoloSet = Effect.fn("TestagentHttpApi.yoloSet")(function* (ctx: {
+      payload: typeof YoloSetPayload.Type
+    }) {
+      Yolo.set(ctx.payload.enabled)
+      log.info("YOLO mode toggled (global)", { enabled: ctx.payload.enabled })
+      const result: typeof YoloSetResult.Type = { applied: true }
+      return result
+    })
+
+    const yoloGet = Effect.fn("TestagentHttpApi.yoloGet")(function* () {
+      const result: typeof YoloGetResult.Type = { enabled: Yolo.isEnabled() }
+      return result
+    })
+    // testagent_change end
+
     return handlers
       .handle("userSet", userSet)
       .handle("envVarsList", envVarsList)
@@ -171,5 +193,7 @@ export const testagentHandlers = HttpApiBuilder.group(RootHttpApi, "testagent", 
       .handle("zhAnswerSet", zhAnswerSet) // testagent_change
       .handle("agentOverrideSet", agentOverrideSet) // testagent_change
       .handle("agentOverrideClear", agentOverrideClear) // testagent_change
+      .handle("yoloSet", yoloSet) // testagent_change
+      .handle("yoloGet", yoloGet) // testagent_change
   }),
 )

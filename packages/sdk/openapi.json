@@ -1241,6 +1241,124 @@
         ]
       }
     },
+    "/testagent/yolo": {
+      "put": {
+        "tags": ["testagent"],
+        "operationId": "testagent.yolo.set",
+        "parameters": [
+          {
+            "name": "directory",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "YOLO mode set successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "applied": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": ["applied"],
+                  "additionalProperties": false,
+                  "description": "YOLO mode set successfully"
+                }
+              }
+            }
+          }
+        },
+        "description": "Enable or disable YOLO mode globally. When enabled, all sessions run unattended: every permission rule (including deny) is bypassed and the question tool becomes unavailable, mirroring cline's yolo mode. State resets on server restart.",
+        "summary": "Toggle YOLO mode (global)",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "enabled": {
+                    "type": "boolean"
+                  }
+                },
+                "required": ["enabled"],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "js",
+            "source": "import { createOpencodeClient } from \"@opencode-ai/sdk\n\nconst client = createOpencodeClient()\nawait client.testagent.yolo.set({\n  ...\n})"
+          }
+        ]
+      },
+      "get": {
+        "tags": ["testagent"],
+        "operationId": "testagent.yolo.get",
+        "parameters": [
+          {
+            "name": "directory",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current YOLO mode",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "enabled": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": ["enabled"],
+                  "additionalProperties": false,
+                  "description": "Current YOLO mode"
+                }
+              }
+            }
+          }
+        },
+        "description": "Query whether YOLO mode is currently enabled.",
+        "summary": "Get YOLO mode (global)",
+        "x-codeSamples": [
+          {
+            "lang": "js",
+            "source": "import { createOpencodeClient } from \"@opencode-ai/sdk\n\nconst client = createOpencodeClient()\nawait client.testagent.yolo.get({\n  ...\n})"
+          }
+        ]
+      }
+    },
     "/event": {
       "get": {
         "tags": ["event"],

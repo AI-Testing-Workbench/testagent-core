@@ -17,6 +17,9 @@ import os from "os"
 import { z } from "zod" // kilocode_change
 import { evaluate as evalRule } from "./evaluate"
 import { PermissionID } from "./schema"
+// testagent_change start - YOLO 模式状态（进程级纯模块，无 Effect 上下文依赖）
+import { Yolo } from "@/testagent/yolo"
+// testagent_change end
 
 const log = Log.create({ service: "permission" })
 
@@ -190,6 +193,12 @@ export const layer = Layer.effect(
     )
 
     const ask = Effect.fn("Permission.ask")(function* (input: AskInput) {
+      // testagent_change start - YOLO 模式（全局开关）：绕过所有权限规则（包括 deny），直接放行
+      if (Yolo.isEnabled()) {
+        log.info("yolo bypass", { permission: input.permission, sessionID: input.sessionID })
+        return
+      }
+      // testagent_change end
       const { approved, pending } = yield* InstanceState.get(state)
       const { ruleset, ...request } = input
       let needsAsk = false
@@ -218,8 +227,21 @@ export const layer = Layer.effect(
       const deferred = yield* Deferred.make<void, RejectedError | CorrectedError>()
       pending.set(id, { info, deferred })
       yield* bus.publish(Event.Asked, info)
+      // testagent_change start - YOLO 开启时唤醒存量挂起：按一次性 allow 放行（不写持久规则），
+      // 与 Deferred 等待 race，用户正常回复路径优先则走原逻辑
+      const wake = Yolo.onEnabled().pipe(
+        Effect.flatMap(() =>
+          Effect.gen(function* () {
+            if (!pending.has(id)) return yield* Deferred.await(deferred)
+            pending.delete(id)
+            yield* Deferred.succeed(deferred, undefined)
+            yield* bus.publish(Event.Replied, { sessionID: info.sessionID, requestID: id, reply: "once" as const })
+          }),
+        ),
+      )
+      // testagent_change end
       return yield* Effect.ensuring(
-        Deferred.await(deferred),
+        Effect.raceFirst(Deferred.await(deferred), wake),
         Effect.sync(() => {
           pending.delete(id)
         }),

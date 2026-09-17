@@ -6,6 +6,9 @@ import { SessionID, MessageID } from "@/session/schema"
 import { zod } from "@/util/effect-zod"
 import * as Log from "@opencode-ai/core/util/log"
 import { withStatics } from "@/util/schema"
+// testagent_change start - YOLO 模式状态（进程级纯模块，无 Effect 上下文依赖）
+import { Yolo } from "@/testagent/yolo"
+// testagent_change end
 import { QuestionID } from "./schema"
 
 const log = Log.create({ service: "question" })
@@ -157,6 +160,15 @@ export const layer = Layer.effect(
       questions: ReadonlyArray<Info>
       tool?: Tool
     }) {
+      // testagent_change start - YOLO 模式（全局开关）：用户不在场，新问题直接按第一个选项自动答复
+      // （与 cline yolo 的 question 处理一致；工具列表过滤是第一道，这里是兜底，
+      // 覆盖模型臆造调用时工具仍存在的路径，如子 agent / plugin 注入的工具）
+      if (Yolo.isEnabled()) {
+        const answers = input.questions.map((q) => (q.options.length > 0 ? [q.options[0].label] : []))
+        log.info("yolo auto-answered", { sessionID: input.sessionID, count: input.questions.length })
+        return answers
+      }
+      // testagent_change end
       const pending = (yield* InstanceState.get(state)).pending
       const id = QuestionID.ascending()
       log.info("asking", { id, questions: input.questions.length })
@@ -171,8 +183,22 @@ export const layer = Layer.effect(
       pending.set(id, { info, deferred })
       yield* bus.publish(Event.Asked, info)
 
+      // testagent_change start - YOLO 开启时唤醒存量挂起：与"新问题"一致，按第一个选项自动答复
+      const wake = Yolo.onEnabled().pipe(
+        Effect.flatMap(() =>
+          Effect.gen(function* () {
+            if (!pending.has(id)) return yield* Deferred.await(deferred)
+            const answers = input.questions.map((q) => (q.options.length > 0 ? [q.options[0].label] : []))
+            pending.delete(id)
+            yield* Deferred.succeed(deferred, answers)
+            yield* bus.publish(Event.Replied, { sessionID: info.sessionID, requestID: id, answers })
+            return answers
+          }),
+        ),
+      )
+      // testagent_change end
       return yield* Effect.ensuring(
-        Deferred.await(deferred),
+        Effect.raceFirst(Deferred.await(deferred), wake),
         Effect.sync(() => {
           pending.delete(id)
         }),

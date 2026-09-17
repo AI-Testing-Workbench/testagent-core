@@ -213,6 +213,7 @@ export function policy(opts: {
   provider: string
   autoCompaction?: boolean
   parse: (error: unknown) => Err
+  stop?: () => boolean // testagent_change - 外部止损信号（如本轮已流出内容，重放会重复输出）
   set: (input: { attempt: number; message: string; action?: Retryable["action"]; next: number }) => Effect.Effect<void>
 }) {
   return Schedule.fromStepWithMetadata(
@@ -222,6 +223,9 @@ export function policy(opts: {
         log.warn("max retry attempts reached", { attempt: meta.attempt, maxAttempts: RETRY_MAX_ATTEMPTS })
         return Cause.done(meta.attempt)
       }
+      // testagent_change end
+      // testagent_change start - 外部止损：命中即放弃重试
+      if (opts.stop?.()) return Cause.done(meta.attempt)
       // testagent_change end
       const error = opts.parse(meta.input)
       const retry = retryable(error, opts.provider, opts.autoCompaction)
