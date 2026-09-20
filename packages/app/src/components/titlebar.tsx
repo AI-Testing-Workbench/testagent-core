@@ -15,6 +15,7 @@ import { useLanguage } from "@/context/language"
 import { useServer } from "@/context/server" // testagent_change - cloud share link
 import { useSettings } from "@/context/settings"
 import { authTokenFromCredentials } from "@/utils/server" // testagent_change - cloud share link
+import { decode64 } from "@/utils/base64" // testagent_change - open workspace in desktop client
 import { applyPath, backPath, forwardPath } from "./titlebar-history"
 
 type TauriDesktopWindow = {
@@ -60,6 +61,17 @@ async function copyText(text: string) {
   } finally {
     document.body.removeChild(el)
   }
+}
+// testagent_change end
+
+// testagent_change start - invoke a custom protocol (e.g. tscode://) from the browser
+function openExternalUrl(url: string) {
+  const a = document.createElement("a")
+  a.href = url
+  a.rel = "noopener"
+  document.body.appendChild(a)
+  a.click()
+  document.body.removeChild(a)
 }
 // testagent_change end
 
@@ -150,6 +162,16 @@ export function Titlebar() {
           description: link,
         }),
       )
+  }
+  // testagent_change end
+
+  // testagent_change start - open the current workspace in the local tscode client
+  const workspace = createMemo(() => decode64(params.dir))
+  const openInClient = () => {
+    const directory = workspace()
+    if (!directory) return
+    // Reuse the client's remote workspace history to reconnect to the cloud workspace.
+    openExternalUrl(`tscode://test-tech.tscode-remote-ssh/open?dir=${encodeURIComponent(directory)}`)
   }
   // testagent_change end
 
@@ -386,6 +408,20 @@ export function Titlebar() {
           onMouseDown={drag}
         >
           <div id="opencode-titlebar-right" class="flex items-center gap-1 shrink-0 justify-end" />
+          {/* testagent_change start - open the workspace in the local tscode client */}
+          <Show when={platform.platform === "web" && workspace()}>
+            <Tooltip placement="bottom" value={language.t("session.header.open.tscode")}>
+              <Button
+                variant="ghost"
+                class="titlebar-icon w-8 h-6 p-0 box-border shrink-0"
+                onClick={openInClient}
+                aria-label={language.t("session.header.open.tscode")}
+              >
+                <img src="/assets/tscode.png" alt="" class="size-4" />
+              </Button>
+            </Tooltip>
+          </Show>
+          {/* testagent_change end */}
           {/* testagent_change start - cloud share link */}
           <Show when={server.current?.type === "http"}>
             <Tooltip placement="bottom" value={language.t("session.share.copy.copyLink")}>
