@@ -88,6 +88,18 @@ export const instanceHandlers = HttpApiBuilder.group(InstanceHttpApi, "instance"
       return { success: true }
     })
 
+    // test-workbench_change start - agent/command reload(与 skillReload 同模式,供管理面板落盘后刷新)
+    const agentReload = Effect.fn("InstanceHttpApi.agentReload")(function* () {
+      yield* agent.reload()
+      return { success: true }
+    })
+
+    const commandReload = Effect.fn("InstanceHttpApi.commandReload")(function* () {
+      yield* command.reload()
+      return { success: true }
+    })
+    // test-workbench_change end
+
     const mcpReload = Effect.fn("InstanceHttpApi.mcpReload")(function* () {
       yield* mcp.reload()
       return { success: true }
@@ -121,6 +133,10 @@ export const instanceHandlers = HttpApiBuilder.group(InstanceHttpApi, "instance"
       .handle("agent", getAgent)
       .handle("skill", getSkill)
       .handle("skillReload", skillReload)
+      // test-workbench_change start
+      .handle("agentReload", agentReload)
+      .handle("commandReload", commandReload)
+      // test-workbench_change end
       .handle("mcpReload", mcpReload)
       .handle("lsp", getLsp)
       .handle("formatter", getFormatter)

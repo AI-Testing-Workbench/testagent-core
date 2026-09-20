@@ -60,6 +60,10 @@ export interface Interface {
   readonly get: (agent: string) => Effect.Effect<Info>
   readonly list: () => Effect.Effect<Info[]>
   readonly defaultAgent: () => Effect.Effect<string>
+  // test-workbench_change start - 失效实例级 agent 缓存:管理面板写入 ~/.config/testagent/agent/*.md
+  // 后,host 调 POST /agent/reload 即可让下一次 GET /agent 重扫清单
+  readonly reload: () => Effect.Effect<void>
+  // test-workbench_change end
   // testagent_change start - override methods
   readonly getSessionOverride: (sessionID: string) => Effect.Effect<{
     prompt?: string
@@ -90,9 +94,9 @@ export interface Interface {
   }>
 }
 
-type State = Omit<Interface, "generate" | "getSessionOverride" | "setSessionOverride" | "clearSessionOverride"> // testagent_change
+type State = Omit<Interface, "generate" | "reload" | "getSessionOverride" | "setSessionOverride" | "clearSessionOverride"> // testagent_change; test-workbench_change: reload 在 Service 层直接 invalidate,不进实例 state
 
-export class Service extends Context.Service<Service, Interface>()("@opencode/Agent") {}
+export class Service extends Context.Service<Service, Interface>()("@opencode/Agent") { }
 
 export const layer = Layer.effect(
   Service,
@@ -102,7 +106,7 @@ export const layer = Layer.effect(
     const plugin = yield* Plugin.Service
     const skill = yield* Skill.Service
     const provider = yield* Provider.Service
-    
+
     const state = yield* InstanceState.make<State>(
       Effect.fn("Agent.state")(function* (ctx) {
         const cfg = yield* config.get()
@@ -239,34 +243,34 @@ export const layer = Layer.effect(
           },
           ...(Flag.OPENCODE_EXPERIMENTAL_SCOUT
             ? {
-                scout: {
-                  name: "scout",
-                  permission: Permission.merge(
-                    defaults,
-                    Permission.fromConfig({
-                      "*": "deny",
-                      grep: "allow",
-                      glob: "allow",
-                      webfetch: "deny",
-                      websearch: "allow",
-                      codesearch: "allow",
-                      read: "allow",
-                      repo_clone: "allow",
-                      repo_overview: "allow",
-                      external_directory: {
-                        ...readonlyExternalDirectory,
-                        [path.join(Global.Path.repos, "*")]: "allow",
-                      },
-                    }),
-                    user,
-                  ),
-                  description: `Docs and dependency-source specialist. Use this when you need to inspect external documentation, clone dependency repositories into the managed cache, and research library implementation details without modifying the user's workspace.`,
-                  prompt: PROMPT_SCOUT,
-                  options: {},
-                  mode: "subagent" as const,
-                  native: true,
-                },
-              }
+              scout: {
+                name: "scout",
+                permission: Permission.merge(
+                  defaults,
+                  Permission.fromConfig({
+                    "*": "deny",
+                    grep: "allow",
+                    glob: "allow",
+                    webfetch: "deny",
+                    websearch: "allow",
+                    codesearch: "allow",
+                    read: "allow",
+                    repo_clone: "allow",
+                    repo_overview: "allow",
+                    external_directory: {
+                      ...readonlyExternalDirectory,
+                      [path.join(Global.Path.repos, "*")]: "allow",
+                    },
+                  }),
+                  user,
+                ),
+                description: `Docs and dependency-source specialist. Use this when you need to inspect external documentation, clone dependency repositories into the managed cache, and research library implementation details without modifying the user's workspace.`,
+                prompt: PROMPT_SCOUT,
+                options: {},
+                mode: "subagent" as const,
+                native: true,
+              },
+            }
             : {}),
           compaction: {
             name: "compaction",
@@ -398,11 +402,11 @@ export const layer = Layer.effect(
                 Permission.fromConfig(
                   localPath
                     ? {
-                        external_directory: {
-                          [localPath]: "allow",
-                          [path.join(localPath, "*")]: "allow",
-                        },
-                      }
+                      external_directory: {
+                        [localPath]: "allow",
+                        [path.join(localPath, "*")]: "allow",
+                      },
+                    }
                     : {},
                 ),
               ),
@@ -482,6 +486,14 @@ export const layer = Layer.effect(
       defaultAgent: Effect.fn("Agent.defaultAgent")(function* () {
         return yield* InstanceState.useEffect(state, (s) => s.defaultAgent())
       }),
+      // test-workbench_change start - reload:失效实例级 state,下一次访问按当前 config 重建。
+      // agent/*.md 是在 config 加载时合并进 Config 的(config.ts ConfigAgent.load),
+      // 必须先失效 Config 实例缓存,否则重建拿到的仍是旧合并结果(文件不会重扫)。
+      reload: Effect.fn("Agent.reload")(function* () {
+        yield* config.invalidateInstance()
+        yield* InstanceState.invalidate(state)
+      }),
+      // test-workbench_change end
       // testagent_change start - override methods
       getSessionOverride: Effect.fn("Agent.getSessionOverride")(function* (sessionID: string) {
         return overrideMap.get(sessionID)
@@ -542,11 +554,11 @@ export const layer = Layer.effect(
             ...(isOpenaiOauth
               ? []
               : system.map(
-                  (item): ModelMessage => ({
-                    role: "system",
-                    content: item,
-                  }),
-                )),
+                (item): ModelMessage => ({
+                  role: "system",
+                  content: item,
+                }),
+              )),
             {
               role: "user",
               content: `Create an agent configuration based on this request: "${input.description}".\n\nIMPORTANT: The following identifiers already exist and must NOT be used: ${existing.map((i) => i.name).join(", ")}\n  Return ONLY the JSON object, no other text, do not wrap in backticks`,
@@ -568,7 +580,7 @@ export const layer = Layer.effect(
                 instructions: system.join("\n"),
                 store: false,
               }),
-              onError: () => {},
+              onError: () => { },
             })
             for await (const part of result.fullStream) {
               if (part.type === "error") throw part.error
