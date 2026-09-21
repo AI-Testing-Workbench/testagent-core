@@ -70,6 +70,8 @@ export function DialogModel(props: { providerID?: string }) {
           entries(),
           filter(([_, info]) => info.status !== "deprecated"),
           filter(([_, info]) => (props.providerID ? info.providerID === props.providerID : true)),
+          // testagent_change: Filter out specific model
+          filter(([model]) => !(provider.id === "test-llm" && model === "Economy")),
           map(([model, info]) => ({
             value: { providerID: provider.id, modelID: model },
             title: info.name ?? model,
