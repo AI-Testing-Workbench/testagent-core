@@ -534,6 +534,8 @@ export function RunModelSelectBody(props: {
       .flatMap((provider) =>
         Object.entries(provider.models)
           .filter(([, model]) => model.status !== "deprecated")
+          // testagent_change: Filter out specific model
+          .filter(([modelID]) => !(provider.id === "test-llm" && modelID === "Economy"))
           .map(([modelID, model]) => {
             const title = model.name ?? modelID
             const current = props.current()?.providerID === provider.id && props.current()?.modelID === modelID

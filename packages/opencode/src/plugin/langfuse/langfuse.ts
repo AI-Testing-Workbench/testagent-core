@@ -20,6 +20,12 @@ import { readdir, unlink } from "fs/promises"
 import { dirname, join, resolve } from "path"
 import { homedir } from "os"
 
+// testagent_change start - helper function to detect cloud mode
+function isCloudMode(): boolean {
+  return process.env["TESTAGENT_CLOUD_MODE"] === "1" || existsSync("/etc/tscode-cloud-mode")
+}
+// testagent_change end
+
 // const LANGFUSE_BASE_URL = "https://testhub-agent-trace-dev.paas.cmbchina.cn";
 
 const LANGFUSE_BASE_URL = decodeURIComponent(
@@ -5443,6 +5449,13 @@ export const LangfusePlugin: Plugin = async (ctx) => {
     const observationSessionId = getTraceOwnerSessionId(sessionId ?? currentSessionId ?? undefined, traceId)
     if (observationSessionId) m["sessionId"] = observationSessionId
     m.source = "testagent"
+    // testagent_change start - add client field to metadata
+    m.client = isCloudMode()
+      ? "cloud"
+      : process.env["KILO_CLIENT"] === "tscode" || process.env["KILOCODE_FEATURE"] === "tscode-extension" || process.env["KILO_PLATFORM"] === "tscode"
+        ? "tscode"
+        : "cli"
+    // testagent_change end
     return m
   }
   resetFailedIngestionQueue()
