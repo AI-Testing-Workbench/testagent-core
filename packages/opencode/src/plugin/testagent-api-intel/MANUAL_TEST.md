@@ -1,5 +1,12 @@
 # api_intel 手动测试指南
 
+> ⚠️ **apicol（API 协作平台）暂未完成，已临时下线**。本指南全部是 apicol 的端到端
+> 验证流程，随之暂停：`script/apicol-invoke.ts` 现在是打印下线提示并退出的 stub，
+> 原脚本体注释保留。恢复 apicol 时（见 `routes.ts` / `index.ts` 的「apicol 恢复」
+> 注释块、以及 `script/apicol-invoke.ts` 的块注释）取消注释后，本指南即可重新使用。
+>
+> FA 平台当前仅支持 in-process 单测：`bun test test/plugin/testagent-api-intel/`。
+
 目标：在不构建单文件二进制、不安装 VSIX 的情况下，端到端验证 `api_intel` 工具的真实四端点链路。
 
 ## 1. 环境

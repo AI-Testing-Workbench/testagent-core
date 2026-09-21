@@ -3,11 +3,22 @@
 // which is the fastest way to validate behavior end-to-end against the local
 // apicol mock.
 //
-// Usage:
+// ⚠️ apicol（API 协作平台）暂未完成，已【临时下线】。本脚本是 apicol 的调试
+// 工具，随之暂停：下方整段脚本体注释保留，恢复 apicol 时（见 routes.ts /
+// index.ts 的「apicol 恢复」注释块）删除上方 stub、取消下方注释即可重新使用。
+//
+// Usage（恢复后）：
 //   APICOL_BASE_URL=http://127.0.0.1:9999 \
 //   TESTAGENT_USER_ID=u-debug TESTAGENT_SAP_ID=80249496 \
 //     bun script/apicol-invoke.ts scan --systemId LT37.01 --keyword demo
 //   ... fetch --appId 1279 --refs users_create --refs "POST /api/users"
+
+console.error(
+  "apicol 平台已临时下线（暂未完成），apicol-invoke.ts 暂停使用。恢复 apicol 后取消下方注释即可。",
+)
+process.exit(3)
+
+/* ── apicol 恢复：取消下方注释，并删除上方 stub ──────────────────────────────
 
 import { executeAction } from "../src/plugin/testagent-api-intel/routes"
 import { User } from "../src/testagent/user"
@@ -81,3 +92,4 @@ try {
   console.error("invoke failed:", msg)
   process.exit(1)
 }
+*/
