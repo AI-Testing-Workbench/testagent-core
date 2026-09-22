@@ -119,6 +119,22 @@ export const testagentHandlers = HttpApiBuilder.group(RootHttpApi, "testagent", 
       return true
     })
 
+    // testagent_change start - 启动时补齐远程接口变量（缺失才拉取），登出时清理
+    const envVarRemoteEnsure = Effect.fn("TestagentHttpApi.envVarRemoteEnsure")(function* () {
+      const { EnvVars } = yield* Effect.promise(() => import("@/testagent/env-vars"))
+      const result = yield* Effect.promise(() => EnvVars.ensureRemote())
+      log.info("Ensured remote env vars", result)
+      return result
+    })
+
+    const envVarRemoteClear = Effect.fn("TestagentHttpApi.envVarRemoteClear")(function* () {
+      const { EnvVars } = yield* Effect.promise(() => import("@/testagent/env-vars"))
+      yield* Effect.promise(() => EnvVars.clearRemote())
+      log.info("Cleared remote env vars")
+      return true
+    })
+    // testagent_change end
+
     // testagent_change start - zh-answer toggle endpoint（按钮仅运行时切换，不写环境变量）
     const zhAnswerSet = Effect.fn("TestagentHttpApi.zhAnswerSet")(function* (ctx: {
       payload: typeof ZhAnswerTogglePayload.Type
@@ -168,6 +184,8 @@ export const testagentHandlers = HttpApiBuilder.group(RootHttpApi, "testagent", 
       .handle("customEnvVarBatchCreate", customEnvVarBatchCreate)
       .handle("customEnvVarBatchUpdate", customEnvVarBatchUpdate)
       .handle("customEnvVarBatchDelete", customEnvVarBatchDelete)
+      .handle("envVarRemoteEnsure", envVarRemoteEnsure) // testagent_change
+      .handle("envVarRemoteClear", envVarRemoteClear) // testagent_change
       .handle("zhAnswerSet", zhAnswerSet) // testagent_change
       .handle("agentOverrideSet", agentOverrideSet) // testagent_change
       .handle("agentOverrideClear", agentOverrideClear) // testagent_change

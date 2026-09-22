@@ -588,9 +588,6 @@
                           "value": {
                             "type": "string",
                             "minLength": 1
-                          },
-                          "description": {
-                            "type": "string"
                           }
                         },
                         "required": ["key", "value"],
@@ -609,9 +606,24 @@
                           "value": {
                             "type": "string",
                             "minLength": 1
+                          }
+                        },
+                        "required": ["key", "value"],
+                        "additionalProperties": false
+                      }
+                    },
+                    "remote": {
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "object",
+                        "properties": {
+                          "key": {
+                            "type": "string",
+                            "pattern": "^[a-zA-Z_][a-zA-Z0-9_]*$"
                           },
-                          "description": {
-                            "type": "string"
+                          "value": {
+                            "type": "string",
+                            "minLength": 1
                           }
                         },
                         "required": ["key", "value"],
@@ -619,7 +631,7 @@
                       }
                     }
                   },
-                  "required": ["system", "custom"],
+                  "required": ["system", "custom", "remote"],
                   "additionalProperties": false,
                   "description": "按来源分组的环境变量列表"
                 }
@@ -699,9 +711,6 @@
                           "value": {
                             "type": "string",
                             "minLength": 1
-                          },
-                          "description": {
-                            "type": "string"
                           }
                         },
                         "required": ["key", "value"],
@@ -720,9 +729,24 @@
                           "value": {
                             "type": "string",
                             "minLength": 1
+                          }
+                        },
+                        "required": ["key", "value"],
+                        "additionalProperties": false
+                      }
+                    },
+                    "remote": {
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "object",
+                        "properties": {
+                          "key": {
+                            "type": "string",
+                            "pattern": "^[a-zA-Z_][a-zA-Z0-9_]*$"
                           },
-                          "description": {
-                            "type": "string"
+                          "value": {
+                            "type": "string",
+                            "minLength": 1
                           }
                         },
                         "required": ["key", "value"],
@@ -730,7 +754,7 @@
                       }
                     }
                   },
-                  "required": ["system", "custom"],
+                  "required": ["system", "custom", "remote"],
                   "additionalProperties": false,
                   "description": "按来源分组的查询结果"
                 }
@@ -863,9 +887,6 @@
                     },
                     "value": {
                       "type": "string"
-                    },
-                    "description": {
-                      "type": "string"
                     }
                   },
                   "required": ["key", "value"],
@@ -963,9 +984,6 @@
                     },
                     "value": {
                       "type": "string"
-                    },
-                    "description": {
-                      "type": "string"
                     }
                   },
                   "required": ["key", "value"],
@@ -1035,6 +1053,329 @@
           {
             "lang": "js",
             "source": "import { createOpencodeClient } from \"@opencode-ai/sdk\n\nconst client = createOpencodeClient()\nawait client.testagent.customEnvVars.batchDelete({\n  ...\n})"
+          }
+        ]
+      }
+    },
+    "/testagent/env-vars/remote/ensure": {
+      "post": {
+        "tags": ["testagent"],
+        "operationId": "testagent.envVars.ensureRemote",
+        "parameters": [
+          {
+            "name": "directory",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "远程接口变量补齐结果",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "created": {
+                      "type": "boolean"
+                    },
+                    "keys": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  },
+                  "required": ["created", "keys"],
+                  "additionalProperties": false,
+                  "description": "远程接口变量补齐结果"
+                }
+              }
+            }
+          }
+        },
+        "description": "If no TESTAGENT-prefixed variable exists yet, fetch them from the remote interface and persist them. Existing values are kept as-is.",
+        "summary": "Ensure remote environment variables exist",
+        "x-codeSamples": [
+          {
+            "lang": "js",
+            "source": "import { createOpencodeClient } from \"@opencode-ai/sdk\n\nconst client = createOpencodeClient()\nawait client.testagent.envVars.ensureRemote({\n  ...\n})"
+          }
+        ]
+      }
+    },
+    "/testagent/env-vars/remote": {
+      "delete": {
+        "tags": ["testagent"],
+        "operationId": "testagent.envVars.clearRemote",
+        "parameters": [
+          {
+            "name": "directory",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "远程接口变量清理成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "boolean",
+                  "description": "远程接口变量清理成功"
+                }
+              }
+            }
+          }
+        },
+        "description": "Remove interface-fetched environment variables from storage and from the running process environment. Called on logout.",
+        "summary": "Clear remote environment variables",
+        "x-codeSamples": [
+          {
+            "lang": "js",
+            "source": "import { createOpencodeClient } from \"@opencode-ai/sdk\n\nconst client = createOpencodeClient()\nawait client.testagent.envVars.clearRemote({\n  ...\n})"
+          }
+        ]
+      }
+    },
+    "/testagent/zh-answer": {
+      "post": {
+        "tags": ["testagent"],
+        "operationId": "testagent.zhAnswer.set",
+        "parameters": [
+          {
+            "name": "directory",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "ZH answer toggle set successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "boolean",
+                  "description": "ZH answer toggle set successfully"
+                }
+              }
+            }
+          }
+        },
+        "description": "Enable or disable bridging of permission/question asks to enterprise ZH via relay.",
+        "summary": "Toggle ZH answer bridging",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "enabled": {
+                    "type": "boolean"
+                  }
+                },
+                "required": ["enabled"],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "js",
+            "source": "import { createOpencodeClient } from \"@opencode-ai/sdk\n\nconst client = createOpencodeClient()\nawait client.testagent.zhAnswer.set({\n  ...\n})"
+          }
+        ]
+      }
+    },
+    "/testagent/agent/override": {
+      "post": {
+        "tags": ["testagent"],
+        "operationId": "testagent.agent.override.set",
+        "parameters": [
+          {
+            "name": "directory",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Override set successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "applied": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": ["applied"],
+                  "additionalProperties": false,
+                  "description": "Override set successfully"
+                }
+              }
+            }
+          }
+        },
+        "description": "Override the prompt and/or permission rules of the sdt subagent for the given session.",
+        "summary": "Set per-stage subagent override for a session",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "sessionID": {
+                    "type": "string"
+                  },
+                  "prompt": {
+                    "type": "string"
+                  },
+                  "permission": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "permission": {
+                          "type": "string"
+                        },
+                        "pattern": {
+                          "type": "string"
+                        },
+                        "action": {
+                          "type": "string",
+                          "enum": ["allow", "deny", "ask"]
+                        }
+                      },
+                      "required": ["permission", "pattern", "action"],
+                      "additionalProperties": false
+                    }
+                  },
+                  "temperature": {
+                    "type": "number"
+                  },
+                  "topP": {
+                    "type": "number"
+                  },
+                  "steps": {
+                    "type": "number"
+                  }
+                },
+                "required": ["sessionID"],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "js",
+            "source": "import { createOpencodeClient } from \"@opencode-ai/sdk\n\nconst client = createOpencodeClient()\nawait client.testagent.agent.override.set({\n  ...\n})"
+          }
+        ]
+      },
+      "delete": {
+        "tags": ["testagent"],
+        "operationId": "testagent.agent.override.clear",
+        "parameters": [
+          {
+            "name": "directory",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Override cleared successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "boolean",
+                  "description": "Override cleared successfully"
+                }
+              }
+            }
+          }
+        },
+        "description": "Remove the transient override for the given session, restoring default sdt behavior.",
+        "summary": "Clear per-stage subagent override for a session",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "sessionID": {
+                    "type": "string"
+                  }
+                },
+                "required": ["sessionID"],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "js",
+            "source": "import { createOpencodeClient } from \"@opencode-ai/sdk\n\nconst client = createOpencodeClient()\nawait client.testagent.agent.override.clear({\n  ...\n})"
           }
         ]
       }
@@ -12133,6 +12474,9 @@
           },
           "tail_start_id": {
             "type": "string"
+          },
+          "clear_context": {
+            "type": "boolean"
           }
         },
         "required": ["id", "sessionID", "messageID", "type", "auto"],

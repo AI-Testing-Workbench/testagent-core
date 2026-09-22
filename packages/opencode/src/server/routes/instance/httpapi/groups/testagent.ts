@@ -38,6 +38,7 @@ export const EnvVarItem = Schema.Struct({
 export const EnvVarGroups = Schema.Struct({
   system: Schema.Record(Schema.String, EnvVarItem),
   custom: Schema.Record(Schema.String, EnvVarItem),
+  remote: Schema.Record(Schema.String, EnvVarItem),
 })
 
 // testagent_change start
@@ -79,6 +80,13 @@ export const EnvVarBatchResponse = Schema.Struct({
 })
 // testagent_change end
 
+// testagent_change start
+const EnvVarRemoteEnsureResult = Schema.Struct({
+  created: Schema.Boolean,
+  keys: Schema.Array(Schema.String),
+})
+// testagent_change end
+
 // testagent_change start - per-stage subagent override payloads
 export const AgentOverrideRule = Schema.Struct({
   permission: Schema.String,
@@ -111,6 +119,8 @@ export const TestagentPaths = {
   envVarsCustomCreate: "/testagent/env-vars/custom",
   envVarsCustomUpdate: "/testagent/env-vars/custom",
   envVarsCustomDelete: "/testagent/env-vars/custom",
+  envVarsRemoteEnsure: "/testagent/env-vars/remote/ensure", // testagent_change - 启动时补齐远程接口变量
+  envVarsRemoteClear: "/testagent/env-vars/remote", // testagent_change - 登出时清理远程接口变量
   zhAnswerSet: "/testagent/zh-answer", // testagent_change
   agentOverrideSet: "/testagent/agent/override",
   agentOverrideClear: "/testagent/agent/override",
@@ -191,6 +201,32 @@ export const TestagentApi = HttpApi.make("testagent").add(
         }),
       ),
     )
+    // testagent_change start - remote (interface-fetched) env vars bootstrap / cleanup
+    .add(
+      HttpApiEndpoint.post("envVarRemoteEnsure", TestagentPaths.envVarsRemoteEnsure, {
+        success: described(EnvVarRemoteEnsureResult, "远程接口变量补齐结果"),
+      }).annotateMerge(
+        OpenApi.annotations({
+          identifier: "testagent.envVars.ensureRemote",
+          summary: "Ensure remote environment variables exist",
+          description:
+            "If no TESTAGENT-prefixed variable exists yet, fetch them from the remote interface and persist them. Existing values are kept as-is.",
+        }),
+      ),
+    )
+    .add(
+      HttpApiEndpoint.delete("envVarRemoteClear", TestagentPaths.envVarsRemoteClear, {
+        success: described(Schema.Boolean, "远程接口变量清理成功"),
+      }).annotateMerge(
+        OpenApi.annotations({
+          identifier: "testagent.envVars.clearRemote",
+          summary: "Clear remote environment variables",
+          description:
+            "Remove interface-fetched environment variables from storage and from the running process environment. Called on logout.",
+        }),
+      ),
+    )
+    // testagent_change end
     .add(
       HttpApiEndpoint.post("zhAnswerSet", TestagentPaths.zhAnswerSet, {
         payload: ZhAnswerTogglePayload,
