@@ -1380,6 +1380,124 @@
         ]
       }
     },
+    "/testagent/yolo": {
+      "put": {
+        "tags": ["testagent"],
+        "operationId": "testagent.yolo.set",
+        "parameters": [
+          {
+            "name": "directory",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "YOLO mode set successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "applied": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": ["applied"],
+                  "additionalProperties": false,
+                  "description": "YOLO mode set successfully"
+                }
+              }
+            }
+          }
+        },
+        "description": "Enable or disable YOLO mode globally. When enabled, all sessions run unattended: every permission rule (including deny) is bypassed and the question tool becomes unavailable, mirroring cline's yolo mode. State resets on server restart.",
+        "summary": "Toggle YOLO mode (global)",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "enabled": {
+                    "type": "boolean"
+                  }
+                },
+                "required": ["enabled"],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "x-codeSamples": [
+          {
+            "lang": "js",
+            "source": "import { createOpencodeClient } from \"@opencode-ai/sdk\n\nconst client = createOpencodeClient()\nawait client.testagent.yolo.set({\n  ...\n})"
+          }
+        ]
+      },
+      "get": {
+        "tags": ["testagent"],
+        "operationId": "testagent.yolo.get",
+        "parameters": [
+          {
+            "name": "directory",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current YOLO mode",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "enabled": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": ["enabled"],
+                  "additionalProperties": false,
+                  "description": "Current YOLO mode"
+                }
+              }
+            }
+          }
+        },
+        "description": "Query whether YOLO mode is currently enabled.",
+        "summary": "Get YOLO mode (global)",
+        "x-codeSamples": [
+          {
+            "lang": "js",
+            "source": "import { createOpencodeClient } from \"@opencode-ai/sdk\n\nconst client = createOpencodeClient()\nawait client.testagent.yolo.get({\n  ...\n})"
+          }
+        ]
+      }
+    },
     "/event": {
       "get": {
         "tags": ["event"],
@@ -8242,6 +8360,149 @@
           {
             "lang": "js",
             "source": "import { createOpencodeClient } from \"@opencode-ai/sdk\n\nconst client = createOpencodeClient()\nawait client.session.clearContext({\n  ...\n})"
+          }
+        ]
+      }
+    },
+    "/session/{sessionID}/context-extract": {
+      "get": {
+        "tags": ["session"],
+        "operationId": "session.contextExtract",
+        "parameters": [
+          {
+            "name": "directory",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "sessionID",
+            "in": "path",
+            "schema": {
+              "type": "string",
+              "pattern": "^ses.*"
+            },
+            "required": true
+          },
+          {
+            "name": "reasoning",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": ["true", "false"]
+            },
+            "required": false
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Extracted context blocks (main + subagent)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "scope": {
+                        "type": "string",
+                        "enum": ["main", "subagent"]
+                      },
+                      "sessionID": {
+                        "type": "string"
+                      },
+                      "agent": {
+                        "type": "string"
+                      },
+                      "title": {
+                        "type": "string"
+                      },
+                      "entries": {
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "properties": {
+                            "role": {
+                              "type": "string",
+                              "enum": ["user", "assistant"]
+                            },
+                            "type": {
+                              "type": "string",
+                              "enum": ["text", "reasoning", "question"]
+                            },
+                            "text": {
+                              "type": "string"
+                            },
+                            "state": {
+                              "type": "object",
+                              "properties": {
+                                "questions": {
+                                  "type": "array"
+                                },
+                                "answers": {
+                                  "type": "array",
+                                  "items": {
+                                    "type": "array",
+                                    "items": {
+                                      "type": "string"
+                                    }
+                                  }
+                                }
+                              },
+                              "required": ["questions", "answers"],
+                              "additionalProperties": false
+                            }
+                          },
+                          "required": ["role", "type"],
+                          "additionalProperties": false
+                        }
+                      }
+                    },
+                    "required": ["scope", "entries"],
+                    "additionalProperties": false
+                  },
+                  "description": "Extracted context blocks (main + subagent)"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BadRequestError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "NotFoundError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotFoundError"
+                }
+              }
+            }
+          }
+        },
+        "description": "Return a lightweight projection of the active context (messages after the last compaction), split into blocks by session: the main session first, then one layer of direct subagent sessions. Keeps only user/assistant text, optional assistant reasoning, and question-tool Q&A; drops base64/diffs/tool outputs. Provided specifically for testflow to analyze user behavior without large payloads.",
+        "summary": "Extract session context (for testflow)",
+        "x-codeSamples": [
+          {
+            "lang": "js",
+            "source": "import { createOpencodeClient } from \"@opencode-ai/sdk\n\nconst client = createOpencodeClient()\nawait client.session.contextExtract({\n  ...\n})"
           }
         ]
       }

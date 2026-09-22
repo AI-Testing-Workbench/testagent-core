@@ -214,9 +214,21 @@ export const layer: Layer.Layer<Service, never, AppFileSystem.Service> = Layer.e
         catch: (error) => error,
       })) as { data?: Array<{ id: string; owned_by?: string; limit?: { context: number; output?: number } }> }
 
+      // testagent_change start - ensure Economy model exists
+      const data = json.data ?? []
+      const hasEconomy = data.some((item) => item.id === "Economy")
+      if (!hasEconomy) {
+        data.push({
+          id: "Economy",
+          owned_by: "openai",
+          limit: { context: 16000 },
+        })
+      }
+      // testagent_change end
+
       const result: Record<string, Model> = {}
 
-      for (const item of json.data ?? []) {
+      for (const item of data) {
         if (!item.id) continue
         result[item.id] = {
           id: item.id,

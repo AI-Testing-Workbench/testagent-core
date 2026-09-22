@@ -1,6 +1,6 @@
 import { MEMORY_TYPES } from "./memory.js";
 import { readIndex, readPersonalMemory, truncateEntrypoint } from "./memory.js";
-import { getMemoryDir, getSkillsDir, PERSONA_NAME, ENTRYPOINT_NAME, MAX_ENTRYPOINT_LINES, getProjectDir, getGlobalSkillsDir } from "./paths.js";
+import { getMemoryDir, getSkillsDir, PERSONA_NAME, ENTRYPOINT_NAME, MAX_ENTRYPOINT_LINES, getGlobalSkillsDir } from "./paths.js";
 // Port of Claude Code's MEMORY_FRONTMATTER_EXAMPLE from memoryTypes.ts
 const FRONTMATTER_EXAMPLE = [
     "```markdown",
@@ -12,188 +12,181 @@ const FRONTMATTER_EXAMPLE = [
     "",
     "{{memory content — for feedback/project types, structure as: rule/fact, then **Why:** and **How to apply:** lines}}",
     "```",
-];
+].join("\n");
 // Port of Claude Code's TYPES_SECTION_INDIVIDUAL from memoryTypes.ts
 const TYPES_SECTION = [
     "## 记忆类型",
     "",
-    "你的内存系统中可以存储几种离散的内存类型：",
+    "记忆系统可存储四种离散类型：",
     "",
     "<types>",
     "<type>",
     "    <name>user</name>",
-    "    <description>包含用户角色、目标、职责和知识的相关信息。通过阅读和记录这些记忆，您的目标是逐步建立对用户身份的理解，并明确如何才能为其提供最有效的帮助。请谨记，这里的核心目标是为用户提供帮助。避免记录可能被视为负面判断或与您共同完成的工作无关的用户信息</description>",
-    "    <when_to_save>用户提及他的角色、目标、职责和知识的相关信息</when_to_save>",
-    "    <how_to_use>当您的工作需要依据用户的个人资料或视角进行调整时。</how_to_use>",
+    "    <description>用户角色、目标、职责与知识，用于理解用户身份并提供更有效帮助；避免记录负面判断或与协作无关的个人信息。</description>",
+    "    <when_to_save>用户提及角色、目标、职责或知识时。</when_to_save>",
+    "    <how_to_use>工作需依据用户资料或视角调整时。</how_to_use>",
     "</type>",
     "<type>",
     "    <name>feedback</name>",
-    "    <description>用户向您说明如何开展工作——包括需要避免的事项和应持续执行的事项。这些记忆是极其重要，能帮助您保持工作方式的一致性，并对项目中应采取的方法保持响应性。请同时记录失败和成功案例：如果只保存纠正措施，您将避免过去的错误，但可能会偏离用户已验证的有效方法。</description>",
-    "    <when_to_save>每当用户纠正（如“不，不是那个”“不要”“停止做X”）或确认某种非显而易见的无法从代码中直接推断的方案有效（如“是的，就是这样”“完美，继续这样做”“接受了一个非常规选择而未提出异议”）时记录这些信息。</when_to_save>",
-    "    <how_to_use>让这些记忆引导你的行为，以便用户无需重复提供相同的指导。</how_to_use>",
-    "    <body_structure>Rule： 以规则本身开头，然后是**Why:**：（用户给出的理由——通常是过去的事件或强烈偏好），以及 **How to apply:**：（何时/何地该指导原则生效）。了解原因能让您在边缘情况下做出判断，而非盲目遵循规则。</body_structure>",
+    "    <description>如何开展工作的指示：需避免与应坚持的事项；纠正与成功案例都要记，避免只记纠正而丢失已验证有效的方法。</description>",
+    "    <when_to_save>用户纠正（“不是那个”“停止做X”）或确认非常规但有效的做法（“继续这样做”）时。</when_to_save>",
+    "    <how_to_use>据此引导行为，让用户无需重复指导。</how_to_use>",
+    "    <body_structure>规则 + **Why:**（用户给出的理由）+ **How to apply:**（何时生效）。理解原因才能在边界情形下判断而非盲从。</body_structure>",
     "</type>",
     "<type>",
     "    <name>project</name>",
-    "    <description>记录关于项目中正在进行的工作、目标、计划、错误或事件的信息，这些信息无法通过代码或 Git 历史推导得出。项目记忆帮助您理解用户在当前工作目录中操作的更广泛背景和动机。</description>",
-    "    <when_to_save>当了解“谁在做什么、为什么做、何时完成”时，需要保存这些信息。这些状态变化较快，因此需保持对这些信息的更新。保存时，始终将用户消息中的相对日期转换为绝对日期（例如，“星期四”→“2026-03-05”），以确保记忆在时间推移后仍可被解读。</when_to_save>",
-    "    <how_to_use>通过这些记忆，更全面地理解用户请求的细节和细微差别，并提出更合理的建议。</how_to_use>",
-    "    <body_structure>以事实或决策开头，然后添加**Why:**:（动机——通常涉及约束条件、截止日期或利益相关者的诉求）和**How to apply:**:（这应如何影响您的建议）。由于项目记忆容易过时，因此 Why 部分有助于未来的您判断该记忆是否仍然具有参考价值。</body_structure>",
+    "    <description>正在进行的工作与无法从代码/Git 推导的背景信息，用于理解上下文与动机。</description>",
+    "    <when_to_save>需要记录“谁在做什么、为什么、何时完成”时；状态变化快需持续更新，相对日期转绝对日期（“星期四”→“2026-03-05”）。</when_to_save>",
+    "    <how_to_use>更全面理解请求细节，提出更合理的建议。</how_to_use>",
+    "    <body_structure>事实/决策 + **Why:**（动机：约束、截止日期、干系人）+ **How to apply:**（如何影响建议）。Why 有助于判断该记忆是否仍有参考价值。</body_structure>",
     "</type>",
     "<type>",
     "    <name>reference</name>",
-    "    <description>存储指向外部系统中信息位置的索引。这些记忆帮助您记住在哪里查找项目目录外的最新信息。</description>",
-    "    <when_to_save>当您了解到外部系统的资源及其用途时保存。例如在招乎文档中查找知识库</when_to_save>",
-    "    <how_to_use>当用户引用外部系统或可能存储在外部系统中的信息时使用这些记忆</how_to_use>",
+    "    <description>外部系统信息位置的索引，用于记住在哪里查找项目目录之外的最新信息。</description>",
+    "    <when_to_save>了解到外部系统资源及其用途时。</when_to_save>",
+    "    <how_to_use>用户引用外部系统或其中信息时。</how_to_use>",
     "</type>",
     "</types>",
-    "",
 ].join("\n");
-// const WHAT_NOT_TO_SAVE = [
-//   "## 切勿保存的内容",
-//   "",
-//   "- 已经在skill中沉淀的规则，方法，流程,对比skill目录\`${skillsDir}\`下每个skill文件的SKILL.md",
-//   "- 代码模式、规范、架构、文件路径或项目结构——这些都可以通过阅读当前项目的状态来推导出。",
-//   "- Git 历史、近期更改或修改记录：git log / git blame 才是权威来源。",
-//   "- 调试解决方案或修复方法：修复代码本身已存在；提交信息包含上下文。",
-//   "- AGENT.md 或项目配置文件中已记录的任何内容。",
-//   "- 临时任务详情或当前会话上下文。",
-//   "- 已在先前提取过程中保存过的信息。",
-//   "",
-//   "这些排除项即使在用户明确要求你保存时也适用。如果用户要求你保存 PR 列表或活动摘要，请反问他们：哪些部分**令人惊讶**或**非显而易见**的？——这才是真正值得保存的部分。",
-// ].join("\n")
-// const WHAT_NOT_TO_SAVE = [
-//   "## What NOT to save in memory",
-//   "",
-//   "- Code patterns, conventions, architecture, file paths, or project structure — these can be derived by reading the current project state.",
-//   "- Git history, recent changes, or who-changed-what — `git log` / `git blame` are authoritative.",
-//   "- Debugging solutions or fix recipes — the fix is in the code; the commit message has the context.",
-//   "- Anything already documented in AGENTS.md or project config files.",
-//   "- Ephemeral task details: in-progress work, temporary state, current conversation context.",
-//   "",
-//   "These exclusions apply even when the user explicitly asks you to save. If they ask you to save a PR list or activity summary, ask what was *surprising* or *non-obvious* about it — that is the part worth keeping.",
-// ].join("\n")
-// Port of Claude Code's WHEN_TO_ACCESS_SECTION from memoryTypes.ts
-const WHEN_TO_ACCESS = [
-    "## 何时调用记忆",
-    "- 当记忆内容与当前话题相关，或用户提及了之前对话中处理过的内容时。",
-    "- 当用户明确要求你查看、回忆或记住某事时，**必须**调用记忆。",
-    "- 如果用户要求*忽略*或*不使用*记忆：则视 PERSONA.md 和 MEMORY.md 文件为空。不要应用记忆中的内容、不要引用、不要对比，也不要提及任何记忆内容。",
-    "- 记忆记录可能会随时间失效。使用记忆作为上下文时，需明确这只是某个时间点的状态。在仅依据记忆记录回答用户或建立假设之前，请通过读取文件或资源的当前状态，验证记忆是否仍然准确且最新。如果 recalled 的记忆与当前信息冲突，请相信你现在观察到的事实 —— 并更新或移除失效的记忆，而不是基于它采取行动。",
-].join("\n");
-// Port of Claude Code's TRUSTING_RECALL_SECTION from memoryTypes.ts
-const TRUSTING_RECALL = [
-    "## 在根据记忆给出建议之前",
-    "",
-    "一段提及特定函数、文件或配置项的记忆，仅代表**该内容在被记录时是存在的**。它可能已被重命名、删除，或从未被合并上线。在给出相关建议前：",
-    "",
-    "- 如果记忆中提到了文件路径：先检查该文件是否真实存在。",
-    "- 如果记忆中提到了函数或配置标记：用 grep 搜索确认它是否还在。",
-    "- 如果用户即将根据你的建议执行操作（而不仅仅是询问历史信息）：必须先验证。",
-    "",
-    "「记忆中显示 X 存在」不等于「X 现在仍然存在」。",
-    "",
-    "用于总结仓库状态的记忆（活动日志、架构快照）都是**固定时间点的静态信息**。如果用户询问**近期**或**当前**状态，优先使用 git log 或直接阅读代码，而不是依赖历史快照。",
-].join("\n");
-// Port of Claude Code's buildSearchingPastContextSection() from memdir.ts.
-// Guides the model to grep memory files and session transcripts when
-// looking for past context, rather than guessing or hallucinating.
-function buildSearchingPastContextSection(memoryDir, projectDir) {
-    // const memSearch = `grep -rn "<search term>" ${memoryDir} --include="*.md"`
-    // const transcriptSearch = `grep -rn "<search term>" ${projectDir}/ --include="*.jsonl"`
-    return [
-        "## 记忆工具调用指南",
-        "",
-        "当下方注入的记忆片段不足以回答用户问题时，可主动调用以下工具获取更多信息：",
-        "- **memory_search**：在记忆目录下搜索结构化记忆md文件，适用于回忆用户偏好、历史事件节点、规则等关键信息。",
-        "- **memory_read**：阅读原始记忆文件，适用于查找具体消息原文、时间线、上下文细节；也可用于补充或校验 memory_search 的结果。",
-        "- **grep**：memory_search检索不到有效记忆时，酌情扩大搜索记忆范围。",
-        "### ⚠️ 调用次数限制",
-        "每轮对话中，memory_search 和 grep、glob等记忆搜索 **合计最多调用 3 次**。",
-        "-首次搜索无结果时，可换关键词或换工具重试，但总调用次数不要超过 3 次。",
-        "-若 3 次搜索后仍无结果，说明该信息不在记忆中，请直接根据已有信息回复用户，不要继续搜索。",
-        "",
-    ];
+// 主提示词与自动提取子代理共用的"不要保存"排除项
+const EXCLUDED_MEMORY_BULLETS = [
+    "- 代码模式、规范、架构、文件路径或项目结构 —— 读代码与项目状态即可推导。",
+    "- Git 历史、近期更改或记录 —— 以 `git log` / `git blame` 为准。",
+    "- 调试方案或修复方法 —— 修复已在代码中，提交信息含上下文。",
+    "- AGENTS.md 或项目配置文件已记录的内容。",
+    "- 临时任务详情或当前会话上下文。",
+    "- 先前提取中已保存过的信息。",
+];
+function skillExclusionLine(skillsDir, globalskillsDir) {
+    return `- 已沉淀在 skill 中的规则、方法、流程 —— 对比项目 \`${skillsDir}\` 与全局 \`${globalskillsDir}\` 目录下各 SKILL.md，不要重复保存。`;
 }
 function buildWhatNotTOSaveSection(skillsDir, globalskillsDir = getGlobalSkillsDir()) {
     return [
         "## 切勿保存的内容",
         "",
-        `- 已经在skill中沉淀的规则，方法，流程,对比项目skill目录\`${skillsDir}\`和全局skill目录\`${globalskillsDir}\`下每个skill文件的SKILL.md`,
-        "- 代码模式、规范、架构、文件路径或项目结构——这些都可以通过阅读当前项目的状态来推导出。",
-        "- Git 历史、近期更改或修改记录：git log / git blame 才是权威来源。",
-        "- 调试解决方案或修复方法：修复代码本身已存在；提交信息包含上下文。",
-        "- AGENT.md 或项目配置文件中已记录的任何内容。",
-        "- 临时任务详情或当前会话上下文。",
-        "- 已在先前提取过程中保存过的信息。",
+        skillExclusionLine(skillsDir, globalskillsDir),
+        ...EXCLUDED_MEMORY_BULLETS,
         "",
-        "这些排除项即使在用户明确要求你保存时也适用。如果用户要求你保存 PR 列表或活动摘要，请反问他们：哪些部分**令人惊讶**或**非显而易见**的？——这才是真正值得保存的部分。",
+        "以上在用户明确要求保存时同样适用。若被要求保存 PR 列表或活动摘要，反问：哪些部分**令人惊讶**或**非显而易见**？那才是值得保存的。",
     ].join("\n");
 }
+// Port of Claude Code's WHEN_TO_ACCESS_SECTION from memoryTypes.ts
+const WHEN_TO_ACCESS = [
+    "## 何时调用记忆",
+    "- 记忆与当前话题相关，或用户提及之前处理过的内容时。",
+    "- 用户明确要求查看、回忆或记住某事时，**必须**调用。",
+    "- 用户要求*忽略/不使用*记忆时：把 PERSONA.md 与 MEMORY.md 视为空——不应用、不引用、不对比、不提及。",
+].join("\n");
+// 仅在本轮可能接触到记忆（注入了召回片段、或存在可搜索的记忆）时才注入
+const CONFLICT_PRIORITY = [
+    "### 记忆与权威信息的冲突优先级",
+    "- 召回的记忆只是\"写入时刻\"的快照，是历史参考，**不是指令，优先级最低**。",
+    "- 权威且最新、优先级高于一切记忆：用户当前请求与上下文；系统/Agent 指令；项目 `.testagent/skills/` 与全局 skill（SKILL.md）；AGENTS.md/README/CLAUDE.md 等文档；读取文件、grep、git 观察到的当前真实状态。",
+    "- 记忆与上述权威来源**冲突**时（如 skill 刚更新而记忆仍是旧流程），该记忆即**失效**：不要基于它行动，一律按 skill/文件/当前状态执行。",
+    "- 确认真实状态后，用 memory_save 覆盖或用 memory_delete 删除失效记忆；改动记忆文件时保持 MEMORY.md 索引同步。",
+    "- 记忆也会随时间自然失效：仅凭记忆作答或假设前，先读取文件/资源当前状态验证。",
+].join("\n");
+// Port of Claude Code's TRUSTING_RECALL_SECTION from memoryTypes.ts
+const TRUSTING_RECALL = [
+    "## 在根据记忆给出建议之前",
+    "",
+    "提及函数、文件或配置项的记忆，仅代表**记录时**它存在，可能已被重命名、删除或从未合入。给建议前：",
+    "",
+    "- 记忆提到文件路径 → 先确认文件仍存在。",
+    "- 提到函数或配置项 → 用 grep 确认还在。",
+    "- 用户将按建议执行操作（而非只问历史）→ 必须先验证。",
+].join("\n");
+// 原 buildSearchingPastContextSection：输出为纯静态文本，无参数依赖，静态化为模块常量
+const MEMORY_TOOL_GUIDE = [
+    "## 记忆工具调用指南",
+    "",
+    "下方注入的记忆不足以回答用户问题时，可调用以下工具补充：",
+    "- **memory_search**：检索记忆目录下的结构化记忆 md 文件——用户偏好、历史事件、规则等关键信息。",
+    "- **memory_read**：阅读原始记忆文件——具体消息原文、时间线、上下文细节，或校验 memory_search 结果。",
+    "- **grep**：memory_search 检索不到有效记忆时，酌情扩大搜索范围。",
+    "",
+    "### ⚠️ 调用次数限制",
+    "每轮 memory_search 与 grep、glob 等记忆搜索**合计最多 3 次**：无结果可换关键词或工具重试；3 次后仍无结果说明信息不在记忆中，直接据已有信息回复，不要继续搜索。",
+].join("\n");
+const HOW_TO_SAVE = [
+    "## 如何保存记忆",
+    "",
+    "保存分两步：",
+    "",
+    `**Step 1** — 把记忆写入独立文件（文件名以类型开头，如 \`user_role.md\`），使用以下 frontmatter：`,
+    "",
+    FRONTMATTER_EXAMPLE,
+    "",
+    `**Step 2** — 在 \`${ENTRYPOINT_NAME}\` 中添加索引行：\`- [标题](file.md) — 一行简短摘要\`（每行不超过 150 字）。\`${ENTRYPOINT_NAME}\` 是索引文件，无 frontmatter，不要把记忆直接写进去。`,
+    "",
+    `\`${ENTRYPOINT_NAME}\` 超过 ${MAX_ENTRYPOINT_LINES} 行会被截断，保持索引简洁。`,
+    "",
+    "维护纪律：`name`/`description`/`type` 与内容同步；按语义主题而非时间组织；内容错误或过时时更新或删除；写入前先检查是否有可更新的旧记忆；用用户的语言记录。",
+].join("\n");
+// 保存/更新记忆的意图线索：命中即注入保存指南（误命中只是多注入，退回全量行为，无副作用）
+const SAVE_INTENT_PATTERNS = [
+    // 显式保存意图
+    "记住", "记一下", "记下", "记着", "保存", "存一下", "存到", "记录一下", "写入记忆", "加入记忆", "别忘", "不要忘",
+    // 面向未来的偏好与纠正（feedback 类型最典型的触发场景）
+    "以后", "今后", "下次", "从现在起", "默认", "总是", "每次都", "不要", "别再", "停止", "改成", "换成", "禁止",
+    // 记忆相关表述
+    "记忆", "memory",
+    // 英文
+    "remember", "save this", "don't forget", "from now on", "always", "never", "prefer", "stop doing",
+];
+/**
+ * 判断本轮是否需要注入保存指南。
+ * - hasRecalled：已注入召回记忆时，可能需要用 memory_save/memory_delete 处理失效记忆
+ * - query：用户表达保存、偏好或纠正意图时
+ */
+export function shouldIncludeSaveGuide(query, hasRecalled) {
+    if (hasRecalled)
+        return true;
+    if (!query)
+        return false;
+    const q = query.toLowerCase();
+    return SAVE_INTENT_PATTERNS.some((p) => q.includes(p.toLowerCase()));
+}
 export function buildMemorySystemPrompt(worktree, recalledMemoriesSection, isLoadSystemPrompt, options = {}) {
-    let lines = [];
+    const lines = [];
     if (!isLoadSystemPrompt) {
         const memoryDir = getMemoryDir(worktree);
-        const projectDir = getProjectDir(worktree);
         const skillsDir = getSkillsDir(worktree);
-        const howToSave = [
-            "## 如何保存记忆",
-            "",
-            "保存记忆分为两步:",
-            "",
-            '**Step 1** — 将记忆写入独立的文件 (e.g., `user_role.md`, `feedback_testing.md`，文件名一般以记忆类型开头) 使用以下前导元数据 frontmatter format:',
-            "",
-            ...FRONTMATTER_EXAMPLE,
-            "",
-            `**Step 2** — 在 \`${ENTRYPOINT_NAME}\`中添加上一步文件的索引. \`${ENTRYPOINT_NAME}\` 是索引文件而非记忆 — 每个记忆文件在其中是一行记录，不超过150个字: \`- [标题](file.md) — 一行简短摘要\`. \`${ENTRYPOINT_NAME}\` 没有frontmatter. 不要直接将记忆写入 \`${ENTRYPOINT_NAME}\`.`,
-            "",
-            `- \`${ENTRYPOINT_NAME}\`超过${MAX_ENTRYPOINT_LINES}行的内容将被截断，因此请保持索引文件简洁`,
-            "- 保持记忆文件中的 `name`、`description`、`type` 字段与内容同步更新",
-            "- 按语义主题组织记忆，而非按时间顺序",
-            "- 若记忆内容错误或过时，请及时更新或删除",
-            "- 避免写入重复记忆. 写入新记忆前，先检查是否已有相关记忆可更新",
-            "- 跟随用户使用的语言记录记忆",
-        ].join("\n");
-        lines = [
-            "# Memory",
-            "",
-            `你有一个持久化的、基于文件的记忆系统位于 \`${memoryDir}\`路径下。该目录已存在，请直接向其中写入内容（不要运行 mkdir 或检查其是否存在）。`,
-            "",
-            "你应该随着时间的推移逐步构建这个记忆系统，以便未来的对话能够全面了解：用户是谁，他们希望如何与你协作，需要避免或重复的行为以及用户交付任务的背景。",
-            "",
-            "如果用户明确要求你记住某事，请立即将其保存为最适合的类型；如果用户要求你忘记某事，请找到并删除相关条目。",
-            "",
-            TYPES_SECTION,
-            buildWhatNotTOSaveSection(skillsDir),
-            "",
-            howToSave,
-            "",
-            WHEN_TO_ACCESS,
-            "",
-            TRUSTING_RECALL,
-            "",
-            // "## Memory and other forms of persistence",
-            // "Memory is one of several persistence mechanisms available to you as you assist the user in a given conversation. The distinction is often that memory can be recalled in future conversations and should not be used for persisting information that is only useful within the scope of the current conversation.",
-            // "- When to use or update a plan instead of memory: If you are about to start a non-trivial implementation task and would like to reach alignment with the user on your approach you should use a Plan rather than saving this information to memory. Similarly, if you already have a plan within the conversation and you have changed your approach persist that change by updating the plan rather than saving a memory.",
-            // "- When to use or update tasks instead of memory: When you need to break your work in current conversation into discrete steps or keep track of your progress use tasks instead of saving to memory. Tasks are great for persisting information about the work that needs to be done in the current conversation, but memory should be reserved for information that will be useful in future conversations.",
-            // "",
-            ...buildSearchingPastContextSection(memoryDir, projectDir),
-        ];
         const includeIndex = options.includeIndex ?? true;
+        const needSaveGuide = options.needSaveGuide ?? true;
+        const hasRecalled = Boolean(recalledMemoriesSection?.trim());
+        // 索引有内容说明存在可搜索的记忆；readIndex 调用次数与条件保持与历史一致
+        const indexContent = includeIndex ? readIndex(worktree) : "";
+        const hasMemoryIndex = indexContent.trim().length > 0;
+        // 本轮是否可能接触到记忆（注入召回片段，或存在可搜索的记忆）
+        const mayTouchMemories = hasRecalled || hasMemoryIndex;
+        lines.push("# Memory", "", `你有一个持久化的、基于文件的记忆系统，位于 \`${memoryDir}\`。该目录已存在，直接写入即可（不要运行 mkdir 或检查其是否存在）。`, "", "逐步构建这个记忆系统，使未来对话能了解：用户是谁、期望如何协作、需避免或重复的行为、以及交付任务的背景。", "", "用户要求记住某事时立即保存为最合适的类型；要求忘记时找到并删除相关条目。");
+        // 懒加载：仅在需要保存/更新记忆时注入保存指南（记忆类型 / 切勿保存 / 如何保存）
+        if (needSaveGuide) {
+            lines.push("", TYPES_SECTION, "", buildWhatNotTOSaveSection(skillsDir), "", HOW_TO_SAVE);
+        }
+        lines.push("", WHEN_TO_ACCESS);
+        // 懒加载：仅在可能接触到记忆时注入冲突优先级与"用前先验证"
+        if (mayTouchMemories) {
+            lines.push("", CONFLICT_PRIORITY, "", TRUSTING_RECALL);
+        }
+        // 懒加载：仅在存在可搜索记忆时注入工具调用指南
+        if (hasMemoryIndex) {
+            lines.push("", MEMORY_TOOL_GUIDE);
+        }
         if (includeIndex) {
             // 用户个人全局记忆
             const personalContent = readPersonalMemory();
             if (personalContent.trim()) {
                 const { content: personalTruncated } = truncateEntrypoint(personalContent);
-                lines.push(`## ${PERSONA_NAME}`, "", personalTruncated, "");
+                lines.push("", `## ${PERSONA_NAME}`, "", personalTruncated);
             }
             else {
-                lines.push(`## ${PERSONA_NAME}`, "", `Your ${PERSONA_NAME} is currently empty. When you save new personal global memories, they will appear here.`, "");
+                lines.push("", `## ${PERSONA_NAME}`, "", `Your ${PERSONA_NAME} is currently empty. When you save new personal global memories, they will appear here.`);
             }
-            // 记忆索引文件      
-            const indexContent = readIndex(worktree);
-            if (indexContent.trim()) {
-                lines.push(`## ${ENTRYPOINT_NAME}`, "", `-当下方注入的相关记忆不足以回答用户问题时，可加载记忆索引文件${ENTRYPOINT_NAME} 查找相关记忆信息，文件位于位于 \`${memoryDir}\`路径下。`);
+            // 记忆索引文件
+            if (hasMemoryIndex) {
+                lines.push("", `## ${ENTRYPOINT_NAME}`, "", `- 当下方注入的相关记忆不足以回答用户问题时，可加载记忆索引文件 ${ENTRYPOINT_NAME} 查找相关记忆信息，文件位于 \`${memoryDir}\`。`);
             }
         }
     }
@@ -202,91 +195,123 @@ export function buildMemorySystemPrompt(worktree, recalledMemoriesSection, isLoa
     }
     return lines.join("\n");
 }
-export function buildAutoExtractionPrompt(skillsDir, globalskillsDir = getGlobalSkillsDir()) {
+function buildExtractionPrompt(skillsDir, globalskillsDir, { roleIntro, includeCodePatternsRule }) {
+    const notToSave = [
+        skillExclusionLine(skillsDir, globalskillsDir),
+        ...(includeCodePatternsRule ? EXCLUDED_MEMORY_BULLETS : EXCLUDED_MEMORY_BULLETS.slice(1)),
+    ];
     return [
-        "你现在扮演记忆提取子代理角色。分析下面最近的对话消息，提取任何值得在未来的会话中记住的信息。",
+        roleIntro,
         "",
         "请使用用户在对话中使用的相同语言进行回复。",
         "",
         "## 需要保存的内容",
         "",
-        "使用 `memory_save` 工具来持久化记忆。共有四种类型：",
+        "用 `memory_save` 持久化记忆，共四种类型：",
         "",
-        "1. **user** — 用户是谁：角色、专长、偏好、沟通风格。有助于定制未来的交互。",
-        "2. **feedback** — 关于如何工作的指导：纠正（“不要做 X”）、确认（“是的，继续这样做”）、方法偏好。请包含 *原因*，以便判断边界情况。",
-        "3. **project** — 正在进行的工作上下文：目标、测试任务、子任务、测试计划、需求分析、案例设计、测试案例、测试大纲、案例执行、测试缺陷、测试风险、产品。不能从代码/git 中推导。将相对日期转换为绝对日期。",
-        "4. **reference** — 指向外部资源的指针：URL、工具名称、在代码库之外查找信息的位置。",
+        "1. **user** — 用户是谁：角色、专长、偏好、沟通风格。",
+        "2. **feedback** — 如何工作的指导：纠正（“不要做 X”）、确认（“继续这样做”）、方法偏好；请包含 *原因* 以便判断边界。",
+        "3. **project** — 进行中的工作上下文：目标、计划、测试需求/案例/缺陷/风险；不可从代码/git 推导，相对日期转绝对日期。",
+        "4. **reference** — 代码库之外的信息指针：URL、工具名、查找位置。",
         "",
         "## 不需要保存的内容",
         "",
-        `- 已经在skill中沉淀的规则，方法，流程,对比项目skill目录\`${skillsDir}\`和全局skill目录\`${globalskillsDir}\`下每个skill文件的SKILL.md`,
-        "- 代码模式、架构、文件结构 — 可以从代码库中推导",
-        "- Git 历史、最近的更改 — 使用 `git log`/`git blame",
-        "- 调试解决方案 — 修复已在代码中",
-        "- 已经存在于 AGENTS.md / 项目配置文件中的任何内容",
-        "- 临时的任务细节或当前对话上下文",
-        "- 在之前的提取中已经保存过的信息",
+        ...notToSave,
         "",
         "## 如何保存",
         "",
-        "对于每个值得保存的记忆，调用 `memory_save`，并包含：",
-        "- `file_name`：描述性的短横线命名（例如 `user_role`、`feedback_testing_approach`）",
+        "每条记忆调用一次 `memory_save`，包含：",
+        "- `file_name`：短横线命名（如 `user_role`、`feedback_testing_approach`）",
         "- `name`：简短标题",
-        "- `description`：一行描述（用于未来会话中的相关性匹配）",
+        "- `description`：一行描述，用于未来相关性匹配",
         "- `type`：user、feedback、project、reference 之一",
-        "- `content`：记忆内容。对于 feedback/project 类型，结构化为：规则/事实，然后换行加上 **Why：** 和 **How to apply：** 行。",
+        "- `content`：记忆内容；feedback/project 按规则/事实 + **Why：** + **How to apply：** 组织",
         "",
         "## 指令步骤",
         "",
         "1. 分析对话中值得记住的信息",
-        "2. 首先检查已有的记忆（使用 `memory_list`）以避免重复 — 如果需要，更新已有的记忆",
-        "3. 将每条不同的记忆保存为单独的条目",
-        "4. 如果对话是琐碎的（例如只是“你好”或快速查询），则不保存任何内容 — 这没问题",
-        "5. 有选择性：每次会话通常保存 0-3 条记忆。质量重于数量。",
-        "6. 不要保存关于提取过程本身的记忆。'",
+        "2. 先用 `memory_list` 检查已有记忆避免重复；新信息与旧记忆冲突（如 skill 已更新、旧做法失效）时，用 `memory_delete` 删除或 `memory_save` 覆盖，不要叠加",
+        "3. 每条不同的记忆单独保存",
+        "4. 琐碎对话（仅“你好”或快速查询）不保存任何内容",
+        "5. 有选择性：每次会话通常保存 0-3 条，质量重于数量",
+        "6. 不要保存关于提取过程本身的记忆",
     ].join("\n");
 }
+export function buildAutoExtractionPrompt(skillsDir, globalskillsDir = getGlobalSkillsDir()) {
+    return buildExtractionPrompt(skillsDir, globalskillsDir, {
+        roleIntro: "你现在扮演记忆提取子代理角色。分析下面最近的对话消息，提取任何值得在未来的会话中记住的信息。",
+        includeCodePatternsRule: true,
+    });
+}
 export function buildAutoExtractionPromptForCmd(skillsDir, globalskillsDir = getGlobalSkillsDir()) {
+    return buildExtractionPrompt(skillsDir, globalskillsDir, {
+        roleIntro: "你现在扮演记忆提取代理角色。请回顾以上整个对话，提取任何值得在未来的会话中记住的信息。",
+        includeCodePatternsRule: false,
+    });
+}
+/**
+ * SDT 记忆提取提示词
+ * 用于 sdt-memory-extraction agent，专职测试知识沉淀
+ */
+export function buildSdtMemoryExtractionPrompt(skillsDir, globalskillsDir = getGlobalSkillsDir()) {
     return [
-        "你现在扮演记忆提取代理角色。请回顾以上整个对话，提取任何值得在未来的会话中记住的信息。",
+        "# 角色：专职测试知识沉淀专家",
         "",
-        "请使用用户在对话中使用的相同语言进行回复。",
+        "## 任务",
         "",
-        "## 需要保存的内容",
+        "从会话上下文提取长期可复用的测试知识，通过 `memory_save` 持久化。",
         "",
-        "使用 `memory_save` 工具来持久化记忆。共有四种类型：",
+        "## ⚠️ 最高优先级：合并优先于新建",
         "",
-        "1. **user** — 用户是谁：角色、专长、偏好、沟通风格。有助于定制未来的交互。",
-        "2. **feedback** — 关于如何工作的指导：纠正（“不要做 X”）、确认（“是的，继续这样做”）、方法偏好。请包含 *原因*，以便判断边界情况。",
-        "3. **project** — 正在进行的工作上下文：目标、测试任务、子任务、测试计划、需求分析、案例设计、测试案例、测试大纲、案例执行、测试缺陷、测试风险、产品。不能从代码/git 中推导。将相对日期转换为绝对日期。",
-        "4. **reference** — 指向外部资源的指针：URL、工具名称、在代码库之外查找信息的位置。",
+        "调用 `memory_save` 前**必须**先执行 `memory_list` 查重。判断规则：",
         "",
-        "## 不需要保存的内容",
+        "1. **相似即更新**：已有记忆的 name 或 description 与本次内容主题相关（同项目、同模块、同流程、包含关系）→ 更新已有记忆，禁止新建；",
+        "2. **时序信息合并**：同一项目的进度、状态、检查结果等时效信息，必须追加到已有 project 记忆中，禁止新建；",
+        "3. **全新才新建**：只有与所有已有记忆在主题、类型、项目上均无关联时，才可新建。",
         "",
-        `- 已经在skill中沉淀的规则，方法，流程,对比项目skill目录\`${skillsDir}\`和全局skill目录\`${globalskillsDir}\`下每个skill文件的SKILL.md`,
-        "- Git 历史、最近的更改 — 使用 `git log`/`git blame`",
-        "- 调试解决方案 — 修复已在代码中",
-        "- 已经存在于 AGENTS.md / 项目配置文件中的任何内容",
-        "- 临时的任务细节或当前对话上下文",
-        "- 在之前的提取中已经保存过的信息",
+        "**project 类型特别规则**：进度/状态/完成情况的更新一律覆盖已有条目，项目结束时的总结也追加到已有条目中。",
         "",
-        "## 如何保存",
+        "## 记忆类型",
         "",
-        "对于每个值得保存的记忆，调用 `memory_save`，并包含：",
-        "- `file_name`：描述性的短横线命名（例如 `user_role`、`feedback_testing_approach`）",
-        "- `name`：简短标题",
-        "- `description`：一行描述（用于未来会话中的相关性匹配）",
-        "- `type`：user、feedback、project、reference 之一",
-        "- `content`：记忆内容。对于 feedback/project 类型，结构化为：规则/事实，然后换行加上 **Why：** 和 **How to apply：** 行。",
+        "1. **user** — 个人测试偏好：用例输出格式、自动化编码习惯、校验维度、执行步骤；",
+        "2. **feedback** — 踩坑复盘：漏测场景、脚本不稳定诱因、线上故障、元素定位问题、环境规避方案；",
+        "3. **project** — 项目上下文：测试计划、用例设计、缺陷、风险、业务流程、接口逻辑、历史缺陷、回归范围（不能从代码推导）；",
+        "4. **reference** — 外部资源索引：URL、工具名、查阅位置（仅记录地址和场景，不复制内容）。",
         "",
-        "## 指令步骤",
+        "## 切勿保存",
         "",
-        "1. 分析对话中值得记住的信息",
-        "2. 首先检查已有的记忆（使用 `memory_list`）以避免重复 — 如果需要，更新已有的记忆",
-        "3. 将每条不同的记忆保存为单独的条目",
-        "4. 如果对话是琐碎的（例如只是“你好”或快速查询），则不保存任何内容 — 这没问题",
-        "5. 有选择性：每次会话通常保存 0-3 条记忆。质量重于数量。",
-        "6. 不要保存关于提取过程本身的记忆。'",
+        `- 已在 Skill（\`${skillsDir}\` / \`${globalskillsDir}\`）中沉淀的规则、方法、流程；`,
+        "- 代码模式、架构、文件结构——可从代码推导；",
+        "- Git 历史、近期更改（`git log` / `git blame` 是权威来源）；",
+        "- 调试解决方案——修复已在代码中；",
+        "- AGENT.md 或项目配置文件中的内容；",
+        "- 临时操作、单次调试日志、闲聊、短期过渡方案；",
+        "- 与已有记忆主题重复或高度相似的内容。",
+        "",
+        "## 保存格式",
+        "",
+        "```markdown",
+        "---",
+        "name: {{简短主题名称}}",
+        "description: {{单行描述——用于语义检索，需具体清晰}}",
+        `type: {{${MEMORY_TYPES.join(" / ")}}}`,
+        "source: sdt",
+        "---",
+        "",
+        "{{核心规则/事实}}",
+        "**Why:** {{价值/风险/诱因}}",
+        "**How to apply:** {{落地执行方法}}",
+        "```",
+        "",
+        "## 执行步骤",
+        "",
+        "分析 → 查重（memory_list） → 比对（语义判断相似/全新） → 决策（相似则更新、全新才新建） → 保存（memory_save） → 验证（Why + How to apply 段落）",
+        "",
+        "## 约束",
+        "",
+        "- 每次会话 0-3 条，质量重于数量；",
+        "- 多条记忆分开输出，无开场白/解释/总结；",
+        "- 不保存提取过程本身的元信息。",
     ].join("\n");
 }
 export const AUTO_TREAM_PROMPT = [
@@ -301,25 +326,14 @@ export const AUTO_TREAM_PROMPT = [
     "- memory_save",
     "- memory_delete",
     "",
-    "## Phase 1 — Orient",
-    "1. Use memory_list to inspect current memory inventory.",
-    "2. Identify overlapping or stale entries that can be merged/updated/deleted.",
-    "",
-    "## Phase 2 — Consolidate",
-    "1. Merge duplicates into a single stronger memory using memory_save.",
-    "2. Rewrite vague descriptions so retrieval is easier and more precise.",
-    "3. For feedback/project entries, ensure content is structured as:",
-    " - main rule/fact",
-    " - **Why:**",
-    " - **How to apply:**",
-    "",
-    "## Phase 3 — Prune",
-    "1. Delete memories that are clearly obsolete, contradictory, or low-value.",
-    "2. Keep total memory set concise and high signal.",
+    "## Steps",
+    "1. Orient — use memory_list to inspect the current inventory and identify overlapping or stale entries.",
+    "2. Consolidate — merge duplicates into a single stronger memory with memory_save; rewrite vague descriptions so retrieval is easier and more precise. For feedback/project entries keep the structure: main rule/fact, **Why:**, **How to apply:**.",
+    "3. Prune — delete memories that are clearly obsolete, contradictory, or low-value; keep the total set concise and high-signal.",
     "",
     "## Guardrails",
     "- Do NOT invent facts.",
-    "- If confidence is low, keep existing memory instead of guessing.",
+    "- If confidence is low, keep the existing memory instead of guessing.",
     "- If memory quality is already strong, make no changes and explicitly say so.",
     "",
     "Return a short summary of what you updated, merged, or removed.",
@@ -328,58 +342,45 @@ export const AUTO_TREAM_PROMPT = [
 export const AUTO_PERSONAL_PROMPT = [
     "# 个人全局记忆",
     "",
-    "你是一个处理个人全局记忆的整合专家，请结合已有个人全局记忆和当前项目内的记忆进行深度分析，然后使用工具 `memory_personal_save` 写入记忆整合结果。",
+    "你是处理个人全局记忆的整合专家：结合已有个人全局记忆与当前项目内的记忆进行深度分析，然后使用工具 `memory_personal_save` 写入记忆整合结果。",
     "",
-    "## 可用工具列表",
-    "- memory_personal_read",
-    "- memory_list",
-    "- memory_personal_save",
+    "## 可用工具",
+    "- memory_personal_read：查看个人全局记忆",
+    "- memory_list：查看项目内记忆",
+    "- memory_personal_save：写入整合结果",
     "",
-    "## 步骤操作约束（必须严格遵守）",
-    "1. **个人全局记忆**: 使用工具 `memory_personal_read` 查看个人全局记忆",
-    "2. **项目记忆**: 使用工具 `memory_list` 查看项目内记忆",
+    "## 步骤",
+    "1. 使用 `memory_personal_read` 查看个人全局记忆。",
+    "2. 使用 `memory_list` 查看项目内记忆。",
+    "3. 综合分析后写入整合结果。",
     "",
-    "### 严格禁止",
-    "- **禁止过长**： 记忆整理结果内容总长度不要超过 2000 字符，需要做总结和删除不重要的信息。",
-    "- **禁止过度推测**： 没提到的信息不要过度臆想导致产生幻觉，要保持克制，如果没有相关信息完全可以不填！",
-    "- **禁止使用非场景来源的信息**： 所有要整理的记忆内容来源于工具读取到的内容。",
-    "- **禁止使用\"可用工具列表\"以外的工具**。",
+    "## 严格禁止",
+    "- **过长**：整合结果总长度不超过 2000 字符，需总结并删除不重要的信息。",
+    "- **过度推测**：不臆想、不幻觉，没有相关信息宁可不写。",
+    "- **使用来源外信息**：所有记忆内容均须来自工具读取到的内容。",
+    "- **使用列表外工具**：不得调用“可用工具”以外的任何工具。",
     "",
-    "---",
+    "## 核心运作逻辑",
     "",
-    "## 核心运作逻辑 (The Core Logic)",
+    "遵循“叙事连贯性”原则整合信息，禁止罗列式堆砌（No Bullet-point Spamming）：寻找不同领域行为背后的“贯穿线”，保持精简、不过度猜想。",
     "",
-    "核心思维引擎：连接与综合 (Connect & Synthesize)",
-    "请遵循 \"叙事连贯性\" 原则处理信息。禁止简单的罗列（No Bullet-point Spamming）。",
+    "执行四层深度扫描：",
     "",
-    "1. 寻找\"贯穿线\" (The Connecting Thread)",
-    "不要孤立地看信息。要寻找不同领域行为背后的共同逻辑。",
-    "**要保持精简，不过度猜想，如果不确定可以不写**",
+    "### Layer 1: 基础锚点（事实与当前状态）",
+    "确凿的事实、角色/背景与当前状态——为 Agent 提供工作话题与上下文感知。",
     "",
-    "执行以下**四层深度扫描**：",
+    "### Layer 2: 测试流程图谱（落地测试执行）",
+    "测试全流程环节、执行动作、资源投入与标准规范；区分执行状态（在用流程 / 备用流程 / 废弃流程）——支撑标准化测试落地与流程优化校验。",
     "",
-    "### Layer 1: 基础锚点 (The Base & Facts) -> 【建立连接】",
-    "* **扫描目标**: 确凿的事实、人口统计学特征、当前状态。",
-    "* **实用价值**: 为 Agent 提供**工作话题**和**上下文感知**。",
+    "### Layer 3: 交互协议（消除摩擦）",
+    "用户的沟通习惯、雷区与工作流偏好——指导如何说话、如何交付结果，避免踩雷。",
     "",
-    "### Layer 2: 测试流程图谱 (The Test Process Graph) -> 【落地测试执行】",
-    "* **扫描目标**: 测试全流程环节、执行动作、资源投入与标准规范。",
-    "* **提取原则**: **区分执行状态**（在用流程 / 备用流程 / 废弃流程）。",
-    "* **实用价值**: 让 Agent 能够进行**标准化测试落地** 和 **流程优化校验**。",
+    "### Layer 4: 认知内核（深度共鸣）",
+    "决策逻辑、矛盾点与终极驱动力——让 Agent 成为能替用户做决策的“副驾驶”。",
     "",
-    "### Layer 3: 交互协议 (The Interface) -> 【消除摩擦】",
-    "* **扫描目标**: 用户的沟通习惯、雷区、工作流偏好。",
-    "* **实用价值**: 指导 Agent **如何说话、如何交付结果**，避免踩雷。",
+    "## 输出模板",
     "",
-    "### Layer 4: 认知内核 (The Core) -> 【深度共鸣】",
-    "* **扫描目标**: 决策逻辑、矛盾点、终极驱动力。",
-    "* **实用价值**: 让 Agent 成为**能够替用户做决策**的\"副驾驶\"。",
-    "",
-    "---",
-    "",
-    "## 输出模板 (The Persona Template)",
-    "",
-    "请参考以下格式，生成最终内容。可以做自主调整（信息不足时可以减少或新增 chapter）（**必须保持 Markdown 格式**）：",
+    "参考以下骨架生成最终内容，可依信息量自主增减章节（**必须保持 Markdown 格式**）：",
     "",
     "````markdown",
     "# User Narrative Profile",
@@ -387,39 +388,28 @@ export const AUTO_PERSONAL_PROMPT = [
     "> **Archetype (核心原型)**: [一句话定义。例如：一位在业务压力下深耕落地，依托规范流程搭建稳定质量体系的\"务实质量践行者\"。]",
     "",
     "> **基本信息**",
-    "（用户的基本信息，如年龄、性别、职业等，更新时若有冲突则覆盖，不冲突尽量叠加）",
+    "（用户的基本信息，如年龄、性别、职业等；更新时若有冲突则覆盖，无冲突尽量叠加）",
     " -",
     " -",
     "",
     "> **长期偏好**",
-    "（你观察到的用户最稳定且可复用的偏好）",
+    "（用户最稳定且可复用的偏好）",
     "    -",
     "    -",
     "",
     "## Chapter 1: Context & Current State (全景语境)",
-    "*(将基础事实与当前状态融合，写成一段连贯的背景介绍)*",
-    "",
-    "**[这里写连贯描述，区别较大的时候可以分点阐述]**",
+    "[将基础事实与当前状态融合，写成一段连贯的背景介绍，区别较大时可分点]",
     "",
     "## Chapter 2: The Texture of Life (生活的肌理)",
-    "*(将兴趣、消费、生活习惯串联起来，展示生活品味)*",
-    "",
-    "**[这里写连贯的描述，重点在于\"兴趣/偏好\"和\"品味\"的统一性，区别较大的时候可以分点阐述]**",
+    "[兴趣、消费、生活习惯的连贯描述，重点体现兴趣/偏好与品味的统一性]",
     "",
     "## Chapter 3: Interaction & Cognitive Protocol (交互与认知协议)",
-    "*(这是 Agent 的行动指南。为了实用，这里保持半结构化，但要解释\"为什么\")*",
-    "",
     "### 3.1 沟通策略 (How to Speak)",
     "### 3.2 决策逻辑 (How to Think)",
     "",
     "## Chapter 4: Deep Insights & Evolution (深层洞察与演变)",
-    "*(人类学观察笔记)*",
-    "",
-    "* **矛盾统一性**: [描述用户身上看似冲突但实则合理的特质]。",
-    "* **演变轨迹**: [可加上时间，分为多点，描述用户最近发生的变化]。",
-    "* **涌现特征**: 提炼 3-7 个最核心的特质标签，每个标签单独一行并附上简短注释（10-15字）",
-    "  - `TagName` - 简短注释说明",
+    "- **矛盾统一性**: [描述用户身上看似冲突但实则合理的特质]。",
+    "- **演变轨迹**: [可加时间分点，描述用户最近发生的变化]。",
+    "- **涌现特征**: 提炼 3-7 个核心特质标签，每个标签单独一行并附简短注释（10-15 字）",
     "````",
-    "",
-    "---",
 ].join("\n");

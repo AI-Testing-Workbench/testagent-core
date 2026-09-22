@@ -135,6 +135,8 @@ import type {
   SessionClearContextResponses,
   SessionCommandErrors,
   SessionCommandResponses,
+  SessionContextExtractErrors,
+  SessionContextExtractResponses,
   SessionCreateErrors,
   SessionCreateResponses,
   SessionDeleteErrors,
@@ -186,6 +188,8 @@ import type {
   SyncStartResponses,
   SyncStealErrors,
   SyncStealResponses,
+  TestagentAgentOverrideClearResponses,
+  TestagentAgentOverrideSetResponses,
   TestagentCustomEnvVarsBatchCreateResponses,
   TestagentCustomEnvVarsBatchDeleteResponses,
   TestagentCustomEnvVarsBatchUpdateResponses,
@@ -194,10 +198,7 @@ import type {
   TestagentEnvVarsListErrors,
   TestagentEnvVarsListResponses,
   TestagentUserSetResponses,
-  TestagentAgentOverrideSetResponses,
-  TestagentAgentOverrideSetErrors,
-  TestagentAgentOverrideClearResponses,
-  TestagentAgentOverrideClearErrors,
+  TestagentZhAnswerSetResponses,
   TextPartInput,
   ToolIdsErrors,
   ToolIdsResponses,
@@ -791,7 +792,6 @@ export class CustomEnvVars extends HeyApiClient {
       body?: Array<{
         key: string
         value: string
-        description?: string
       }>
     },
     options?: Options<never, ThrowOnError>,
@@ -832,7 +832,6 @@ export class CustomEnvVars extends HeyApiClient {
       body?: Array<{
         key: string
         value: string
-        description?: string
       }>
     },
     options?: Options<never, ThrowOnError>,
@@ -862,37 +861,93 @@ export class CustomEnvVars extends HeyApiClient {
   }
 }
 
-export class Testagent extends HeyApiClient {
-  private _user?: User
-  get user(): User {
-    return (this._user ??= new User({ client: this.client }))
-  }
-
-  private _envVars?: EnvVars
-  get envVars(): EnvVars {
-    return (this._envVars ??= new EnvVars({ client: this.client }))
-  }
-
-  private _customEnvVars?: CustomEnvVars
-  get customEnvVars(): CustomEnvVars {
-    return (this._customEnvVars ??= new CustomEnvVars({ client: this.client }))
-  }
-
-  private _agentOverride?: AgentOverride
-  get agentOverride(): AgentOverride {
-    return (this._agentOverride ??= new AgentOverride({ client: this.client }))
+export class ZhAnswer extends HeyApiClient {
+  /**
+   * Toggle ZH answer bridging
+   *
+   * Enable or disable bridging of permission/question asks to enterprise ZH via relay.
+   */
+  public set<ThrowOnError extends boolean = false>(
+    parameters?: {
+      directory?: string
+      workspace?: string
+      enabled?: boolean
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "query", key: "directory" },
+            { in: "query", key: "workspace" },
+            { in: "body", key: "enabled" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).post<TestagentZhAnswerSetResponses, unknown, ThrowOnError>({
+      url: "/testagent/zh-answer",
+      ...options,
+      ...params,
+      headers: {
+        "Content-Type": "application/json",
+        ...options?.headers,
+        ...params.headers,
+      },
+    })
   }
 }
 
-export class AgentOverride extends HeyApiClient {
+export class Override extends HeyApiClient {
+  /**
+   * Clear per-stage subagent override for a session
+   *
+   * Remove the transient override for the given session, restoring default sdt behavior.
+   */
+  public clear<ThrowOnError extends boolean = false>(
+    parameters?: {
+      directory?: string
+      workspace?: string
+      sessionID?: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "query", key: "directory" },
+            { in: "query", key: "workspace" },
+            { in: "body", key: "sessionID" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).delete<TestagentAgentOverrideClearResponses, unknown, ThrowOnError>({
+      url: "/testagent/agent/override",
+      ...options,
+      ...params,
+      headers: {
+        "Content-Type": "application/json",
+        ...options?.headers,
+        ...params.headers,
+      },
+    })
+  }
+
   /**
    * Set per-stage subagent override for a session
    *
    * Override the prompt and/or permission rules of the sdt subagent for the given session.
    */
   public set<ThrowOnError extends boolean = false>(
-    parameters: {
-      sessionID: string
+    parameters?: {
+      directory?: string
+      workspace?: string
+      sessionID?: string
       prompt?: string
       permission?: Array<{
         permission: string
@@ -910,6 +965,8 @@ export class AgentOverride extends HeyApiClient {
       [
         {
           args: [
+            { in: "query", key: "directory" },
+            { in: "query", key: "workspace" },
             { in: "body", key: "sessionID" },
             { in: "body", key: "prompt" },
             { in: "body", key: "permission" },
@@ -920,11 +977,7 @@ export class AgentOverride extends HeyApiClient {
         },
       ],
     )
-    return (options?.client ?? this.client).post<
-      TestagentAgentOverrideSetResponses,
-      TestagentAgentOverrideSetErrors,
-      ThrowOnError
-    >({
+    return (options?.client ?? this.client).post<TestagentAgentOverrideSetResponses, unknown, ThrowOnError>({
       url: "/testagent/agent/override",
       ...options,
       ...params,
@@ -935,42 +988,39 @@ export class AgentOverride extends HeyApiClient {
       },
     })
   }
+}
 
-  /**
-   * Clear per-stage subagent override for a session
-   *
-   * Remove the transient override for the given session, restoring default sdt behavior.
-   */
-  public clear<ThrowOnError extends boolean = false>(
-    parameters: {
-      sessionID: string
-    },
-    options?: Options<never, ThrowOnError>,
-  ) {
-    const params = buildClientParams(
-      [parameters],
-      [
-        {
-          args: [
-            { in: "body", key: "sessionID" },
-          ],
-        },
-      ],
-    )
-    return (options?.client ?? this.client).delete<
-      TestagentAgentOverrideClearResponses,
-      TestagentAgentOverrideClearErrors,
-      ThrowOnError
-    >({
-      url: "/testagent/agent/override",
-      ...options,
-      ...params,
-      headers: {
-        "Content-Type": "application/json",
-        ...options?.headers,
-        ...params.headers,
-      },
-    })
+export class Agent extends HeyApiClient {
+  private _override?: Override
+  get override(): Override {
+    return (this._override ??= new Override({ client: this.client }))
+  }
+}
+
+export class Testagent extends HeyApiClient {
+  private _user?: User
+  get user(): User {
+    return (this._user ??= new User({ client: this.client }))
+  }
+
+  private _envVars?: EnvVars
+  get envVars(): EnvVars {
+    return (this._envVars ??= new EnvVars({ client: this.client }))
+  }
+
+  private _customEnvVars?: CustomEnvVars
+  get customEnvVars(): CustomEnvVars {
+    return (this._customEnvVars ??= new CustomEnvVars({ client: this.client }))
+  }
+
+  private _zhAnswer?: ZhAnswer
+  get zhAnswer(): ZhAnswer {
+    return (this._zhAnswer ??= new ZhAnswer({ client: this.client }))
+  }
+
+  private _agent?: Agent
+  get agent(): Agent {
+    return (this._agent ??= new Agent({ client: this.client }))
   }
 }
 
@@ -4682,6 +4732,44 @@ export class Session2 extends HeyApiClient {
         ...params,
       },
     )
+  }
+
+  /**
+   * Extract session context (for testflow)
+   *
+   * Return a lightweight projection of the active context (messages after the last compaction), split into blocks by session: the main session first, then one layer of direct subagent sessions. Keeps only user/assistant text, optional assistant reasoning, and question-tool Q&A; drops base64/diffs/tool outputs. Provided specifically for testflow to analyze user behavior without large payloads.
+   */
+  public contextExtract<ThrowOnError extends boolean = false>(
+    parameters: {
+      sessionID: string
+      directory?: string
+      workspace?: string
+      reasoning?: "true" | "false"
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "path", key: "sessionID" },
+            { in: "query", key: "directory" },
+            { in: "query", key: "workspace" },
+            { in: "query", key: "reasoning" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).get<
+      SessionContextExtractResponses,
+      SessionContextExtractErrors,
+      ThrowOnError
+    >({
+      url: "/session/{sessionID}/context-extract",
+      ...options,
+      ...params,
+    })
   }
 }
 

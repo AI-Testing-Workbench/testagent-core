@@ -303,6 +303,15 @@ export default function Layout(props: ParentProps) {
     setState("autoselect", false)
   })
 
+  // testagent_change start - a deep link may be opened in a fresh/incognito browser where no
+  // project is persisted yet, so register the workspace from the URL to load its sessions.
+  createEffect(() => {
+    const directory = route().dir
+    if (!directory) return
+    layout.projects.open(directory)
+  })
+  // testagent_change end
+
   const editorOpen = editor.editorOpen
   const openEditor = editor.openEditor
   const closeEditor = editor.closeEditor

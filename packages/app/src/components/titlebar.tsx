@@ -5,13 +5,17 @@ import { IconButton } from "@opencode-ai/ui/icon-button"
 import { Icon } from "@opencode-ai/ui/icon"
 import { Button } from "@opencode-ai/ui/button"
 import { Tooltip, TooltipKeybind } from "@opencode-ai/ui/tooltip"
+import { showToast } from "@opencode-ai/ui/toast" // testagent_change - cloud share link
 import { useTheme } from "@opencode-ai/ui/theme/context"
 
 import { useLayout } from "@/context/layout"
 import { usePlatform } from "@/context/platform"
 import { useCommand } from "@/context/command"
 import { useLanguage } from "@/context/language"
+import { useServer } from "@/context/server" // testagent_change - cloud share link
 import { useSettings } from "@/context/settings"
+import { authTokenFromCredentials } from "@/utils/server" // testagent_change - cloud share link
+import { decode64 } from "@/utils/base64" // testagent_change - open workspace in desktop client
 import { applyPath, backPath, forwardPath } from "./titlebar-history"
 
 type TauriDesktopWindow = {
@@ -39,11 +43,44 @@ const titlebarHeight = 40
 const minTitlebarZoom = 0.25
 const windowsControlsBaseWidth = 138 // 3 native Windows caption buttons at 46px each.
 
+// testagent_change start - navigator.clipboard is unavailable on insecure origins (plain http)
+async function copyText(text: string) {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text)
+    return
+  }
+  const el = document.createElement("textarea")
+  el.value = text
+  el.setAttribute("readonly", "")
+  el.style.position = "fixed"
+  el.style.top = "-1000px"
+  document.body.appendChild(el)
+  try {
+    el.select()
+    if (!document.execCommand("copy")) throw new Error("copy failed")
+  } finally {
+    document.body.removeChild(el)
+  }
+}
+// testagent_change end
+
+// testagent_change start - invoke a custom protocol (e.g. tscode://) from the browser
+function openExternalUrl(url: string) {
+  const a = document.createElement("a")
+  a.href = url
+  a.rel = "noopener"
+  document.body.appendChild(a)
+  a.click()
+  document.body.removeChild(a)
+}
+// testagent_change end
+
 export function Titlebar() {
   const layout = useLayout()
   const platform = usePlatform()
   const command = useCommand()
   const language = useLanguage()
+  const server = useServer() // testagent_change - cloud share link
   const settings = useSettings()
   const theme = useTheme()
   const navigate = useNavigate()
@@ -91,6 +128,52 @@ export function Titlebar() {
   const canForward = createMemo(() => history.index < history.stack.length - 1)
   const hasProjects = createMemo(() => layout.projects.list().length > 0)
   const nav = createMemo(() => import.meta.env.VITE_OPENCODE_CHANNEL !== "beta" || settings.general.showNavigation())
+
+  // testagent_change start - copy a shareable link (with auth_token when present) for cloud containers
+  const copyShareLink = () => {
+    const conn = server.current
+    if (!conn || conn.type !== "http") return
+    // Keep the current route (e.g. /<dir>/session/<id>) so the link opens that session.
+    const url = new URL(window.location.href)
+    const target = new URL(conn.http.url)
+    url.protocol = target.protocol
+    url.host = target.host
+    url.searchParams.delete("auth_token")
+    if (conn.http.password) {
+      url.searchParams.set(
+        "auth_token",
+        authTokenFromCredentials({ username: conn.http.username, password: conn.http.password }),
+      )
+    }
+    const link = url.toString()
+    copyText(link)
+      .then(() => {
+        showToast({
+          variant: "success",
+          icon: "circle-check",
+          title: language.t("session.share.copy.copied"),
+          description: link,
+        })
+      })
+      .catch(() =>
+        showToast({
+          variant: "error",
+          title: language.t("toast.session.share.copyFailed.title"),
+          description: link,
+        }),
+      )
+  }
+  // testagent_change end
+
+  // testagent_change start - open the current workspace in the local tscode client
+  const workspace = createMemo(() => decode64(params.dir))
+  const openInClient = () => {
+    const directory = workspace()
+    if (!directory) return
+    // Reuse the client's remote workspace history to reconnect to the cloud workspace.
+    openExternalUrl(`tscode://test-tech.tscode-remote-ssh/open?dir=${encodeURIComponent(directory)}`)
+  }
+  // testagent_change end
 
   const back = () => {
     const next = backPath(history)
@@ -325,6 +408,34 @@ export function Titlebar() {
           onMouseDown={drag}
         >
           <div id="opencode-titlebar-right" class="flex items-center gap-1 shrink-0 justify-end" />
+          {/* testagent_change start - open the workspace in the local tscode client */}
+          <Show when={platform.platform === "web" && workspace()}>
+            <Tooltip placement="bottom" value={language.t("session.header.open.tscode")}>
+              <Button
+                variant="ghost"
+                class="titlebar-icon w-8 h-6 p-0 box-border shrink-0"
+                onClick={openInClient}
+                aria-label={language.t("session.header.open.tscode")}
+              >
+                <img src="/assets/tscode.png" alt="" class="size-4" />
+              </Button>
+            </Tooltip>
+          </Show>
+          {/* testagent_change end */}
+          {/* testagent_change start - cloud share link */}
+          <Show when={server.current?.type === "http"}>
+            <Tooltip placement="bottom" value={language.t("session.share.copy.copyLink")}>
+              <Button
+                variant="ghost"
+                class="titlebar-icon w-8 h-6 p-0 box-border shrink-0 mr-1"
+                onClick={copyShareLink}
+                aria-label={language.t("session.share.copy.copyLink")}
+              >
+                <Icon size="small" name="link" />
+              </Button>
+            </Tooltip>
+          </Show>
+          {/* testagent_change end */}
           <Show when={windows()}>
             {!tauriApi() && <div class="shrink-0" style={{ width: windowsControlsWidth() }} />}
             <div data-tauri-decorum-tb class="flex flex-row" />

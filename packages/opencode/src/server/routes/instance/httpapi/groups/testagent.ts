@@ -48,6 +48,20 @@ export const EnvVarSetPayload = Schema.Struct({
 })
 // testagent_change end
 
+// testagent_change start - YOLO 模式开关 payload（全局开关，与 session 无关）
+export const YoloSetPayload = Schema.Struct({
+  enabled: Schema.Boolean,
+})
+
+export const YoloSetResult = Schema.Struct({
+  applied: Schema.Boolean,
+})
+
+export const YoloGetResult = Schema.Struct({
+  enabled: Schema.Boolean,
+})
+// testagent_change end
+
 export const EnvVarBatchCreatePayload = Schema.Array(EnvVarSetPayload)
 
 export const EnvVarBatchUpdatePayload = Schema.Array(EnvVarSetPayload)
@@ -124,6 +138,8 @@ export const TestagentPaths = {
   zhAnswerSet: "/testagent/zh-answer", // testagent_change
   agentOverrideSet: "/testagent/agent/override",
   agentOverrideClear: "/testagent/agent/override",
+  yoloSet: "/testagent/yolo", // testagent_change
+  yoloGet: "/testagent/yolo", // testagent_change
 } as const
 
 export const TestagentApi = HttpApi.make("testagent").add(
@@ -261,6 +277,32 @@ export const TestagentApi = HttpApi.make("testagent").add(
           identifier: "testagent.agent.override.clear",
           summary: "Clear per-stage subagent override for a session",
           description: "Remove the transient override for the given session, restoring default sdt behavior.",
+        }),
+      ),
+    )
+    // testagent_change end
+    // testagent_change start - YOLO 模式开关（全局，与 session 无关）
+    .add(
+      HttpApiEndpoint.put("yoloSet", TestagentPaths.yoloSet, {
+        payload: YoloSetPayload,
+        success: described(YoloSetResult, "YOLO mode set successfully"),
+      }).annotateMerge(
+        OpenApi.annotations({
+          identifier: "testagent.yolo.set",
+          summary: "Toggle YOLO mode (global)",
+          description:
+            "Enable or disable YOLO mode globally. When enabled, all sessions run unattended: every permission rule (including deny) is bypassed and the question tool becomes unavailable, mirroring cline's yolo mode. State resets on server restart.",
+        }),
+      ),
+    )
+    .add(
+      HttpApiEndpoint.get("yoloGet", TestagentPaths.yoloGet, {
+        success: described(YoloGetResult, "Current YOLO mode"),
+      }).annotateMerge(
+        OpenApi.annotations({
+          identifier: "testagent.yolo.get",
+          summary: "Get YOLO mode (global)",
+          description: "Query whether YOLO mode is currently enabled.",
         }),
       ),
     )
