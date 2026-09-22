@@ -111,6 +111,8 @@ const cli = yargs(args)
     // testagent_change start - Load custom env vars into process.env at startup
     try {
       const { EnvVars } = await import("@/testagent/env-vars")
+      // 缺失 TESTAGENT 前缀的远程接口变量时先拉取并落盘，已存在则跳过（保持旧数据）
+      await EnvVars.ensureRemote()
       await EnvVars.syncToProcessEnv()
       Log.Default.info("custom env vars loaded")
     } catch (err: any) {

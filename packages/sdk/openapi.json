@@ -611,9 +611,27 @@
                         "required": ["key", "value"],
                         "additionalProperties": false
                       }
+                    },
+                    "remote": {
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "object",
+                        "properties": {
+                          "key": {
+                            "type": "string",
+                            "pattern": "^[a-zA-Z_][a-zA-Z0-9_]*$"
+                          },
+                          "value": {
+                            "type": "string",
+                            "minLength": 1
+                          }
+                        },
+                        "required": ["key", "value"],
+                        "additionalProperties": false
+                      }
                     }
                   },
-                  "required": ["system", "custom"],
+                  "required": ["system", "custom", "remote"],
                   "additionalProperties": false,
                   "description": "按来源分组的环境变量列表"
                 }
@@ -716,9 +734,27 @@
                         "required": ["key", "value"],
                         "additionalProperties": false
                       }
+                    },
+                    "remote": {
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "object",
+                        "properties": {
+                          "key": {
+                            "type": "string",
+                            "pattern": "^[a-zA-Z_][a-zA-Z0-9_]*$"
+                          },
+                          "value": {
+                            "type": "string",
+                            "minLength": 1
+                          }
+                        },
+                        "required": ["key", "value"],
+                        "additionalProperties": false
+                      }
                     }
                   },
-                  "required": ["system", "custom"],
+                  "required": ["system", "custom", "remote"],
                   "additionalProperties": false,
                   "description": "按来源分组的查询结果"
                 }
@@ -1017,6 +1053,109 @@
           {
             "lang": "js",
             "source": "import { createOpencodeClient } from \"@opencode-ai/sdk\n\nconst client = createOpencodeClient()\nawait client.testagent.customEnvVars.batchDelete({\n  ...\n})"
+          }
+        ]
+      }
+    },
+    "/testagent/env-vars/remote/ensure": {
+      "post": {
+        "tags": ["testagent"],
+        "operationId": "testagent.envVars.ensureRemote",
+        "parameters": [
+          {
+            "name": "directory",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "远程接口变量补齐结果",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "created": {
+                      "type": "boolean"
+                    },
+                    "keys": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  },
+                  "required": ["created", "keys"],
+                  "additionalProperties": false,
+                  "description": "远程接口变量补齐结果"
+                }
+              }
+            }
+          }
+        },
+        "description": "If no TESTAGENT-prefixed variable exists yet, fetch them from the remote interface and persist them. Existing values are kept as-is.",
+        "summary": "Ensure remote environment variables exist",
+        "x-codeSamples": [
+          {
+            "lang": "js",
+            "source": "import { createOpencodeClient } from \"@opencode-ai/sdk\n\nconst client = createOpencodeClient()\nawait client.testagent.envVars.ensureRemote({\n  ...\n})"
+          }
+        ]
+      }
+    },
+    "/testagent/env-vars/remote": {
+      "delete": {
+        "tags": ["testagent"],
+        "operationId": "testagent.envVars.clearRemote",
+        "parameters": [
+          {
+            "name": "directory",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "远程接口变量清理成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "boolean",
+                  "description": "远程接口变量清理成功"
+                }
+              }
+            }
+          }
+        },
+        "description": "Remove interface-fetched environment variables from storage and from the running process environment. Called on logout.",
+        "summary": "Clear remote environment variables",
+        "x-codeSamples": [
+          {
+            "lang": "js",
+            "source": "import { createOpencodeClient } from \"@opencode-ai/sdk\n\nconst client = createOpencodeClient()\nawait client.testagent.envVars.clearRemote({\n  ...\n})"
           }
         ]
       }

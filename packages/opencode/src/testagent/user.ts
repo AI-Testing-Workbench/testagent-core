@@ -39,7 +39,8 @@ export const User = {
     // Preserve the initial process values. Custom environment variables can later
     // override process.env, but they must not change the automatic system identity.
     const fromEnv = initialEnv
-    if (fromEnv.userId) {
+    // 环境变量能提供完整身份时才直接返回；只提供了部分字段时留到下面与文件合并
+    if (fromEnv.userId && fromEnv.originPathId) {
       log.debug("from env", { user: fromEnv })
       return fromEnv
     }
@@ -81,15 +82,29 @@ export const User = {
       }
     }
     
-    const result = cachedFromFile ?? { 
-      userId: undefined, 
-      userName: undefined, 
+    const fromFile = cachedFromFile ?? {
+      userId: undefined,
+      userName: undefined,
       sapId: undefined,
       openId: undefined,
       originPathId: undefined,
       pathName: undefined,
-      token: undefined
+      token: undefined,
     }
+    // 环境变量只提供了部分字段（例如注入的 TESTAGENT_ORIGIN_PATH_ID 缺失、但会话保留了 userId）时，
+    // 用文件里的值补齐；否则远程接口会因为拿不到 pathCode 而永远跳过拉取。
+    // 同一字段仍以环境变量优先，保证自定义环境变量不会改变系统身份。
+    const result: UserInfo = fromEnv.userId
+      ? {
+          userId: fromEnv.userId || fromFile.userId,
+          userName: fromEnv.userName || fromFile.userName,
+          sapId: fromEnv.sapId || fromFile.sapId,
+          openId: fromEnv.openId || fromFile.openId,
+          originPathId: fromEnv.originPathId || fromFile.originPathId,
+          pathName: fromEnv.pathName || fromFile.pathName,
+          token: fromEnv.token || fromFile.token,
+        }
+      : fromFile
     log.debug("final result", { user: result })
     return result
   },
