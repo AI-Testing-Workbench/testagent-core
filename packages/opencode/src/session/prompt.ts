@@ -1528,19 +1528,10 @@ NOTE: At any point in time through this workflow you should feel free to ask the
 
           let msgs = yield* MessageV2.filterCompactedEffect(sessionID)
 
-          let lastUser: MessageV2.User | undefined
-          let lastAssistant: MessageV2.Assistant | undefined
-          let lastFinished: MessageV2.Assistant | undefined
-          let tasks: (MessageV2.CompactionPart | MessageV2.SubtaskPart)[] = []
-          for (let i = msgs.length - 1; i >= 0; i--) {
-            const msg = msgs[i]
-            if (!lastUser && msg.info.role === "user") lastUser = msg.info
-            if (!lastAssistant && msg.info.role === "assistant") lastAssistant = msg.info
-            if (!lastFinished && msg.info.role === "assistant" && msg.info.finish) lastFinished = msg.info
-            if (lastUser && lastFinished) break
-            const task = msg.parts.filter((part) => part.type === "compaction" || part.type === "subtask")
-            if (task && !lastFinished) tasks.push(...task)
-          }
+          // testagent_change start - Use MessageV2.latest() to prevent double auto-compaction (PR #27545)
+          // and handle nonmonotonic message IDs (PR #40990)
+          const { user: lastUser, assistant: lastAssistant, finished: lastFinished, tasks } = MessageV2.latest(msgs)
+          // testagent_change end
 
           if (!lastUser) throw new Error("No user message found in stream. This should never happen.")
             
@@ -1571,9 +1562,9 @@ NOTE: At any point in time through this workflow you should feel free to ask the
             lastAssistant?.finish &&
             !["tool-calls"].includes(lastAssistant.finish) &&
             !hasToolCalls &&
-            // testagent_change start - 用真实创建时间判断顺序，避免消息 ID 时间戳回绕
-            // (48位时间戳约2.18年回绕一次)导致 lastUser.id < lastAssistant.id 误判
-            lastUser.time.created < lastAssistant.time.created
+            // testagent_change start - 使用 parentID 匹配代替时间比较，更可靠地判断消息对应关系
+            // (opencode PR #40990: 修复非单调 ID 导致的顺序判断错误)
+            lastAssistant.parentID === lastUser.id
             // testagent_change end
           ) {
             // testagent_change start - YOLO completion guard（移植 cline agent-runtime 的
@@ -1623,12 +1614,11 @@ NOTE: At any point in time through this workflow you should feel free to ask the
             yield* slog.info("exiting loop", {
               lastUserID: lastUser.id,
               lastAssistantID: lastAssistant.id,
-              lastUserBeforeAssistant: lastUser.time.created < lastAssistant.time.created,
-              lastUserCreated: lastUser.time.created,
-              lastAssistantCreated: lastAssistant.time.created,
+              lastAssistantParentID: lastAssistant.parentID,
+              parentMatches: lastAssistant.parentID === lastUser.id,
               finish: lastAssistant.finish,
               hasToolCalls,
-              reason: "已存在的最后一条 assistant 已完成且新 user 消息在其之前",
+              reason: "已存在的最后一条 assistant 已完成且是对当前 user 的响应",
             })
             // testagent_change end
             break
@@ -1785,25 +1775,9 @@ NOTE: At any point in time through this workflow you should feel free to ask the
             if (step === 1)
               yield* summary.summarize({ sessionID, messageID: lastUser.id }).pipe(Effect.ignore, Effect.forkIn(scope))
 
-            if (step > 1 && lastFinished) {
-              for (const m of msgs) {
-                // testagent_change start - 同样用 time.created 判断先后，避免 ID 回绕误判
-                if (m.info.role !== "user" || m.info.time.created <= lastFinished.time.created) continue
-                // testagent_change end
-                for (const p of m.parts) {
-                  if (p.type !== "text" || p.ignored || p.synthetic) continue
-                  if (!p.text.trim()) continue
-                  p.text = [
-                    "<system-reminder>",
-                    "The user sent the following message:",
-                    p.text,
-                    "",
-                    "Please address this message and continue with your tasks.",
-                    "</system-reminder>",
-                  ].join("\n")
-                }
-              }
-            }
+            // testagent_change start - removed steering wrapper that busts cache (upstream commit f092bafe / PR #33039)
+            // step > 1 时修改已发送的 user 消息会导致 prompt cache 失效
+            // testagent_change end
 
             yield* plugin.trigger("experimental.chat.messages.transform", {}, { messages: msgs })
 
