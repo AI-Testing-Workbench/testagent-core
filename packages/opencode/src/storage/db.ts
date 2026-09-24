@@ -68,27 +68,6 @@ function time(tag: string) {
   )
 }
 
-// testagent-core_change start
-// 同步睡眠:用于锁竞争重试(Bun/Node 通用,不依赖异步 sleep)。
-function sleepSync(ms: number) {
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
-}
-
-// 小步重试:配合 busy_timeout,抵御多进程打开同一 DB 时的瞬时锁竞争。
-function withRetry<T>(fn: () => T, attempts = 8, delayMs = 250): T {
-  let lastError: unknown
-  for (let attempt = 0; attempt < attempts; attempt++) {
-    try {
-      return fn()
-    } catch (error) {
-      lastError = error
-      if (attempt < attempts - 1) sleepSync(delayMs)
-    }
-  }
-  throw lastError
-}
-// testagent-core_change end
-
 function migrations(dir: string): Journal {
   const dirs = readdirSync(dir, { withFileTypes: true })
     .filter((entry) => entry.isDirectory())
@@ -114,17 +93,9 @@ export const Client = lazy(() => {
 
   const db = init(Path)
 
-  // testagent-core_change start
-  // busy_timeout 必须在 journal_mode=WAL 之前设置。
-  // 同一个 opencode.db 会被多个进程同时打开(编辑器扩展、编辑器侧的 agent host、
-  // 以及 Agent 窗口的 agent host 各自拉起一个 testagent)。node:sqlite 的默认 busy
-  // timeout 为 0,若先执行 `PRAGMA journal_mode = WAL`,第二个进程拿不到切换 WAL 所需
-  // 的排他锁会立即返回 SQLITE_BUSY(node:sqlite 表现为 "disk I/O error"),
-  // 进而导致 /provider、/session/ 返回 500、模型与会话列表为空。
-  db.run("PRAGMA busy_timeout = 15000")
-  withRetry(() => db.run("PRAGMA journal_mode = WAL"))
-  // testagent-core_change end
+  db.run("PRAGMA journal_mode = WAL")
   db.run("PRAGMA synchronous = NORMAL")
+  db.run("PRAGMA busy_timeout = 5000")
   db.run("PRAGMA cache_size = -64000")
   db.run("PRAGMA foreign_keys = ON")
   db.run("PRAGMA wal_checkpoint(PASSIVE)")
