@@ -1275,6 +1275,36 @@ export const filterCompactedEffect = Effect.fnUntraced(function* (sessionID: Ses
   return filterCompacted(stream(sessionID))
 })
 
+// testagent_change start - Add latest() function to prevent double auto-compaction (PR #27545)
+// filterCompacted reorders messages for model consumption
+// ([compaction-user, summary, ...retained tail..., continue-user]), so array
+// position is not chronological. IDs are only a deterministic tie-breaker
+// because imported messages do not necessarily have monotonic IDs (PR #40990).
+export function latest(msgs: WithParts[]) {
+  let user: User | undefined
+  let assistant: Assistant | undefined
+  let finished: Assistant | undefined
+  for (const msg of msgs) {
+    const info = msg.info
+    if (info.role === "user" && isAfter(info, user)) user = info
+    if (info.role === "assistant" && isAfter(info, assistant)) assistant = info
+    if (info.role === "assistant" && info.finish && isAfter(info, finished)) finished = info
+  }
+  const tasks = msgs.flatMap((m) =>
+    finished && !isAfter(m.info, finished)
+      ? []
+      : m.parts.filter((p): p is CompactionPart | SubtaskPart => p.type === "compaction" || p.type === "subtask"),
+  )
+  return { user, assistant, finished, tasks }
+}
+
+function isAfter(info: Info, other?: Info) {
+  if (!other) return true
+  if (info.time.created !== other.time.created) return info.time.created > other.time.created
+  return info.id > other.id
+}
+// testagent_change end
+
 export function fromError(
   e: unknown,
   ctx: { providerID: ProviderID; aborted?: boolean },
