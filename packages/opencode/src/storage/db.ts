@@ -9,7 +9,7 @@ import * as Log from "@opencode-ai/core/util/log"
 import { NamedError } from "@opencode-ai/core/util/error"
 import z from "zod"
 import path from "path"
-import { readFileSync, readdirSync, existsSync } from "fs"
+import { readFileSync, readdirSync, existsSync, mkdirSync, rmdirSync, statSync } from "fs"
 import { Flag } from "@opencode-ai/core/flag/flag"
 import { InstallationChannel } from "@opencode-ai/core/installation/version"
 import { InstanceState } from "@/effect/instance-state"
@@ -68,6 +68,62 @@ function time(tag: string) {
   )
 }
 
+// testagent-core_change start
+// 同步睡眠:用于锁竞争重试(Bun/Node 通用,不依赖异步 sleep)。
+function sleepSync(ms: number) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
+}
+
+// 小步重试:配合 busy_timeout,抵御多进程打开同一 DB 时的瞬时锁竞争。
+function withRetry<T>(fn: () => T, attempts = 8, delayMs = 250): T {
+  let lastError: unknown
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    try {
+      return fn()
+    } catch (error) {
+      lastError = error
+      if (attempt < attempts - 1) sleepSync(delayMs)
+    }
+  }
+  throw lastError
+}
+
+// 跨进程串行化数据库“首次初始化”(设置 pragma + 跑 migration)。
+// 同一个 opencode.db 会被多个 testagent 进程打开(编辑器扩展、编辑器侧 agent host、
+// Agent 窗口 agent host)。若两个进程并发执行初始化(尤其 migration 与
+// wal_checkpoint),会破坏 WAL,产生 "disk I/O error" 并损坏 DB。
+// 用 mkdir 的原子性做互斥锁;超时/陈旧锁(>60s)可抢占。
+function acquireInitLock(dbPath: string, timeoutMs = 30000): () => void {
+  const lockDir = `${dbPath}.init.lock`
+  const start = Date.now()
+  for (;;) {
+    try {
+      mkdirSync(lockDir)
+      return () => {
+        try {
+          rmdirSync(lockDir)
+        } catch {
+          /* already gone */
+        }
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error
+      try {
+        const stat = statSync(lockDir)
+        if (Date.now() - stat.mtimeMs > 60_000) {
+          rmdirSync(lockDir)
+          continue
+        }
+      } catch {
+        /* lock disappeared, retry */
+      }
+      if (Date.now() - start > timeoutMs) throw new Error("timed out waiting for database init lock")
+      sleepSync(200)
+    }
+  }
+}
+// testagent-core_change end
+
 function migrations(dir: string): Journal {
   const dirs = readdirSync(dir, { withFileTypes: true })
     .filter((entry) => entry.isDirectory())
@@ -93,30 +149,40 @@ export const Client = lazy(() => {
 
   const db = init(Path)
 
-  db.run("PRAGMA journal_mode = WAL")
-  db.run("PRAGMA synchronous = NORMAL")
-  db.run("PRAGMA busy_timeout = 5000")
-  db.run("PRAGMA cache_size = -64000")
-  db.run("PRAGMA foreign_keys = ON")
-  db.run("PRAGMA wal_checkpoint(PASSIVE)")
+  // testagent-core_change start
+  // 用跨进程锁把“首次初始化”(pragma + migration)整体串行化,避免多进程并发初始化
+  // 破坏 WAL(详见 acquireInitLock 注释)。busy_timeout 必须先于 journal_mode=WAL 设置。
+  const releaseInitLock = acquireInitLock(Path)
+  try {
+    db.run("PRAGMA busy_timeout = 15000")
+    withRetry(() => db.run("PRAGMA journal_mode = WAL"))
+    db.run("PRAGMA synchronous = NORMAL")
+    db.run("PRAGMA cache_size = -64000")
+    db.run("PRAGMA foreign_keys = ON")
+    // 不再在打开时执行 `PRAGMA wal_checkpoint(PASSIVE)`:多进程并发 checkpoint 会与其他
+    // 进程的写入/迁移竞争并失败/损坏 DB("disk I/O error"),交给 SQLite 自动 checkpoint。
 
-  // Apply schema migrations
-  const entries =
-    typeof OPENCODE_MIGRATIONS !== "undefined"
-      ? OPENCODE_MIGRATIONS
-      : migrations(path.join(import.meta.dirname, "../../migration"))
-  if (entries.length > 0) {
-    log.info("applying migrations", {
-      count: entries.length,
-      mode: typeof OPENCODE_MIGRATIONS !== "undefined" ? "bundled" : "dev",
-    })
-    if (Flag.OPENCODE_SKIP_MIGRATIONS) {
-      for (const item of entries) {
-        item.sql = "select 1;"
+    // Apply schema migrations
+    const entries =
+      typeof OPENCODE_MIGRATIONS !== "undefined"
+        ? OPENCODE_MIGRATIONS
+        : migrations(path.join(import.meta.dirname, "../../migration"))
+    if (entries.length > 0) {
+      log.info("applying migrations", {
+        count: entries.length,
+        mode: typeof OPENCODE_MIGRATIONS !== "undefined" ? "bundled" : "dev",
+      })
+      if (Flag.OPENCODE_SKIP_MIGRATIONS) {
+        for (const item of entries) {
+          item.sql = "select 1;"
+        }
       }
+      applyMigrations(db, entries)
     }
-    applyMigrations(db, entries)
+  } finally {
+    releaseInitLock()
   }
+  // testagent-core_change end
 
   return db
 })
