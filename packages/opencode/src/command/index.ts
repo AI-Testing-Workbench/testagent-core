@@ -68,9 +68,11 @@ export const Default = {
 export interface Interface {
   readonly get: (name: string) => Effect.Effect<Info | undefined>
   readonly list: () => Effect.Effect<Info[]>
+  // test-workbench_change - 失效实例级 command 缓存(配合 POST /command/reload,见 routes)
+  readonly reload: () => Effect.Effect<void>
 }
 
-export class Service extends Context.Service<Service, Interface>()("@opencode/Command") {}
+export class Service extends Context.Service<Service, Interface>()("@opencode/Command") { }
 
 export const layer = Layer.effect(
   Service,
@@ -182,7 +184,15 @@ export const layer = Layer.effect(
       return Object.values(s.commands)
     })
 
-    return Service.of({ get, list })
+    // test-workbench_change start - reload:先失效 Config 实例缓存(commands/*.md 经 config 合并),
+    // 再失效本服务 state,下一次访问才会重扫文件
+    const reload = Effect.fn("Command.reload")(function* () {
+      yield* config.invalidateInstance()
+      yield* InstanceState.invalidate(state)
+    })
+    // test-workbench_change end
+
+    return Service.of({ get, list, reload })
   }),
 )
 

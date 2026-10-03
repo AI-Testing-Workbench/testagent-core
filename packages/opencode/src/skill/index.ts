@@ -257,7 +257,7 @@ const loadSkills = Effect.fnUntraced(function* (
   // testagent_change end
 })
 
-export class Service extends Context.Service<Service, Interface>()("@opencode/Skill") {}
+export class Service extends Context.Service<Service, Interface>()("@opencode/Skill") { }
 
 export const layer = Layer.effect(
   Service,
@@ -303,6 +303,7 @@ export const layer = Layer.effect(
 
     // testagent_change start - add reload method to invalidate cache
     const reload = Effect.fn("Skill.reload")(function* () {
+      yield* config.invalidateInstance() // test-workbench_change - skill 目录/配置经 config.get() 读取,须先失效 Config 实例缓存
       yield* InstanceState.invalidate(discovered)
       yield* InstanceState.invalidate(state)
       log.info("skills reloaded")

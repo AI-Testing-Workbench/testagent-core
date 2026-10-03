@@ -44,7 +44,7 @@ export class ApiVcsApplyError extends Schema.ErrorClass<ApiVcsApplyError>("VcsAp
     }),
   },
   { httpApiStatus: 400 },
-) {}
+) { }
 
 export const InstancePaths = {
   dispose: "/instance/dispose",
@@ -58,6 +58,10 @@ export const InstancePaths = {
   agent: "/agent",
   skill: "/skill",
   skillReload: "/skill/reload",
+  // test-workbench_change start - agent/command 缓存失效端点(管理面板落盘新文件后由 host 调用)
+  agentReload: "/agent/reload",
+  commandReload: "/command/reload",
+  // test-workbench_change end
   mcpReload: "/mcp/reload",
   lsp: "/lsp",
   formatter: "/formatter",
@@ -175,6 +179,26 @@ export const InstanceApi = HttpApi.make("instance")
             description: "Invalidate skill cache and reload all skills from disk",
           }),
         ),
+        // test-workbench_change start - agent/command reload 端点(与 skillReload 同模式)
+        HttpApiEndpoint.post("agentReload", InstancePaths.agentReload, {
+          success: described(ReloadResult, "Agents reloaded successfully"),
+        }).annotateMerge(
+          OpenApi.annotations({
+            identifier: "app.reloadAgents",
+            summary: "Reload agents",
+            description: "Invalidate agent cache and reload all agents from config/disk",
+          }),
+        ),
+        HttpApiEndpoint.post("commandReload", InstancePaths.commandReload, {
+          success: described(ReloadResult, "Commands reloaded successfully"),
+        }).annotateMerge(
+          OpenApi.annotations({
+            identifier: "app.reloadCommands",
+            summary: "Reload commands",
+            description: "Invalidate command cache and reload all commands from config/disk",
+          }),
+        ),
+        // test-workbench_change end
         HttpApiEndpoint.post("mcpReload", InstancePaths.mcpReload, {
           success: described(ReloadResult, "MCP servers reloaded successfully"),
         }).annotateMerge(

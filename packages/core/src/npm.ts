@@ -85,20 +85,28 @@ export const layer = Layer.effect(
         const add = input.add ?? []
         const npmOptions = yield* NpmConfig.load(input.dir)
         
-        // testagent_change start - always use internal registry (highest priority)
-        // Internal registry is always used, ignoring npm config and env variables
+        // testagent_change start - internal registry by default, opt-in to external config
+        // TESTAGENT_NPM_REGISTRY_FLAG=1 -> honor npm config / NPM_REGISTRY env
+        // unset or 0 -> always use internal registry (ignoring npm config and env variables)
         const internalRegistry = `${decodeURIComponent(atob("aHR0cCUzQSUyRiUyRmNlbnRyYWwuamFmLmNtYmNoaW5hLmNu"))}:80/artifactory/api/npm/group-npm`
-        const registry = internalRegistry
-        
         const configRegistry = typeof npmOptions.registry === "string" ? npmOptions.registry : undefined
         const envRegistry = process.env.NPM_REGISTRY
-        
+        const useExternalRegistry = process.env.TESTAGENT_NPM_REGISTRY_FLAG === "1"
+        const registry = useExternalRegistry ? (envRegistry ?? configRegistry ?? internalRegistry) : internalRegistry
+
         log.info('npm registry selection', {
           selected: registry,
-          source: 'internal-registry-forced',
+          source: useExternalRegistry
+            ? envRegistry
+              ? 'env:NPM_REGISTRY'
+              : configRegistry
+                ? 'npm-config'
+                : 'internal-registry-fallback'
+            : 'internal-registry-forced',
           internalRegistry,
-          ignoredConfigRegistry: configRegistry,
-          ignoredEnvRegistry: envRegistry,
+          configRegistry,
+          envRegistry,
+          flag: process.env.TESTAGENT_NPM_REGISTRY_FLAG,
           dir: input.dir
         })
         // testagent_change end
