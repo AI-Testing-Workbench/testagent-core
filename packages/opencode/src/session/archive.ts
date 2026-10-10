@@ -3,7 +3,7 @@ import { Database } from "@/storage/db"
 import { MessageTable, PartTable, SessionTable } from "./session.sql"
 import { MessageV2 } from "./message-v2"
 import { Session } from "./session"
-import { SessionID } from "./schema"
+import { MessageID, PartID, SessionID } from "./schema"
 import { Effect, Schema } from "effect"
 
 export const Archive = Schema.Struct({
@@ -21,6 +21,11 @@ export const ImportResult = Schema.Struct({
   sessionID: SessionID,
   forked: Schema.Boolean,
 }).annotate({ identifier: "SessionImportResult" })
+
+export class InvalidForkArchiveError extends Schema.TaggedErrorClass<InvalidForkArchiveError>()(
+  "SessionArchive.InvalidForkArchiveError",
+  { message: Schema.String },
+) {}
 
 export const exportSession = Effect.fn("SessionArchive.exportSession")(function* (input: {
   session: Session.Interface
@@ -85,6 +90,87 @@ export const importSession = Effect.fn("SessionArchive.importSession")(function*
   }
 
   return row.id
+})
+
+export const forkSession = Effect.fn("SessionArchive.forkSession")(function* (input: { archive: typeof Archive.Type }) {
+  const archive = Schema.decodeUnknownSync(Archive)(input.archive)
+  const sourceMessageIDs = new Set(archive.messages.map((message) => message.info.id))
+  const sourceParts = archive.messages.flatMap((message) => message.parts)
+  const sourcePartIDs = new Set(sourceParts.map((part) => part.id))
+
+  if (sourceMessageIDs.size !== archive.messages.length)
+    return yield* new InvalidForkArchiveError({ message: "Archive contains duplicate message IDs" })
+  if (sourcePartIDs.size !== sourceParts.length)
+    return yield* new InvalidForkArchiveError({ message: "Archive contains duplicate part IDs" })
+  if (
+    archive.messages.some(
+      (message) =>
+        message.info.sessionID !== archive.info.id ||
+        (message.info.role === "assistant" && !sourceMessageIDs.has(message.info.parentID)) ||
+        message.parts.some((part) => part.sessionID !== archive.info.id || part.messageID !== message.info.id),
+    )
+  )
+    return yield* new InvalidForkArchiveError({ message: "Archive contains an invalid session or message reference" })
+
+  const messageIDs = new Map(archive.messages.map((message) => [message.info.id, MessageID.ascending()]))
+  const partIDs = new Map(sourceParts.map((part) => [part.id, PartID.ascending()]))
+  const info = yield* Session.forkInfo(Schema.decodeUnknownSync(Session.Info)(archive.info) as Session.Info)
+  const sessionRow = Session.toRow(info)
+  const messages = archive.messages.map((message) => {
+    const id = messageIDs.get(message.info.id)!
+    const messageInfo = (
+      message.info.role === "assistant"
+        ? {
+            ...message.info,
+            id,
+            sessionID: info.id,
+            parentID: messageIDs.get(message.info.parentID)!,
+          }
+        : { ...message.info, id, sessionID: info.id }
+    ) as MessageV2.Info
+    const { id: _, sessionID: _sessionID, ...data } = messageInfo
+    return {
+      id,
+      session_id: info.id,
+      time_created: messageInfo.time.created,
+      data,
+    }
+  })
+  const parts = archive.messages.flatMap((message) =>
+    message.parts.map((part) => {
+      const id = partIDs.get(part.id)!
+      const messageID = messageIDs.get(part.messageID)!
+      const source = (
+        part.type === "compaction"
+          ? {
+              ...part,
+              tail_start_id: part.tail_start_id ? messageIDs.get(part.tail_start_id) : undefined,
+            }
+          : part
+      ) as MessageV2.Part
+      const { id: _id, sessionID: _sessionID, messageID: _messageID, ...data } = source
+      return {
+        id,
+        message_id: messageID,
+        session_id: info.id,
+        data,
+      }
+    }),
+  )
+
+  yield* Effect.sync(() =>
+    Database.transaction((db) => {
+      db.insert(SessionTable).values(sessionRow).run()
+      if (messages.length) db.insert(MessageTable).values(messages).run()
+      if (parts.length) db.insert(PartTable).values(parts).run()
+    }),
+  )
+
+  return {
+    sourceSessionID: archive.info.id,
+    sessionID: info.id,
+    forked: true,
+  }
 })
 
 function redact(kind: string, id: string, value: string) {

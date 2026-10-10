@@ -199,6 +199,24 @@ export const Info = Schema.Struct({
   .pipe(withStatics((s) => ({ zod: zod(s) })))
 export type Info = Types.DeepMutable<Schema.Schema.Type<typeof Info>>
 
+// testagent_change start - build the target-session metadata for archive forks using existing fork conventions
+export const forkInfo = Effect.fn("Session.forkInfo")(function* (original: Info) {
+  const ctx = yield* InstanceState.context
+  const created = Date.now()
+  return {
+    id: SessionID.descending(),
+    slug: Slug.create(),
+    projectID: ctx.project.id,
+    directory: ctx.directory,
+    path: sessionPath(ctx.worktree, ctx.directory),
+    workspaceID: original.workspaceID,
+    title: getForkedTitle(original.title),
+    version: InstallationVersion,
+    time: { created, updated: created },
+  }
+})
+// testagent_change end
+
 export const ProjectInfo = Schema.Struct({
   id: ProjectID,
   name: optionalOmitUndefined(Schema.String),
