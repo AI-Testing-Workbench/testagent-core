@@ -77,20 +77,30 @@ type ExportData = { info: SDKSession; messages: Array<{ info: Message; parts: Pa
 export const ImportCommand = effectCmd({
   command: "import <file>",
   describe: "import session data from JSON file or URL",
+  // testagent_change start - add Fork as an import mode
   builder: (yargs) =>
-    yargs.positional("file", {
-      describe: "path to JSON file or share URL",
-      type: "string",
-      demandOption: true,
-    }),
+    yargs
+      .positional("file", {
+        describe: "path to JSON file or share URL",
+        type: "string",
+        demandOption: true,
+      })
+      .option("fork", {
+        describe: "import as a new fork with remapped session, message, and part IDs",
+        type: "boolean",
+        default: false,
+      }),
+  // testagent_change end
   handler: Effect.fn("Cli.import")(function* (args) {
     const ctx = yield* InstanceRef
     if (!ctx) return yield* Effect.die("InstanceRef not provided")
-    return yield* runImport(args.file, ctx.project.id)
+    return yield* runImport(args.file, ctx.project.id, args.fork) // testagent_change
   }),
 })
 
-const runImport = Effect.fn("Cli.import.body")(function* (file: string, projectID: string) {
+// testagent_change start - thread the new CLI option into archive import
+const runImport = Effect.fn("Cli.import.body")(function* (file: string, projectID: string, fork: boolean) {
+  // testagent_change end
   const share = yield* ShareNext.Service
 
   let exportData: ExportData | undefined
@@ -162,12 +172,18 @@ const runImport = Effect.fn("Cli.import.body")(function* (file: string, projectI
     return
   }
 
-  // testagent_change start - replace CLI-local archive decoding/database writes with the shared import use case
+  // testagent_change start - choose ordinary import or shared Fork use case
   const archive = yield* Schema.decodeUnknownEffect(SessionArchive.Archive)(exportData).pipe(
     Effect.mapError((error) => new CliError({ message: `Invalid session archive: ${String(error)}` })),
   )
-  const sessionID = yield* SessionArchive.importSession({ archive, projectID })
-  process.stdout.write(`Imported session: ${sessionID}`)
+  const importOperation = fork
+    ? SessionArchive.forkSession({ archive }).pipe(
+        Effect.map((result) => result.sessionID),
+        Effect.mapError((error) => new CliError({ message: error.message })),
+      )
+    : SessionArchive.importSession({ archive, projectID })
+  const sessionID = yield* importOperation
+  process.stdout.write(`${fork ? "Forked" : "Imported"} session: ${sessionID}`)
   // testagent_change end
   process.stdout.write(EOL)
 })
