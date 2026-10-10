@@ -6373,6 +6373,36 @@ export type SessionImportResponses = {
 
 export type SessionImportResponse = SessionImportResponses[keyof SessionImportResponses]
 
+export type SessionImportForkData = {
+  body?: SessionArchive
+  path: {
+    sessionID: string
+  }
+  query?: {
+    directory?: string
+    workspace?: string
+  }
+  url: "/session/{sessionID}/import/fork"
+}
+
+export type SessionImportForkErrors = {
+  /**
+   * Bad request
+   */
+  400: BadRequestError
+}
+
+export type SessionImportForkError = SessionImportForkErrors[keyof SessionImportForkErrors]
+
+export type SessionImportForkResponses = {
+  /**
+   * Forked session
+   */
+  200: SessionImportResult
+}
+
+export type SessionImportForkResponse = SessionImportForkResponses[keyof SessionImportForkResponses]
+
 export type SessionForkData = {
   body?: {
     messageID?: string

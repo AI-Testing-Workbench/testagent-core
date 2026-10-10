@@ -298,7 +298,7 @@ describe("session HttpApi", () => {
     ),
   )
 
-  // testagent_change start - verify CLI-compatible HTTP archive import/export
+  // testagent_change start - verify CLI-compatible HTTP archive import/export and Fork import
   it.live(
     "exports and imports CLI-compatible session archives",
     withTmp({ git: true, config: { formatter: false, lsp: false } }, (tmp) =>
@@ -423,6 +423,90 @@ describe("session HttpApi", () => {
 
         const missing = yield* request(pathFor(SessionPaths.export, { sessionID: SessionID.descending() }), { headers })
         expect(missing.status).toBe(404)
+      }),
+    ),
+  )
+
+  it.live(
+    "fork-imports an archive through the HTTP API",
+    withTmp({ git: true, config: { formatter: false, lsp: false } }, (tmp) =>
+      Effect.gen(function* () {
+        const headers = { "x-opencode-directory": tmp.path, "content-type": "application/json" }
+        const source = yield* createSession(tmp.path, { title: "fork source" })
+        const message = yield* createTextMessage(tmp.path, source.id, "forked content")
+        const archiveResponse = yield* request(pathFor(SessionPaths.export, { sessionID: source.id }), { headers })
+        const archive = (yield* responseJson(archiveResponse)) as typeof SessionArchive.Archive.Type
+        const importForkPath = pathFor(SessionPaths.importFork, { sessionID: source.id })
+
+        const mismatch = yield* request(importForkPath, {
+          method: "POST",
+          headers,
+          body: JSON.stringify({ ...archive, info: { ...archive.info, id: SessionID.descending() } }),
+        })
+        expect(mismatch.status).toBe(400)
+
+        const invalidReference = yield* request(importForkPath, {
+          method: "POST",
+          headers,
+          body: JSON.stringify({
+            ...archive,
+            messages: archive.messages.map((item) => ({
+              ...item,
+              info: { ...item.info, sessionID: SessionID.descending() },
+            })),
+          }),
+        })
+        expect(invalidReference.status).toBe(400)
+
+        const invalidBody = yield* request(importForkPath, {
+          method: "POST",
+          headers,
+          body: JSON.stringify({ info: {}, messages: [] }),
+        })
+        expect(invalidBody.status).toBe(400)
+
+        const imported = yield* request(importForkPath, {
+          method: "POST",
+          headers,
+          body: JSON.stringify(archive),
+        })
+        expect(imported.status).toBe(200)
+        const result = (yield* responseJson(imported)) as typeof SessionArchive.ImportResult.Type
+        expect(result).toMatchObject({ sourceSessionID: source.id, forked: true })
+        expect(result.sessionID).not.toBe(source.id)
+
+        const repeated = yield* request(importForkPath, {
+          method: "POST",
+          headers,
+          body: JSON.stringify(archive),
+        })
+        expect(repeated.status).toBe(200)
+        const repeatedResult = (yield* responseJson(repeated)) as typeof SessionArchive.ImportResult.Type
+        expect(repeatedResult.sessionID).not.toBe(result.sessionID)
+
+        const forked = yield* requestJson<Session.Info>(pathFor(SessionPaths.get, { sessionID: result.sessionID }), {
+          headers,
+        })
+        expect(forked).toMatchObject({ title: "fork source (fork #1)", directory: tmp.path })
+
+        const messages = yield* requestJson<MessageV2.WithParts[]>(
+          pathFor(SessionPaths.messages, { sessionID: result.sessionID }),
+          { headers },
+        )
+        expect(messages).toHaveLength(1)
+        const forkedMessage = messages[0]
+        expect(forkedMessage).toBeDefined()
+        if (!forkedMessage) throw new Error("Forked message is missing")
+        expect(forkedMessage.info.id).not.toBe(message.info.id)
+        expect(forkedMessage.parts[0]?.id).not.toBe(message.part.id)
+        expect(forkedMessage.parts[0]).toMatchObject({
+          sessionID: result.sessionID,
+          messageID: forkedMessage.info.id,
+          text: "forked content",
+        })
+        expect(
+          yield* requestJson<Session.Info>(pathFor(SessionPaths.get, { sessionID: source.id }), { headers }),
+        ).toMatchObject({ title: "fork source" })
       }),
     ),
   )

@@ -81,7 +81,7 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       return yield* SessionError.mapStorageNotFound(session.get(ctx.params.sessionID))
     })
 
-    // testagent_change start - share archive operations with the local CLI adapter
+    // testagent_change start - share archive operations and map fork validation errors at the HTTP boundary
     const exportArchive = Effect.fn("SessionHttpApi.exportArchive")(function* (ctx: {
       params: { sessionID: SessionID }
       query: typeof ExportQuery.Type
@@ -110,6 +110,16 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
         sessionID,
         forked: false,
       }
+    })
+
+    const importForkArchive = Effect.fn("SessionHttpApi.importForkArchive")(function* (ctx: {
+      params: { sessionID: SessionID }
+      payload: typeof SessionArchive.Archive.Type
+    }) {
+      if (ctx.params.sessionID !== ctx.payload.info.id) return yield* new HttpApiError.BadRequest({})
+      return yield* SessionArchive.forkSession({ archive: ctx.payload }).pipe(
+        Effect.catchTag("SessionArchive.InvalidForkArchiveError", () => Effect.fail(new HttpApiError.BadRequest({}))),
+      )
     })
     // testagent_change end
 
@@ -527,6 +537,7 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       .handle("get", get)
       .handle("exportArchive", exportArchive) // testagent_change
       .handle("importArchive", importArchive) // testagent_change
+      .handle("importForkArchive", importForkArchive) // testagent_change
       .handle("children", children)
       .handle("todo", todo)
       .handle("diff", diff)

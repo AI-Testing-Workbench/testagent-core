@@ -121,6 +121,7 @@ export const SessionPaths = {
   // testagent_change start - V1 archive endpoints
   export: `${root}/:sessionID/export`,
   import: `${root}/:sessionID/import`,
+  importFork: `${root}/:sessionID/import/fork`,
   // testagent_change end
   create: root,
   remove: `${root}/:sessionID`,
@@ -236,7 +237,7 @@ export const SessionApi = HttpApi.make("session")
             description: "Retrieve a specific message from a session by its message ID.",
           }),
         ),
-        // testagent_change start - ordinary V1 session archive endpoints
+        // testagent_change start - V1 session archive endpoints
         HttpApiEndpoint.get("exportArchive", SessionPaths.export, {
           params: { sessionID: SessionID },
           query: ExportQuery,
@@ -259,6 +260,18 @@ export const SessionApi = HttpApi.make("session")
             identifier: "session.import",
             summary: "Import session",
             description: "Import a CLI-compatible session archive while preserving its session, message, and part IDs.",
+          }),
+        ),
+        HttpApiEndpoint.post("importForkArchive", SessionPaths.importFork, {
+          params: { sessionID: SessionID },
+          payload: SessionArchive.Archive,
+          success: described(SessionArchive.ImportResult, "Forked session"),
+          error: [HttpApiError.BadRequest],
+        }).annotateMerge(
+          OpenApi.annotations({
+            identifier: "session.importFork",
+            summary: "Fork imported session",
+            description: "Import a session archive as a new session with remapped session, message, and part IDs.",
           }),
         ),
         // testagent_change end

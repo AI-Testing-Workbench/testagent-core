@@ -155,6 +155,8 @@ import type {
   SessionGetErrors,
   SessionGetResponses,
   SessionImportErrors,
+  SessionImportForkErrors,
+  SessionImportForkResponses,
   SessionImportResponses,
   SessionInitErrors,
   SessionInitResponses,
@@ -4451,6 +4453,45 @@ export class Session2 extends HeyApiClient {
     )
     return (options?.client ?? this.client).post<SessionImportResponses, SessionImportErrors, ThrowOnError>({
       url: "/session/{sessionID}/import",
+      ...options,
+      ...params,
+      headers: {
+        "Content-Type": "application/json",
+        ...options?.headers,
+        ...params.headers,
+      },
+    })
+  }
+
+  /**
+   * Fork imported session
+   *
+   * Import a session archive as a new session with remapped session, message, and part IDs.
+   */
+  public importFork<ThrowOnError extends boolean = false>(
+    parameters: {
+      sessionID: string
+      directory?: string
+      workspace?: string
+      sessionArchive?: SessionArchive
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "path", key: "sessionID" },
+            { in: "query", key: "directory" },
+            { in: "query", key: "workspace" },
+            { key: "sessionArchive", map: "body" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).post<SessionImportForkResponses, SessionImportForkErrors, ThrowOnError>({
+      url: "/session/{sessionID}/import/fork",
       ...options,
       ...params,
       headers: {
