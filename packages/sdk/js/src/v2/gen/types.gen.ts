@@ -1746,6 +1746,20 @@ export type ProviderAuthAuthorization = {
   instructions: string
 }
 
+export type SessionArchive = {
+  info: Session
+  messages: Array<{
+    info: Message
+    parts: Array<Part>
+  }>
+}
+
+export type SessionImportResult = {
+  sourceSessionID: string
+  sessionID: string
+  forked: boolean
+}
+
 export type TextPartInput = {
   id?: string
   type: "text"
@@ -3677,6 +3691,12 @@ export type TestagentEnvVarsListResponses = {
         value: string
       }
     }
+    remote: {
+      [key: string]: {
+        key: string
+        value: string
+      }
+    }
   }
 }
 
@@ -3717,6 +3737,12 @@ export type TestagentEnvVarsBatchQueryResponses = {
       }
     }
     custom: {
+      [key: string]: {
+        key: string
+        value: string
+      }
+    }
+    remote: {
       [key: string]: {
         key: string
         value: string
@@ -3808,6 +3834,49 @@ export type TestagentCustomEnvVarsBatchUpdateResponses = {
 export type TestagentCustomEnvVarsBatchUpdateResponse =
   TestagentCustomEnvVarsBatchUpdateResponses[keyof TestagentCustomEnvVarsBatchUpdateResponses]
 
+export type TestagentEnvVarsEnsureRemoteData = {
+  body?: never
+  path?: never
+  query?: {
+    directory?: string
+    workspace?: string
+  }
+  url: "/testagent/env-vars/remote/ensure"
+}
+
+export type TestagentEnvVarsEnsureRemoteResponses = {
+  /**
+   * 远程接口变量补齐结果
+   */
+  200: {
+    created: boolean
+    keys: Array<string>
+  }
+}
+
+export type TestagentEnvVarsEnsureRemoteResponse =
+  TestagentEnvVarsEnsureRemoteResponses[keyof TestagentEnvVarsEnsureRemoteResponses]
+
+export type TestagentEnvVarsClearRemoteData = {
+  body?: never
+  path?: never
+  query?: {
+    directory?: string
+    workspace?: string
+  }
+  url: "/testagent/env-vars/remote"
+}
+
+export type TestagentEnvVarsClearRemoteResponses = {
+  /**
+   * 远程接口变量清理成功
+   */
+  200: boolean
+}
+
+export type TestagentEnvVarsClearRemoteResponse =
+  TestagentEnvVarsClearRemoteResponses[keyof TestagentEnvVarsClearRemoteResponses]
+
 export type TestagentZhAnswerSetData = {
   body?: {
     enabled: boolean
@@ -3883,6 +3952,50 @@ export type TestagentAgentOverrideSetResponses = {
 
 export type TestagentAgentOverrideSetResponse =
   TestagentAgentOverrideSetResponses[keyof TestagentAgentOverrideSetResponses]
+
+export type TestagentYoloGetData = {
+  body?: never
+  path?: never
+  query?: {
+    directory?: string
+    workspace?: string
+  }
+  url: "/testagent/yolo"
+}
+
+export type TestagentYoloGetResponses = {
+  /**
+   * Current YOLO mode
+   */
+  200: {
+    enabled: boolean
+  }
+}
+
+export type TestagentYoloGetResponse = TestagentYoloGetResponses[keyof TestagentYoloGetResponses]
+
+export type TestagentYoloSetData = {
+  body?: {
+    enabled: boolean
+  }
+  path?: never
+  query?: {
+    directory?: string
+    workspace?: string
+  }
+  url: "/testagent/yolo"
+}
+
+export type TestagentYoloSetResponses = {
+  /**
+   * YOLO mode set successfully
+   */
+  200: {
+    applied: boolean
+  }
+}
+
+export type TestagentYoloSetResponse = TestagentYoloSetResponses[keyof TestagentYoloSetResponses]
 
 export type EventSubscribeData = {
   body?: never
@@ -4752,6 +4865,48 @@ export type AppReloadSkillsResponses = {
 }
 
 export type AppReloadSkillsResponse = AppReloadSkillsResponses[keyof AppReloadSkillsResponses]
+
+export type AppReloadAgentsData = {
+  body?: never
+  path?: never
+  query?: {
+    directory?: string
+    workspace?: string
+  }
+  url: "/agent/reload"
+}
+
+export type AppReloadAgentsResponses = {
+  /**
+   * Agents reloaded successfully
+   */
+  200: {
+    success: boolean
+  }
+}
+
+export type AppReloadAgentsResponse = AppReloadAgentsResponses[keyof AppReloadAgentsResponses]
+
+export type AppReloadCommandsData = {
+  body?: never
+  path?: never
+  query?: {
+    directory?: string
+    workspace?: string
+  }
+  url: "/command/reload"
+}
+
+export type AppReloadCommandsResponses = {
+  /**
+   * Commands reloaded successfully
+   */
+  200: {
+    success: boolean
+  }
+}
+
+export type AppReloadCommandsResponse = AppReloadCommandsResponses[keyof AppReloadCommandsResponses]
 
 export type McpReloadData = {
   body?: never
@@ -6152,6 +6307,71 @@ export type SessionMessageResponses = {
 }
 
 export type SessionMessageResponse = SessionMessageResponses[keyof SessionMessageResponses]
+
+export type SessionExportData = {
+  body?: never
+  path: {
+    sessionID: string
+  }
+  query?: {
+    directory?: string
+    workspace?: string
+    sanitize?: boolean | "true" | "false"
+  }
+  url: "/session/{sessionID}/export"
+}
+
+export type SessionExportErrors = {
+  /**
+   * Bad request
+   */
+  400: BadRequestError
+  /**
+   * NotFoundError
+   */
+  404: NotFoundError
+}
+
+export type SessionExportError = SessionExportErrors[keyof SessionExportErrors]
+
+export type SessionExportResponses = {
+  /**
+   * Session archive
+   */
+  200: SessionArchive
+}
+
+export type SessionExportResponse = SessionExportResponses[keyof SessionExportResponses]
+
+export type SessionImportData = {
+  body?: SessionArchive
+  path: {
+    sessionID: string
+  }
+  query?: {
+    directory?: string
+    workspace?: string
+  }
+  url: "/session/{sessionID}/import"
+}
+
+export type SessionImportErrors = {
+  /**
+   * Bad request
+   */
+  400: BadRequestError
+}
+
+export type SessionImportError = SessionImportErrors[keyof SessionImportErrors]
+
+export type SessionImportResponses = {
+  /**
+   * Imported session
+   */
+  200: SessionImportResult
+}
+
+export type SessionImportResponse = SessionImportResponses[keyof SessionImportResponses]
 
 export type SessionForkData = {
   body?: {

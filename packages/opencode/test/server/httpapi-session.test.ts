@@ -17,6 +17,7 @@ import { SessionPaths } from "../../src/server/routes/instance/httpapi/groups/se
 import { Session } from "@/session/session"
 import { MessageID, PartID, SessionID, type SessionID as SessionIDType } from "../../src/session/schema"
 import { MessageV2 } from "../../src/session/message-v2"
+import { SessionArchive } from "../../src/session/archive" // testagent_change
 import { Database } from "@/storage/db"
 import { SessionMessageTable, SessionTable } from "@/session/session.sql"
 import { SessionMessage } from "../../src/v2/session-message"
@@ -296,6 +297,136 @@ describe("session HttpApi", () => {
       }),
     ),
   )
+
+  // testagent_change start - verify CLI-compatible HTTP archive import/export
+  it.live(
+    "exports and imports CLI-compatible session archives",
+    withTmp({ git: true, config: { formatter: false, lsp: false } }, (tmp) =>
+      Effect.gen(function* () {
+        const headers = { "x-opencode-directory": tmp.path, "content-type": "application/json" }
+        const session = yield* createSession(tmp.path, { title: "archive session" })
+        const message = yield* createTextMessage(tmp.path, session.id, "original text")
+        const exportPath = pathFor(SessionPaths.export, { sessionID: session.id })
+        const importPath = pathFor(SessionPaths.import, { sessionID: session.id })
+
+        const exported = yield* request(exportPath, { headers })
+        expect(exported.status).toBe(200)
+        expect(exported.headers.get("content-type")).toContain("application/json")
+        const archive = (yield* responseJson(exported)) as typeof SessionArchive.Archive.Type
+        expect(archive).toMatchObject({
+          info: { id: session.id, title: "archive session" },
+          messages: [{ info: { id: message.info.id }, parts: [{ id: message.part.id, text: "original text" }] }],
+        })
+
+        const sanitizedResponse = yield* request(`${exportPath}?sanitize=true`, { headers })
+        const sanitized = (yield* responseJson(sanitizedResponse)) as typeof SessionArchive.Archive.Type
+        expect(sanitized.info.title).toBe(`[redacted:session-title:${session.id}]`)
+        expect(sanitized.messages[0]?.parts[0]).toMatchObject({
+          id: message.part.id,
+          text: `[redacted:text:${message.part.id}]`,
+        })
+
+        yield* request(pathFor(SessionPaths.update, { sessionID: session.id }), {
+          method: "PATCH",
+          headers,
+          body: JSON.stringify({ title: "existing title" }),
+        })
+        yield* request(
+          pathFor(SessionPaths.updatePart, {
+            sessionID: session.id,
+            messageID: message.info.id,
+            partID: message.part.id,
+          }),
+          {
+            method: "PATCH",
+            headers,
+            body: JSON.stringify({ ...message.part, text: "existing text" }),
+          },
+        )
+
+        const conflict = yield* request(importPath, {
+          method: "POST",
+          headers,
+          body: JSON.stringify(archive),
+        })
+        expect(conflict.status).toBe(200)
+        expect(yield* responseJson(conflict)).toEqual({
+          sourceSessionID: session.id,
+          sessionID: session.id,
+          forked: false,
+        })
+        expect(
+          yield* requestJson<Session.Info>(pathFor(SessionPaths.get, { sessionID: session.id }), { headers }),
+        ).toMatchObject({ title: "existing title" })
+        expect(
+          yield* requestJson<MessageV2.WithParts>(
+            pathFor(SessionPaths.message, { sessionID: session.id, messageID: message.info.id }),
+            { headers },
+          ),
+        ).toMatchObject({ parts: [{ text: "existing text" }] })
+
+        const removed = yield* request(pathFor(SessionPaths.remove, { sessionID: session.id }), {
+          method: "DELETE",
+          headers,
+        })
+        expect(removed.status).toBe(200)
+
+        const imported = yield* request(importPath, {
+          method: "POST",
+          headers,
+          body: JSON.stringify(archive),
+        })
+        expect(imported.status).toBe(200)
+        expect(yield* responseJson(imported)).toEqual({
+          sourceSessionID: session.id,
+          sessionID: session.id,
+          forked: false,
+        })
+        expect(
+          yield* requestJson<Session.Info>(pathFor(SessionPaths.get, { sessionID: session.id }), { headers }),
+        ).toMatchObject({ title: "archive session" })
+        expect(
+          yield* requestJson<MessageV2.WithParts>(
+            pathFor(SessionPaths.message, { sessionID: session.id, messageID: message.info.id }),
+            { headers },
+          ),
+        ).toMatchObject({ parts: [{ text: "original text" }] })
+      }),
+    ),
+  )
+
+  it.live(
+    "validates archive imports and reports missing export sessions",
+    withTmp({ git: true, config: { formatter: false, lsp: false } }, (tmp) =>
+      Effect.gen(function* () {
+        const headers = { "x-opencode-directory": tmp.path, "content-type": "application/json" }
+        const session = yield* createSession(tmp.path, { title: "archive validation" })
+        const archiveResponse = yield* request(pathFor(SessionPaths.export, { sessionID: session.id }), { headers })
+        const archive = (yield* responseJson(archiveResponse)) as typeof SessionArchive.Archive.Type
+
+        const invalid = yield* request(pathFor(SessionPaths.import, { sessionID: session.id }), {
+          method: "POST",
+          headers,
+          body: JSON.stringify({ info: {}, messages: [] }),
+        })
+        expect(invalid.status).toBe(400)
+
+        const mismatch = yield* request(pathFor(SessionPaths.import, { sessionID: session.id }), {
+          method: "POST",
+          headers,
+          body: JSON.stringify({
+            ...archive,
+            info: { ...archive.info, id: SessionID.descending() },
+          }),
+        })
+        expect(mismatch.status).toBe(400)
+
+        const missing = yield* request(pathFor(SessionPaths.export, { sessionID: SessionID.descending() }), { headers })
+        expect(missing.status).toBe(404)
+      }),
+    ),
+  )
+  // testagent_change end
 
   it.live(
     "serves lifecycle mutation routes",

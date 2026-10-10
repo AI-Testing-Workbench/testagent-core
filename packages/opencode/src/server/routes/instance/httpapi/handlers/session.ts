@@ -16,6 +16,7 @@ import { SessionStatus } from "@/session/status"
 import { SessionSummary } from "@/session/summary"
 import { Todo } from "@/session/todo"
 import { MessageID, PartID, SessionID } from "@/session/schema"
+import { SessionArchive } from "@/session/archive" // testagent_change
 import { NotFoundError } from "@/storage/storage"
 import { NamedError } from "@opencode-ai/core/util/error"
 import * as Log from "@opencode-ai/core/util/log" // testagent_change
@@ -27,6 +28,7 @@ import { InstanceHttpApi } from "../api"
 import {
   CommandPayload,
   DiffQuery,
+  ExportQuery, // testagent_change
   ForkPayload,
   InitPayload,
   ListQuery,
@@ -78,6 +80,38 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
     const get = Effect.fn("SessionHttpApi.get")(function* (ctx: { params: { sessionID: SessionID } }) {
       return yield* SessionError.mapStorageNotFound(session.get(ctx.params.sessionID))
     })
+
+    // testagent_change start - share archive operations with the local CLI adapter
+    const exportArchive = Effect.fn("SessionHttpApi.exportArchive")(function* (ctx: {
+      params: { sessionID: SessionID }
+      query: typeof ExportQuery.Type
+    }) {
+      return yield* SessionError.mapStorageNotFound(
+        SessionArchive.exportSession({
+          session,
+          sessionID: ctx.params.sessionID,
+          sanitize: ctx.query.sanitize,
+        }),
+      )
+    })
+
+    const importArchive = Effect.fn("SessionHttpApi.importArchive")(function* (ctx: {
+      params: { sessionID: SessionID }
+      payload: typeof SessionArchive.Archive.Type
+    }) {
+      if (ctx.params.sessionID !== ctx.payload.info.id) return yield* new HttpApiError.BadRequest({})
+      const instance = yield* InstanceState.context
+      const sessionID = yield* SessionArchive.importSession({
+        archive: ctx.payload,
+        projectID: instance.project.id,
+      })
+      return {
+        sourceSessionID: ctx.params.sessionID,
+        sessionID,
+        forked: false,
+      }
+    })
+    // testagent_change end
 
     const children = Effect.fn("SessionHttpApi.children")(function* (ctx: { params: { sessionID: SessionID } }) {
       return yield* session.children(ctx.params.sessionID)
@@ -491,6 +525,8 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       .handle("list", list)
       .handle("status", status)
       .handle("get", get)
+      .handle("exportArchive", exportArchive) // testagent_change
+      .handle("importArchive", importArchive) // testagent_change
       .handle("children", children)
       .handle("todo", todo)
       .handle("diff", diff)
