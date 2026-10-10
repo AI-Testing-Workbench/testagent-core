@@ -1948,12 +1948,24 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       // testagent_change end
 
       // 并发消费全部 subtask；运行期失败已被 handleSubtask 的 catchCause 吞掉、不短路
-      // v2 - 按 user 消息携带的 maxConcurrency 限流；未传时回退 unbounded（v1 行为）
+      // v2 - 仅当 user 消息显式携带 maxConcurrency 时限流，并按服务端硬上限兜底；未传保持 unbounded（老路径）
+      const MAX_CONCURRENT_SUBTASKS = 5
+      let requestedConcurrency = lastUser.maxConcurrency
+      if (requestedConcurrency != null) {
+        if (requestedConcurrency > MAX_CONCURRENT_SUBTASKS) {
+          yield* elog.info("subtask concurrency capped", {
+            sessionID,
+            requested: requestedConcurrency,
+            cap: MAX_CONCURRENT_SUBTASKS,
+          })
+          requestedConcurrency = MAX_CONCURRENT_SUBTASKS
+        }
+      }
       yield* Effect.all(
         subtasks.map((task) =>
           handleSubtask({ task, model, lastUser, sessionID, session, msgs, override: batchOverride }),
         ),
-        { concurrency: lastUser.maxConcurrency ?? "unbounded" },
+        { concurrency: requestedConcurrency ?? "unbounded" },
       )
 
       // 交还 runLoop 跑后续 LLM step + exit
