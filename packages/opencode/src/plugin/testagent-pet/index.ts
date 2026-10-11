@@ -26,16 +26,17 @@ type Options = {
   enabled?: boolean
 }
 
-/** States understood by the desktop pet (`DesktopPetState` in tscode). */
-export type PetState =
-  | "idle"
-  | "thinking"
-  | "working"
-  | "sweeping"
-  | "attention"
-  | "notification"
-  | "error"
-  | "sleeping"
+/**
+ * States understood by the desktop pet (`DesktopPetState` in tscode).
+ *
+ * Deliberately small and identical to the Agent Host mode mapping so the pet
+ * looks the same regardless of the consumer:
+ *   - `working`      → thinking.svg     (turn/tool in progress; held)
+ *   - `complete`     → attention.svg    (turn finished)
+ *   - `notification` → notification.svg (permission asked / question asked)
+ *   - `idle`         → reset to the self-running idle lifecycle
+ */
+export type PetState = "idle" | "working" | "complete" | "notification"
 
 type TranslateResult = {
   state: PetState
@@ -68,41 +69,47 @@ export function translateEvent(event: BusEvent): TranslateResult | undefined {
   const sessionID = sessionIDFromEvent(event)
 
   switch (event.type) {
-    case "session.created":
-      return { state: "idle", sessionID }
     case "session.status": {
+      // Busy covers reasoning + response + tool use.
       const status = props.status
       const type = typeof status === "object" && status !== null ? (status as { type?: unknown }).type : undefined
-      if (type === "busy") return { state: "thinking", sessionID }
+      if (type === "busy") return { state: "working", sessionID }
       return undefined
     }
     case "message.part.updated": {
       const part = props.part
       if (typeof part !== "object" || part === null) return undefined
       const type = (part as { type?: unknown }).type
-      if (type === "compaction") return { state: "sweeping", sessionID }
+      // Reasoning / assistant text / compaction → working.
+      if (type === "reasoning" || type === "text" || type === "compaction") {
+        return { state: "working", sessionID }
+      }
       if (type === "tool") {
         const state = (part as { state?: unknown }).state
         const status =
           typeof state === "object" && state !== null ? (state as { status?: unknown }).status : undefined
         if (status === "running" || status === "completed") return { state: "working", sessionID }
-        if (status === "error") return { state: "error", sessionID }
       }
       return undefined
     }
     case "session.compacted":
-      return { state: "sweeping", sessionID }
+      return { state: "working", sessionID }
     case "permission.asked":
     case "question.asked":
+      // Held until the user responds (notification is a sticky state).
       return { state: "notification", sessionID }
-    case "session.error":
-      return { state: "error", sessionID }
+    case "permission.replied":
+    case "question.replied":
+    case "question.rejected":
+      // The user responded; the agent resumes working.
+      return { state: "working", sessionID }
     case "session.idle":
-      // Reason "user_abort" is a cancellation, not a finished turn.
+      // Turn finished → complete. An explicit user abort just resets to idle.
       if (props.reason === "user_abort") return { state: "idle", sessionID }
-      return { state: "attention", sessionID }
-    case "session.deleted":
-      return { state: "sleeping", sessionID }
+      return { state: "complete", sessionID }
+    case "session.error":
+      // No dedicated error state; just stop the busy pose.
+      return { state: "idle", sessionID }
     default:
       return undefined
   }
@@ -126,11 +133,46 @@ export const PetPlugin: Plugin = async (_input, options?: Options) => {
     return {}
   }
 
+  // Sessions currently blocked on the user (permission / question). While a
+  // session is in this set, `working` updates are suppressed so the sticky
+  // notification state is held until the user answers. This mirrors the Agent
+  // Host side, which suppresses working while `SessionInputNeeded*` is
+  // outstanding. Without it, the question tool's own `session.status`/tool-part
+  // updates arrive right after `question.asked` and immediately override the
+  // notification pose.
+  const waiting = new Set<string>()
+
   return {
     async event({ event }) {
-      const translated = translateEvent(event as BusEvent)
+      const e = event as BusEvent
+      const translated = translateEvent(e)
       if (!translated) return
-      emit(translated.state, event as BusEvent, translated.sessionID)
+      const sid = translated.sessionID ?? ""
+
+      switch (e.type) {
+        case "permission.asked":
+        case "question.asked":
+          if (sid) waiting.add(sid)
+          emit(translated.state, e, translated.sessionID)
+          return
+        case "permission.replied":
+        case "question.replied":
+        case "question.rejected":
+          waiting.delete(sid)
+          emit(translated.state, e, translated.sessionID)
+          return
+        default:
+          break
+      }
+
+      // Suppress busy updates while the session is waiting for the user.
+      if (translated.state === "working" && sid && waiting.has(sid)) {
+        return
+      }
+      if (translated.state === "complete" || translated.state === "idle") {
+        waiting.delete(sid)
+      }
+      emit(translated.state, e, translated.sessionID)
     },
   }
 }
