@@ -1,13 +1,20 @@
 import type { Session as SDKSession, Message, Part } from "@opencode-ai/sdk/v2"
 import { SessionArchive } from "@/session/archive" // testagent_change
+// import { MessageV2 } from "../../session/message-v2" // testagent_change
 import { CliError, effectCmd } from "../effect-cmd"
+// import { Database } from "@/storage/db" // testagent_change
+// import { SessionTable, MessageTable, PartTable } from "../../session/session.sql" // testagent_change
 import { InstanceRef } from "@/effect/instance-ref"
 import { ShareNext } from "@/share/share-next"
 import { EOL } from "os"
 import { Filesystem } from "@/util/filesystem"
 import { Effect, Schema } from "effect"
 
-// testagent_change start - removed CLI-local message/part decoders; use the shared Archive schema below
+// testagent_change start - retain the removed CLI-local imports and decoders; active validation uses SessionArchive.Archive
+/*
+const decodeMessageInfo = Schema.decodeUnknownSync(MessageV2.Info)
+const decodePart = Schema.decodeUnknownSync(MessageV2.Part)
+*/
 // testagent_change end
 
 /** Discriminated union returned by the ShareNext API (GET /api/shares/:id/data) */
@@ -171,6 +178,59 @@ const runImport = Effect.fn("Cli.import.body")(function* (file: string, projectI
     process.stdout.write(EOL)
     return
   }
+
+  // testagent_change start - retain the removed CLI-local persistence path; active path uses shared archive use cases
+  /*
+  const info = Schema.decodeUnknownSync(Session.Info)({
+    ...exportData.info,
+    projectID,
+  }) as Session.Info
+  const row = Session.toRow(info)
+  Database.use((db) =>
+    db
+      .insert(SessionTable)
+      .values(row)
+      .onConflictDoUpdate({ target: SessionTable.id, set: { project_id: row.project_id } })
+      .run(),
+  )
+
+  for (const msg of exportData.messages) {
+    const msgInfo = decodeMessageInfo(msg.info) as MessageV2.Info
+    const { id, sessionID: _, ...msgData } = msgInfo
+    Database.use((db) =>
+      db
+        .insert(MessageTable)
+        .values({
+          id,
+          session_id: row.id,
+          time_created: msgInfo.time?.created ?? Date.now(),
+          data: msgData,
+        })
+        .onConflictDoNothing()
+        .run(),
+    )
+
+    for (const part of msg.parts) {
+      const partInfo = decodePart(part) as MessageV2.Part
+      const { id: partId, sessionID: _s, messageID, ...partData } = partInfo
+      Database.use((db) =>
+        db
+          .insert(PartTable)
+          .values({
+            id: partId,
+            message_id: messageID,
+            session_id: row.id,
+            data: partData,
+          })
+          .onConflictDoNothing()
+          .run(),
+      )
+    }
+  }
+
+  process.stdout.write(`Imported session: ${exportData.info.id}`)
+  */
+  // testagent_change end
 
   // testagent_change start - choose ordinary import or shared Fork use case
   const archive = yield* Schema.decodeUnknownEffect(SessionArchive.Archive)(exportData).pipe(
