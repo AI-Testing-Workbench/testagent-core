@@ -1005,7 +1005,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         system: input.system,
         thinkingEnabled: input.thinkingEnabled,
         format: input.format,
-        maxConcurrency: input.maxConcurrency,
+        maxConcurrency: input.maxConcurrency, // testagent_change sdt并发执行 subtask 时的并发度上限
       }
 
       const current = Database.use((db) =>
@@ -2254,8 +2254,7 @@ export const PromptInput = Schema.Struct({
   format: Schema.optional(MessageV2.Format),
   system: Schema.optional(Schema.String),
   variant: Schema.optional(Schema.String),
-  // v2 - 并发执行 subtask 时的并发度上限，透传到 runParallelSubtasks 的 Effect.all
-  maxConcurrency: Schema.optional(Schema.Number),
+  maxConcurrency: Schema.optional(Schema.Number), // testagent_change sdt并发执行 subtask 时的并发度上限
   parts: Schema.Array(
     Schema.Union([
       MessageV2.TextPartInput,
