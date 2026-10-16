@@ -40,7 +40,11 @@ const getOtelRt = () => {
   return otelRt
 }
 
-const info = (message: string, data?: Record<string, unknown>) => getOtelRt().runFork(Effect.logInfo(message, data))
+// testagent_change start - data 作为第二参数会被当作 message part 走 String()，日志里变成 [object Object]；
+// 改为 log annotations，由 logger 序列化输出 key=value（对象会自动 JSON.stringify）
+const info = (message: string, data?: Record<string, unknown>) =>
+  getOtelRt().runFork(Effect.logInfo(message).pipe(Effect.annotateLogs(data ?? {})))
+// testagent_change end
 
 function shouldUseCopilotResponsesApi(modelID: string): boolean {
   const match = /^gpt-(\d+)/.exec(modelID)
@@ -465,10 +469,10 @@ function custom(dep: CustomDep): Record<string, CustomLoader> {
 
       const location = String(
         provider.options?.location ??
-          env["GOOGLE_VERTEX_LOCATION"] ??
-          env["GOOGLE_CLOUD_LOCATION"] ??
-          env["VERTEX_LOCATION"] ??
-          "us-central1",
+        env["GOOGLE_VERTEX_LOCATION"] ??
+        env["GOOGLE_CLOUD_LOCATION"] ??
+        env["VERTEX_LOCATION"] ??
+        "us-central1",
       )
 
       const autoload = Boolean(project)
@@ -635,9 +639,9 @@ function custom(dep: CustomDep): Record<string, CustomLoader> {
               info("gitlab model discovery skipped: no models found", {
                 project: result.project
                   ? {
-                      id: result.project.id,
-                      path: result.project.pathWithNamespace,
-                    }
+                    id: result.project.id,
+                    path: result.project.pathWithNamespace,
+                  }
                   : null,
               })
               return {}
@@ -778,7 +782,7 @@ function custom(dep: CustomDep): Record<string, CustomLoader> {
       if (!apiToken) {
         throw new Error(
           "CLOUDFLARE_API_TOKEN (or CF_AIG_TOKEN) is required for Cloudflare AI Gateway. " +
-            "Set it via environment variable or run `opencode auth cloudflare-ai-gateway`.",
+          "Set it via environment variable or run `opencode auth cloudflare-ai-gateway`.",
         )
       }
 
@@ -1029,7 +1033,7 @@ interface State {
   varsLoaders: Record<string, CustomVarsLoader>
 }
 
-export class Service extends Context.Service<Service, Interface>()("@opencode/Provider") {}
+export class Service extends Context.Service<Service, Interface>()("@opencode/Provider") { }
 
 function cost(c: ModelsDev.Model["cost"]): Model["cost"] {
   const result: Model["cost"] = {
@@ -1118,11 +1122,11 @@ export function fromModelsDevProvider(provider: ModelsDev.Provider): Info {
         cost: opts.cost ? mergeDeep(base.cost, cost(opts.cost)) : base.cost,
         options: opts.provider?.body
           ? Object.fromEntries(
-              Object.entries(opts.provider.body).map(([k, v]) => [
-                k.replace(/_([a-z])/g, (_, c) => c.toUpperCase()),
-                v,
-              ]),
-            )
+            Object.entries(opts.provider.body).map(([k, v]) => [
+              k.replace(/_([a-z])/g, (_, c) => c.toUpperCase()),
+              v,
+            ]),
+          )
           : base.options,
         headers: opts.provider?.headers ?? base.headers,
       }
@@ -1549,112 +1553,112 @@ const layer: Layer.Layer<
         const isNodeJS = typeof process !== "undefined" && process.versions?.node
         const wrappedFetch = isNodeJS
           ? await (async () => {
-              try {
-                // Try to import external undici package
-                const undici = await import("undici")
+            try {
+              // Try to import external undici package
+              const undici = await import("undici")
 
-                info("Using external undici package", {
-                  providerID: model.providerID,
-                })
+              info("Using external undici package", {
+                providerID: model.providerID,
+              })
 
-                // Create custom Agent with timeouts disabled
-                // Note: keepAliveTimeout and keepAliveMaxTimeout must be >= 2000ms (undici requirement)
-                const agent = new undici.Agent({
-                  bodyTimeout: 0, // Disable body timeout (this is the key!)
-                  headersTimeout: 0, // Disable headers timeout
-                  keepAliveTimeout: 2000, // Minimum allowed value (2s)
-                  keepAliveMaxTimeout: 6000, // Minimum allowed value (6s)
-                })
+              // Create custom Agent with timeouts disabled
+              // Note: keepAliveTimeout and keepAliveMaxTimeout must be >= 2000ms (undici requirement)
+              const agent = new undici.Agent({
+                bodyTimeout: 0, // Disable body timeout (this is the key!)
+                headersTimeout: 0, // Disable headers timeout
+                keepAliveTimeout: 2000, // Minimum allowed value (2s)
+                keepAliveMaxTimeout: 6000, // Minimum allowed value (6s)
+              })
 
-                // Set as global dispatcher for undici.fetch
-                undici.setGlobalDispatcher(agent)
+              // Set as global dispatcher for undici.fetch
+              undici.setGlobalDispatcher(agent)
 
-                info("Custom undici configured", {
-                  providerID: model.providerID,
-                  bodyTimeout: 0,
-                  headersTimeout: 0,
-                  keepAliveTimeout: 2000,
-                  keepAliveMaxTimeout: 6000,
-                })
+              info("Custom undici configured", {
+                providerID: model.providerID,
+                bodyTimeout: 0,
+                headersTimeout: 0,
+                keepAliveTimeout: 2000,
+                keepAliveMaxTimeout: 6000,
+              })
 
-                // Return undici.fetch (not globalThis.fetch)
-                return undici.fetch
-              } catch (error: any) {
-                log.error("Failed to load external undici, falling back to Node.js http/https", {
-                  providerID: model.providerID,
-                  error: error.message,
-                })
+              // Return undici.fetch (not globalThis.fetch)
+              return undici.fetch
+            } catch (error: any) {
+              log.error("Failed to load external undici, falling back to Node.js http/https", {
+                providerID: model.providerID,
+                error: error.message,
+              })
 
-                // Fallback: Use Node.js http/https modules
-                const http = await import("http")
-                const https = await import("https")
+              // Fallback: Use Node.js http/https modules
+              const http = await import("http")
+              const https = await import("https")
 
-                return async (input: any, init?: any): Promise<Response> => {
-                  const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url
-                  const parsedUrl = new URL(url)
-                  const isHttps = parsedUrl.protocol === "https:"
-                  const client = isHttps ? https : http
+              return async (input: any, init?: any): Promise<Response> => {
+                const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url
+                const parsedUrl = new URL(url)
+                const isHttps = parsedUrl.protocol === "https:"
+                const client = isHttps ? https : http
 
-                  return new Promise((resolve, reject) => {
-                    const reqOptions = {
-                      method: init?.method || "GET",
-                      headers: init?.headers || {},
-                      timeout: 0,
+                return new Promise((resolve, reject) => {
+                  const reqOptions = {
+                    method: init?.method || "GET",
+                    headers: init?.headers || {},
+                    timeout: 0,
+                  }
+
+                  const req = client.request(parsedUrl, reqOptions, (res) => {
+                    const headers = new Headers()
+                    for (const [key, value] of Object.entries(res.headers)) {
+                      if (value) headers.set(key, Array.isArray(value) ? value.join(", ") : value)
                     }
 
-                    const req = client.request(parsedUrl, reqOptions, (res) => {
-                      const headers = new Headers()
-                      for (const [key, value] of Object.entries(res.headers)) {
-                        if (value) headers.set(key, Array.isArray(value) ? value.join(", ") : value)
-                      }
-
-                      const nodeStream = res as any
-                      const webStream = new ReadableStream({
-                        start(controller) {
-                          nodeStream.on("data", (chunk: Buffer) => {
-                            controller.enqueue(new Uint8Array(chunk))
-                          })
-                          nodeStream.on("end", () => controller.close())
-                          nodeStream.on("error", (err: Error) => controller.error(err))
-                        },
-                        cancel() {
-                          nodeStream.destroy()
-                        },
-                      })
-
-                      resolve(
-                        new Response(webStream, {
-                          status: res.statusCode || 200,
-                          statusText: res.statusMessage || "",
-                          headers,
-                        }),
-                      )
+                    const nodeStream = res as any
+                    const webStream = new ReadableStream({
+                      start(controller) {
+                        nodeStream.on("data", (chunk: Buffer) => {
+                          controller.enqueue(new Uint8Array(chunk))
+                        })
+                        nodeStream.on("end", () => controller.close())
+                        nodeStream.on("error", (err: Error) => controller.error(err))
+                      },
+                      cancel() {
+                        nodeStream.destroy()
+                      },
                     })
 
-                    req.on("error", reject)
-
-                    if (init?.signal) {
-                      init.signal.addEventListener("abort", () => {
-                        req.destroy()
-                        reject(new DOMException("Aborted", "AbortError"))
-                      })
-                    }
-
-                    if (init?.body) {
-                      if (typeof init.body === "string") {
-                        req.write(init.body)
-                      } else if (Buffer.isBuffer(init.body)) {
-                        req.write(init.body)
-                      } else if (init.body instanceof Uint8Array) {
-                        req.write(Buffer.from(init.body))
-                      }
-                    }
-
-                    req.end()
+                    resolve(
+                      new Response(webStream, {
+                        status: res.statusCode || 200,
+                        statusText: res.statusMessage || "",
+                        headers,
+                      }),
+                    )
                   })
-                }
+
+                  req.on("error", reject)
+
+                  if (init?.signal) {
+                    init.signal.addEventListener("abort", () => {
+                      req.destroy()
+                      reject(new DOMException("Aborted", "AbortError"))
+                    })
+                  }
+
+                  if (init?.body) {
+                    if (typeof init.body === "string") {
+                      req.write(init.body)
+                    } else if (Buffer.isBuffer(init.body)) {
+                      req.write(init.body)
+                    } else if (init.body instanceof Uint8Array) {
+                      req.write(Buffer.from(init.body))
+                    }
+                  }
+
+                  req.end()
+                })
               }
-            })()
+            }
+          })()
           : (customFetch ?? fetch)
         // testagent_change end
 
@@ -1702,7 +1706,7 @@ const layer: Layer.Layer<
               body.tags = ["test-design"]
               opts.body = JSON.stringify(body)
               info("userID", { sapId: u.sapId })
-            } catch {}
+            } catch { }
           }
 
           info("🚀 HTTP Request to LLM", {
@@ -1711,7 +1715,8 @@ const layer: Layer.Layer<
             url,
             method: opts.method || "GET",
             hasBody: !!opts.body,
-            bodySize: opts.body ? (typeof opts.body === "string" ? opts.body.length : "binary") : 0
+            bodySize: opts.body ? (typeof opts.body === "string" ? opts.body.length : "binary") : 0,
+            body: opts.body,
           })
           const startTime = Date.now()
           // testagent_change end
@@ -1823,9 +1828,9 @@ const layer: Layer.Layer<
         try {
           const language = s.modelLoaders[model.providerID]
             ? await s.modelLoaders[model.providerID](sdk, model.api.id, {
-                ...provider.options,
-                ...model.options,
-              })
+              ...provider.options,
+              ...model.options,
+            })
             : sdk.languageModel(model.api.id)
           s.models.set(key, language)
           return language

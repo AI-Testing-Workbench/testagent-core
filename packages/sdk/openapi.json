@@ -3685,6 +3685,110 @@
         ]
       }
     },
+    "/agent/reload": {
+      "post": {
+        "tags": ["instance"],
+        "operationId": "app.reloadAgents",
+        "parameters": [
+          {
+            "name": "directory",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Agents reloaded successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": ["success"],
+                  "additionalProperties": false,
+                  "description": "Agents reloaded successfully"
+                }
+              }
+            }
+          }
+        },
+        "description": "Invalidate agent cache and reload all agents from config/disk",
+        "summary": "Reload agents",
+        "x-codeSamples": [
+          {
+            "lang": "js",
+            "source": "import { createOpencodeClient } from \"@opencode-ai/sdk\n\nconst client = createOpencodeClient()\nawait client.app.reloadAgents({\n  ...\n})"
+          }
+        ]
+      }
+    },
+    "/command/reload": {
+      "post": {
+        "tags": ["instance"],
+        "operationId": "app.reloadCommands",
+        "parameters": [
+          {
+            "name": "directory",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "workspace",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Commands reloaded successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": ["success"],
+                  "additionalProperties": false,
+                  "description": "Commands reloaded successfully"
+                }
+              }
+            }
+          }
+        },
+        "description": "Invalidate command cache and reload all commands from config/disk",
+        "summary": "Reload commands",
+        "x-codeSamples": [
+          {
+            "lang": "js",
+            "source": "import { createOpencodeClient } from \"@opencode-ai/sdk\n\nconst client = createOpencodeClient()\nawait client.app.reloadCommands({\n  ...\n})"
+          }
+        ]
+      }
+    },
     "/mcp/reload": {
       "post": {
         "tags": ["instance"],
@@ -7247,6 +7351,10 @@
                   "reason": {
                     "type": "string",
                     "enum": ["completed", "user_abort", "error"]
+                  },
+                  "scope": {
+                    "type": "string",
+                    "enum": ["session", "tree"]
                   }
                 },
                 "additionalProperties": false

@@ -8,6 +8,7 @@ import type { SessionPrompt } from "../session/prompt"
 import { IdleReason } from "@/session/status"
 import { Config } from "@/config/config"
 import { Permission } from "@/permission"
+import { consumeStopped } from "@/testagent/cancel" // testagent_change - 用户手动停止 subagent 时回传明确结果
 import { Effect, Exit, Metric, Schema } from "effect"
 import { EffectBridge } from "@/effect/bridge"
 import { taskCall } from "@opencode-ai/core/effect/observability"
@@ -213,6 +214,28 @@ export const TaskTool = Tool.define(
               },
               parts,
             })
+
+            // testagent_change start - 用户手动停止 subagent 时回传明确的取消说明。
+            // Runner 被中断时上面这行 ops.prompt 会拿到 onInterrupt（子会话最后一条
+            // assistant 消息）；若它是"只提问、还没有文本输出"的状态，下面的文本提取
+            // 会得到空串，父 LLM 会把"被用户停止"误当成正常完成。此处显式告知父 LLM。
+            if (consumeStopped(nextSession.id)) {
+              return {
+                title: params.description,
+                metadata: {
+                  sessionId: nextSession.id,
+                  model,
+                },
+                output: [
+                  `task_id: ${nextSession.id} (for resuming to continue this task if needed)`,
+                  "",
+                  `<task_result state="cancelled">`,
+                  "The user manually stopped this subagent before it finished. Whatever it produced so far is preserved in its session. Do not silently retry it; resume it with the task_id above only if the user asks you to continue.",
+                  "</task_result>",
+                ].join("\n"),
+              }
+            }
+            // testagent_change end
 
             return {
               title: params.description,
