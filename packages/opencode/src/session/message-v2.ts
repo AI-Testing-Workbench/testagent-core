@@ -402,6 +402,7 @@ export const User = Schema.Struct({
   system: Schema.optional(Schema.String),
   tools: Schema.optional(Schema.Record(Schema.String, Schema.Boolean)),
   thinkingEnabled: Schema.optional(Schema.Boolean),
+  maxConcurrency: Schema.optional(Schema.Number), // testagent_change sdt并发执行 subtask 时的并发度上限
 })
   .annotate({ identifier: "UserMessage" })
   .pipe(withStatics((s) => ({ zod: zod(s) })))
