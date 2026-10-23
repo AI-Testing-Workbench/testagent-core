@@ -17,6 +17,7 @@ import { InstanceContextMiddleware } from "../middleware/instance-context"
 import { WorkspaceRoutingMiddleware } from "../middleware/workspace-routing"
 import { ApiNotFoundError } from "../errors"
 import { described } from "./metadata"
+import { SessionArchive } from "@/session/archive" // testagent_change
 
 const root = "/session"
 const QueryBoolean = Schema.Literals(["true", "false"]).pipe(
@@ -34,6 +35,11 @@ export const ListQuery = Schema.Struct({
   search: Schema.optional(Schema.String),
   limit: Schema.optional(Schema.NumberFromString),
 })
+// testagent_change start - V1 archive export/import contract
+export const ExportQuery = Schema.Struct({
+  sanitize: Schema.optional(QueryBoolean),
+})
+// testagent_change end
 export const DiffQuery = Schema.Struct(Struct.omit(SessionSummary.DiffInput.fields, ["sessionID"]))
 export const MessagesQuery = Schema.Struct({
   limit: Schema.optional(Schema.NumberFromString.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0))),
@@ -112,6 +118,11 @@ export const SessionPaths = {
   diff: `${root}/:sessionID/diff`,
   messages: `${root}/:sessionID/message`,
   message: `${root}/:sessionID/message/:messageID`,
+  // testagent_change start - V1 archive endpoints
+  export: `${root}/:sessionID/export`,
+  import: `${root}/:sessionID/import`,
+  importFork: `${root}/:sessionID/import/fork`,
+  // testagent_change end
   create: root,
   remove: `${root}/:sessionID`,
   update: `${root}/:sessionID`,
@@ -226,6 +237,44 @@ export const SessionApi = HttpApi.make("session")
             description: "Retrieve a specific message from a session by its message ID.",
           }),
         ),
+        // testagent_change start - V1 session archive endpoints
+        HttpApiEndpoint.get("exportArchive", SessionPaths.export, {
+          params: { sessionID: SessionID },
+          query: ExportQuery,
+          success: described(SessionArchive.Archive, "Session archive"),
+          error: [HttpApiError.BadRequest, ApiNotFoundError],
+        }).annotateMerge(
+          OpenApi.annotations({
+            identifier: "session.export",
+            summary: "Export session",
+            description: "Export a session and its complete message history as a CLI-compatible archive.",
+          }),
+        ),
+        HttpApiEndpoint.post("importArchive", SessionPaths.import, {
+          params: { sessionID: SessionID },
+          payload: SessionArchive.Archive,
+          success: described(SessionArchive.ImportResult, "Imported session"),
+          error: [HttpApiError.BadRequest],
+        }).annotateMerge(
+          OpenApi.annotations({
+            identifier: "session.import",
+            summary: "Import session",
+            description: "Import a CLI-compatible session archive while preserving its session, message, and part IDs.",
+          }),
+        ),
+        HttpApiEndpoint.post("importForkArchive", SessionPaths.importFork, {
+          params: { sessionID: SessionID },
+          payload: SessionArchive.Archive,
+          success: described(SessionArchive.ImportResult, "Forked session"),
+          error: [HttpApiError.BadRequest],
+        }).annotateMerge(
+          OpenApi.annotations({
+            identifier: "session.importFork",
+            summary: "Fork imported session",
+            description: "Import a session archive as a new session with remapped session, message, and part IDs.",
+          }),
+        ),
+        // testagent_change end
         HttpApiEndpoint.post("create", SessionPaths.create, {
           payload: [HttpApiSchema.NoContent, Session.CreateInput],
           success: described(Session.Info, "Successfully created session"),

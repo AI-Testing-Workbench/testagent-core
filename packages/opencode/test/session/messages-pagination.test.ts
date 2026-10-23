@@ -1,11 +1,15 @@
 import { describe, expect, test } from "bun:test"
-import { Effect } from "effect"
+import { Effect, Schema } from "effect" // testagent_change
 import path from "path"
 import { Instance } from "../../src/project/instance"
 import { WithInstance } from "../../src/project/with-instance"
 import { Session as SessionNs } from "@/session/session"
+import { SessionArchive } from "@/session/archive" // testagent_change
 import { MessageV2 } from "../../src/session/message-v2"
-import { MessageID, PartID, type SessionID } from "../../src/session/schema"
+import { MessageID, PartID, SessionID } from "../../src/session/schema" // testagent_change
+import { Database } from "@/storage/db" // testagent_change
+import { sql } from "drizzle-orm" // testagent_change
+import { tmpdir } from "../fixture/fixture" // testagent_change
 import { ModelID, ProviderID } from "../../src/provider/schema"
 import * as Log from "@opencode-ai/core/util/log"
 
@@ -906,6 +910,209 @@ describe("MessageV2.filterCompacted", () => {
       },
     })
   })
+
+  // testagent_change start - verify archive fork ID remapping and atomic persistence
+  test("forks an archive with new IDs, remapped references, and cleared source metadata", async () => {
+    await WithInstance.provide({
+      directory: root,
+      fn: async () => {
+        const source = await svc.create({ title: "archive source" })
+        const created = [source.id]
+        try {
+          const userID = await addUser(source.id, "first turn")
+          const assistantID = await addAssistant(source.id, userID, { finish: "end_turn" })
+          const answerPartID = PartID.ascending()
+          await svc.updatePart({
+            id: answerPartID,
+            sessionID: source.id,
+            messageID: assistantID,
+            type: "text",
+            text: "first answer",
+          })
+          const secondUserID = await addUser(source.id, "second turn")
+          await addCompactionPart(source.id, secondUserID, userID)
+
+          const exported = await run(
+            SessionNs.Service.use((session) => SessionArchive.exportSession({ session, sessionID: source.id })),
+          )
+          const archive = Schema.decodeUnknownSync(SessionArchive.Archive)(
+            JSON.parse(JSON.stringify(exported)) as unknown,
+          )
+          const invalidArchive = {
+            ...archive,
+            messages: archive.messages.map((message) =>
+              message.info.role === "assistant"
+                ? { ...message, info: { ...message.info, parentID: MessageID.ascending() } }
+                : message,
+            ),
+          }
+          await expect(
+            run(SessionNs.Service.use(() => SessionArchive.forkSession({ archive: invalidArchive }))),
+          ).rejects.toThrow("Archive contains an invalid session or message reference")
+
+          const sourceCompaction = archive.messages
+            .flatMap((message) => message.parts)
+            .find((part): part is MessageV2.CompactionPart => part.type === "compaction")
+          if (!sourceCompaction) throw new Error("Source compaction part is missing")
+          const archiveWithDanglingTail = {
+            ...archive,
+            messages: archive.messages.map((message) =>
+              message.info.id !== secondUserID
+                ? message
+                : {
+                    ...message,
+                    parts: [
+                      ...message.parts,
+                      {
+                        ...sourceCompaction,
+                        id: PartID.ascending(),
+                        tail_start_id: MessageID.ascending(),
+                      },
+                    ],
+                  },
+            ),
+          }
+          const forkArchive = {
+            ...archiveWithDanglingTail,
+            info: {
+              ...archive.info,
+              parentID: SessionID.descending(),
+              summary: { additions: 1, deletions: 0, files: 1, diffs: [] },
+              share: { url: "https://example.test/share/source" },
+              revert: { messageID: assistantID, partID: answerPartID },
+            },
+          }
+          const result = await run(SessionNs.Service.use(() => SessionArchive.forkSession({ archive: forkArchive })))
+          created.push(result.sessionID)
+          expect(result).toEqual({ sourceSessionID: source.id, sessionID: result.sessionID, forked: true })
+          expect(result.sessionID).not.toBe(source.id)
+
+          const forked = await run(SessionNs.Service.use((session) => session.get(result.sessionID)))
+          expect(forked).toMatchObject({
+            title: "archive source (fork #1)",
+            projectID: source.projectID,
+            directory: source.directory,
+            path: source.path,
+          })
+          expect(forked.slug).not.toBe(source.slug)
+          expect(forked.parentID).toBeUndefined()
+          expect(forked.summary).toBeUndefined()
+          expect(forked.share).toBeUndefined()
+          expect(forked.revert).toBeUndefined()
+
+          const forkedMessages = await run(
+            SessionNs.Service.use((session) => session.messages({ sessionID: result.sessionID })),
+          )
+          const user = forkedMessages.find(
+            (message) =>
+              message.info.role === "user" &&
+              message.parts.some((part) => part.type === "text" && part.text === "first turn"),
+          )
+          const assistant = forkedMessages.find((message) => message.info.role === "assistant")
+          expect(user).toBeDefined()
+          expect(assistant).toBeDefined()
+          if (!user || !assistant || assistant.info.role !== "assistant") throw new Error("Forked messages are missing")
+          expect(assistant.info.parentID).toBe(user.info.id)
+          expect(assistant.info.id).not.toBe(assistantID)
+
+          const oldPartIDs = new Set(
+            archiveWithDanglingTail.messages.flatMap((message) => message.parts.map((part) => part.id)),
+          )
+          for (const message of forkedMessages) {
+            for (const part of message.parts) {
+              expect(part.sessionID).toBe(result.sessionID)
+              expect(part.messageID).toBe(message.info.id)
+              expect(oldPartIDs.has(part.id)).toBe(false)
+            }
+          }
+
+          const compactions = forkedMessages
+            .flatMap((message) => message.parts)
+            .filter((part): part is MessageV2.CompactionPart => part.type === "compaction")
+          expect(compactions).toHaveLength(2)
+          expect(compactions.map((part) => part.tail_start_id)).toContain(user.info.id)
+          expect(compactions.some((part) => part.tail_start_id === undefined)).toBe(true)
+          expect((await run(SessionNs.Service.use((session) => session.get(source.id)))).title).toBe("archive source")
+        } finally {
+          for (const id of created.reverse()) await svc.remove(id)
+        }
+      },
+    })
+  })
+
+  // testagent_change start - ensure fork metadata comes from the receiving instance
+  test("uses the target instance context for an archive fork", async () => {
+    await using target = await tmpdir({ git: true })
+    const exported = await WithInstance.provide({
+      directory: root,
+      fn: async () => {
+        const source = await svc.create({ title: "context source" })
+        const archive = await run(
+          SessionNs.Service.use((session) => SessionArchive.exportSession({ session, sessionID: source.id })),
+        )
+        return {
+          source,
+          archive: Schema.decodeUnknownSync(SessionArchive.Archive)(JSON.parse(JSON.stringify(archive)) as unknown),
+        }
+      },
+    })
+
+    try {
+      await WithInstance.provide({
+        directory: target.path,
+        fn: async () => {
+          const result = await run(
+            SessionNs.Service.use(() => SessionArchive.forkSession({ archive: exported.archive })),
+          )
+          try {
+            const forked = await run(SessionNs.Service.use((session) => session.get(result.sessionID)))
+            expect(forked.projectID).not.toBe(exported.source.projectID)
+            expect(forked.directory).toBe(target.path)
+            expect(forked.path).toBe("")
+          } finally {
+            await svc.remove(result.sessionID)
+          }
+        },
+      })
+    } finally {
+      await WithInstance.provide({ directory: root, fn: () => svc.remove(exported.source.id) })
+    }
+  })
+  // testagent_change end
+
+  test("rolls back all fork rows when a part insert fails", async () => {
+    await WithInstance.provide({
+      directory: root,
+      fn: async () => {
+        const source = await svc.create({ title: "archive rollback" })
+        await addUser(source.id, "part insert failure")
+        const exported = await run(
+          SessionNs.Service.use((session) => SessionArchive.exportSession({ session, sessionID: source.id })),
+        )
+        const archive = Schema.decodeUnknownSync(SessionArchive.Archive)(
+          JSON.parse(JSON.stringify(exported)) as unknown,
+        )
+        const before = await run(SessionNs.Service.use((session) => session.list()))
+        Database.use((db) => db.run(sql`DROP TRIGGER IF EXISTS temp.archive_fork_fail_part`))
+        Database.use((db) =>
+          db.run(
+            sql`CREATE TEMP TRIGGER archive_fork_fail_part BEFORE INSERT ON part BEGIN SELECT RAISE(ABORT, 'forced part failure'); END`,
+          ),
+        )
+        try {
+          await expect(run(SessionNs.Service.use(() => SessionArchive.forkSession({ archive })))).rejects.toThrow(
+            "forced part failure",
+          )
+          const after = await run(SessionNs.Service.use((session) => session.list()))
+          expect(after.map((info) => info.id)).toEqual(before.map((info) => info.id))
+        } finally {
+          Database.use((db) => db.run(sql`DROP TRIGGER IF EXISTS temp.archive_fork_fail_part`))
+          await svc.remove(source.id)
+        }
+      },
+    })
+  })
+  // testagent_change end
 
   test("retains an assistant tail when compaction starts inside a turn", async () => {
     await WithInstance.provide({

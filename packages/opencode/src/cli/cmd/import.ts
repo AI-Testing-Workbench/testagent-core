@@ -1,17 +1,21 @@
 import type { Session as SDKSession, Message, Part } from "@opencode-ai/sdk/v2"
-import { Session } from "@/session/session"
-import { MessageV2 } from "../../session/message-v2"
+import { SessionArchive } from "@/session/archive" // testagent_change
+// import { MessageV2 } from "../../session/message-v2" // testagent_change
 import { CliError, effectCmd } from "../effect-cmd"
-import { Database } from "@/storage/db"
-import { SessionTable, MessageTable, PartTable } from "../../session/session.sql"
+// import { Database } from "@/storage/db" // testagent_change
+// import { SessionTable, MessageTable, PartTable } from "../../session/session.sql" // testagent_change
 import { InstanceRef } from "@/effect/instance-ref"
 import { ShareNext } from "@/share/share-next"
 import { EOL } from "os"
 import { Filesystem } from "@/util/filesystem"
 import { Effect, Schema } from "effect"
 
+// testagent_change start - retain the removed CLI-local imports and decoders; active validation uses SessionArchive.Archive
+/*
 const decodeMessageInfo = Schema.decodeUnknownSync(MessageV2.Info)
 const decodePart = Schema.decodeUnknownSync(MessageV2.Part)
+*/
+// testagent_change end
 
 /** Discriminated union returned by the ShareNext API (GET /api/shares/:id/data) */
 export type ShareData =
@@ -80,20 +84,30 @@ type ExportData = { info: SDKSession; messages: Array<{ info: Message; parts: Pa
 export const ImportCommand = effectCmd({
   command: "import <file>",
   describe: "import session data from JSON file or URL",
+  // testagent_change start - add Fork as an import mode
   builder: (yargs) =>
-    yargs.positional("file", {
-      describe: "path to JSON file or share URL",
-      type: "string",
-      demandOption: true,
-    }),
+    yargs
+      .positional("file", {
+        describe: "path to JSON file or share URL",
+        type: "string",
+        demandOption: true,
+      })
+      .option("fork", {
+        describe: "import as a new fork with remapped session, message, and part IDs",
+        type: "boolean",
+        default: false,
+      }),
+  // testagent_change end
   handler: Effect.fn("Cli.import")(function* (args) {
     const ctx = yield* InstanceRef
     if (!ctx) return yield* Effect.die("InstanceRef not provided")
-    return yield* runImport(args.file, ctx.project.id)
+    return yield* runImport(args.file, ctx.project.id, args.fork) // testagent_change
   }),
 })
 
-const runImport = Effect.fn("Cli.import.body")(function* (file: string, projectID: string) {
+// testagent_change start - thread the new CLI option into archive import
+const runImport = Effect.fn("Cli.import.body")(function* (file: string, projectID: string, fork: boolean) {
+  // testagent_change end
   const share = yield* ShareNext.Service
 
   let exportData: ExportData | undefined
@@ -165,6 +179,8 @@ const runImport = Effect.fn("Cli.import.body")(function* (file: string, projectI
     return
   }
 
+  // testagent_change start - retain the removed CLI-local persistence path; active path uses shared archive use cases
+  /*
   const info = Schema.decodeUnknownSync(Session.Info)({
     ...exportData.info,
     projectID,
@@ -213,5 +229,21 @@ const runImport = Effect.fn("Cli.import.body")(function* (file: string, projectI
   }
 
   process.stdout.write(`Imported session: ${exportData.info.id}`)
+  */
+  // testagent_change end
+
+  // testagent_change start - choose ordinary import or shared Fork use case
+  const archive = yield* Schema.decodeUnknownEffect(SessionArchive.Archive)(exportData).pipe(
+    Effect.mapError((error) => new CliError({ message: `Invalid session archive: ${String(error)}` })),
+  )
+  const importOperation = fork
+    ? SessionArchive.forkSession({ archive }).pipe(
+        Effect.map((result) => result.sessionID),
+        Effect.mapError((error) => new CliError({ message: error.message })),
+      )
+    : SessionArchive.importSession({ archive, projectID })
+  const sessionID = yield* importOperation
+  process.stdout.write(`${fork ? "Forked" : "Imported"} session: ${sessionID}`)
+  // testagent_change end
   process.stdout.write(EOL)
 })
