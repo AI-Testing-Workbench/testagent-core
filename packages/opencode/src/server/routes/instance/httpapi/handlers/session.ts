@@ -5,6 +5,7 @@ import { Bus } from "@/bus"
 import { Command } from "@/command"
 import { Permission } from "@/permission"
 import { PermissionID } from "@/permission/schema"
+import { Question } from "@/question" // testagent_change - 停止会话时清理挂起的提问
 import { SessionShare } from "@/share/session"
 import { Session } from "@/session/session"
 import { SessionCompaction } from "@/session/compaction"
@@ -16,6 +17,8 @@ import { SessionStatus } from "@/session/status"
 import { SessionSummary } from "@/session/summary"
 import { Todo } from "@/session/todo"
 import { MessageID, PartID, SessionID } from "@/session/schema"
+import { cancelTree } from "@/testagent/cancel" // testagent_change - 停止 subagent 的 tree 取消编排
+import { clearPermissions, clearQuestions } from "@/testagent/requests" // testagent_change - 清理挂起的人机交互请求
 import { SessionArchive } from "@/session/archive" // testagent_change
 import { NotFoundError } from "@/storage/storage"
 import { NamedError } from "@opencode-ai/core/util/error"
@@ -55,6 +58,7 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
     const runState = yield* SessionRunState.Service
     const agentSvc = yield* Agent.Service
     const permissionSvc = yield* Permission.Service
+    const questionSvc = yield* Question.Service // testagent_change - 停止会话时清理挂起的提问
     const statusSvc = yield* SessionStatus.Service
     const todoSvc = yield* Todo.Service
     const summary = yield* SessionSummary.Service
@@ -280,16 +284,27 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       )
     })
 
-    // testagent_change start - 接收前端传来的 idle reason
+    // testagent_change start - 接收前端传来的 idle reason 与取消范围（含停止 subagent 的 tree 模式）
     const abort = Effect.fn("SessionHttpApi.abort")(function* (ctx: {
       params: { sessionID: SessionID }
-      payload: { reason?: "completed" | "user_abort" | "error" }
+      payload: { reason?: "completed" | "user_abort" | "error"; scope?: "session" | "tree" }
     }) {
       yield* Effect.logInfo("session abort request", {
         sessionID: ctx.params.sessionID,
         reason: ctx.payload.reason ?? "completed",
+        scope: ctx.payload.scope ?? "session",
       })
-      yield* promptSvc.cancel(ctx.params.sessionID, ctx.payload.reason)
+      yield* cancelTree({
+        sessionID: ctx.params.sessionID,
+        scope: ctx.payload.scope,
+        reason: ctx.payload.reason,
+        sessions: session,
+        cancel: (id, reason) => promptSvc.cancel(id, reason),
+        // 先清理挂起的 question / permission（会广播 rejected/replied 事件，前端据此关闭弹窗），
+        // 再取消 Runner，否则 Runner 中断会静默删除 pending 且不广播事件，弹窗残留。
+        clearRequests: (id) =>
+          Effect.all([clearQuestions(questionSvc, id), clearPermissions(permissionSvc, id)], { discard: true }),
+      })
       return true
     })
     // testagent_change end

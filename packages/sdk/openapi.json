@@ -7584,6 +7584,10 @@
                   "reason": {
                     "type": "string",
                     "enum": ["completed", "user_abort", "error"]
+                  },
+                  "scope": {
+                    "type": "string",
+                    "enum": ["session", "tree"]
                   }
                 },
                 "additionalProperties": false

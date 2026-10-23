@@ -5701,7 +5701,12 @@ export const LangfusePlugin: Plugin = async (ctx) => {
     "tool.definition": async (input, output) => {
       allToolDefs.set(input.toolID, {
         id: input.toolID,
-        description: output.description,
+        // testagent_change start - 懒读取 description：本 hook 先于外部插件执行，
+        // 拷贝字符串会定格原始描述，改为引用读取以反映后续插件的改写
+        get description() {
+          return output.description
+        },
+        // testagent_change end
         parameters: output.parameters,
       })
     },

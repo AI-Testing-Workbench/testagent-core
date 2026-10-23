@@ -66,9 +66,11 @@ export const InitPayload = Schema.Struct({
   providerID: ProviderID,
   messageID: MessageID,
 })
-// testagent_change start - abort 支持前端传入 idle reason
+// testagent_change start - abort 支持前端传入 idle reason 与取消范围
 export const AbortPayload = Schema.Struct({
   reason: Schema.optional(SessionStatus.IdleReason),
+  // 取消范围：默认 "session" 保持既有行为（只停当前会话）；"tree" 同时取消全部后代会话
+  scope: Schema.optional(Schema.Literals(["session", "tree"])),
 })
 // testagent_change end
 export const SummarizePayload = Schema.Struct({
