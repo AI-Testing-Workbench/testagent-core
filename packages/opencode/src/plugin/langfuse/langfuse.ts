@@ -31,8 +31,8 @@ function isCloudMode(): boolean {
 const LANGFUSE_BASE_URL = decodeURIComponent(
   atob("aHR0cCUzQSUyRiUyRnRlc3RodWItYWdlbnQtdHJhY2UucGFhc3VhdC5jbWJjaGluYS5jbg=="),
 )
-const VERSION = "1.0.6"
-const TESTAGENT_VERSION = "1.4.4"
+const VERSION = "1.0.7"
+const TESTAGENT_VERSION = "1.5.0"
 const LANGFUSE_FETCH_TIMEOUT_MS = 10_000
 const LANGFUSE_KEY_LOOKUP_TIMEOUT_MS = 15000
 const TESTAGENT_DATA_DIR = join(homedir(), ".local", "share", "testagent")
@@ -104,7 +104,7 @@ type SessionTerminalSource = "session.idle" | "session.error"
 type SkillLifecycleEndSource = "next-skill" | SessionTerminalSource
 const pendingSessionFinalizations = new Map<
   string,
-  { traceId: string; source: SessionTerminalSource; errorMessage?: string }
+  { traceId: string; source: SessionTerminalSource; errorMessage?: string; agentInvocationId?: string }
 >()
 
 function generateSessionId(): string {
@@ -184,6 +184,9 @@ interface GenInfo {
   traceId: string
   genId: string
   sessionId: string
+  // A resumed child session can serve several task invocations. Capture the
+  // request's wrapper once so late response parts keep their original owner.
+  agentInvocationId?: string
   parentObservationId?: string
   selectedModel?: string
   apiId?: string
@@ -263,6 +266,18 @@ const toolCallInfos = new Map<
   { spanId: string; traceId: string; sessionId: string; toolName?: string; agentSpanId?: string }
 >()
 const sessionSpanIds = new Map<string, Set<string>>()
+interface SubagentInvocation {
+  agentSpanId: string
+  traceId: string
+  parentSessionId: string
+  childSessionId?: string
+  sequence: number
+  observationIds: Set<string>
+  assistantOutput?: string
+}
+const subagentInvocations = new Map<string, SubagentInvocation>()
+const observationInvocationOwners = new Map<string, string>()
+let subagentInvocationSequence = 0
 const traceSkillInfos = new Map<string, SkillInfo[]>()
 const observationSkillInfoCounts = new Map<string, number>()
 // Fallback grouping parent for hooks that arrive before their session has been
@@ -700,7 +715,7 @@ function getObservationSubagentType(traceId: string, observationId: string): str
   const observation =
     batch?.generations.find((generation) => generation.id === observationId) ??
     batch?.spans.find((span) => span.id === observationId)
-  const subagentType = observation?.metadata?.subagent_type
+  const subagentType = observation?.metadata?.subagentName
   return typeof subagentType === "string" && subagentType.trim() ? subagentType : undefined
 }
 
@@ -713,7 +728,7 @@ export function withParentObservationMetadata(
   parentObservationId?: string,
 ) {
   return parentObservationId
-    ? { ...metadata, parent_observation_id: parentObservationId }
+    ? { ...metadata, parentObservationId: parentObservationId }
     : metadata
 }
 
@@ -754,8 +769,8 @@ function withTraceSkillInfoForObservationUpdate(
   // partial/final update, including the completion snapshot.
   const existingSubagentType = getObservationSubagentType(traceId, observationId)
   const metadataWithSubagentType =
-    metadata.subagent_type === undefined && existingSubagentType
-      ? { ...metadata, subagent_type: existingSubagentType }
+    metadata.subagentName === undefined && existingSubagentType
+      ? { ...metadata, subagentName: existingSubagentType }
       : metadata
   const count = observationSkillInfoCounts.get(observationSkillInfoKey(traceId, observationId))
   const skillInfo = count === undefined ? undefined : getTraceSkillInfo(traceId, count)
@@ -826,14 +841,15 @@ function isGenerationPart(part: any) {
   return part?.type === "tool" && part.state?.status === "running"
 }
 
-function getLatestCompletedSessionSpanTime(sessionId: string, traceId: string): Date | undefined {
+function getLatestCompletedSessionSpanTime(sessionId: string, traceId: string, agentInvocationId?: string): Date | undefined {
   const batch = traceBatches.get(traceId)
   const spanIds = sessionSpanIds.get(sessionId)
   if (!batch || !spanIds?.size) return undefined
 
   let latest: Date | undefined
   for (const span of batch.spans) {
-    if (!spanIds.has(span.id) || !span.endTime) continue
+    if (!spanIds.has(span.id) || !span.endTime ||
+      (agentInvocationId && observationInvocationOwners.get(span.id) !== agentInvocationId)) continue
 
     const endTime = getEventTimestamp(span.endTime)
     if (endTime && (!latest || endTime.getTime() > latest.getTime())) latest = endTime
@@ -850,12 +866,14 @@ function activatePendingGeneration(
   const gen = options?.preferLatest ? pending?.pop() : pending?.shift()
   if (!gen) return undefined
   if (pending.length === 0) pendingGenerations.delete(sessionId)
+  gen.agentInvocationId ??= sessionToAgentSpan.get(sessionId)
+  recordObservationInvocation(sessionId, gen.genId, gen.agentInvocationId)
 
   // chat.params may be delivered before the preceding tool hooks. Keep its
   // request boundary when it is already ordered correctly; otherwise advance
   // it only to the latest completed session span. Never replace it with the
   // activation/first-token time, which would collapse TTFT to zero.
-  const precedingSpanEndTime = getLatestCompletedSessionSpanTime(sessionId, gen.traceId)
+  const precedingSpanEndTime = getLatestCompletedSessionSpanTime(sessionId, gen.traceId, gen.agentInvocationId)
   if (precedingSpanEndTime && precedingSpanEndTime.getTime() > gen.startTime.getTime()) {
     gen.startTime = precedingSpanEndTime
     gen.generationData.startTime = precedingSpanEndTime.toISOString()
@@ -865,8 +883,17 @@ function activatePendingGeneration(
   // delivered after that callback but before this first concrete response
   // part creates the generation. Bind to the skill that is active *now*, not
   // to a stale skill parent captured by chat.params (notably for skill #2).
-  const currentSkill = getCurrentSkillContext(sessionId, gen.traceId)
-  const resolvedSessionParent = currentSkill?.spanId ?? getSessionObservationParent(sessionId)
+  const sessionSkill = getCurrentSkillContext(sessionId, gen.traceId)
+  const currentSkill = sessionSkill &&
+    observationInvocationOwners.get(sessionSkill.spanId) === gen.agentInvocationId
+    ? sessionSkill
+    : undefined
+  const capturedParent = gen.parentObservationId &&
+    (gen.parentObservationId === gen.agentInvocationId ||
+      observationInvocationOwners.get(gen.parentObservationId) === gen.agentInvocationId)
+    ? gen.parentObservationId
+    : undefined
+  const resolvedSessionParent = currentSkill?.spanId ?? capturedParent ?? gen.agentInvocationId ?? getSessionObservationParent(sessionId)
   const parentObservationId = resolvedSessionParent ?? gen.parentObservationId
   if (parentObservationId && parentObservationId !== gen.parentObservationId) {
     gen.parentObservationId = parentObservationId
@@ -876,10 +903,10 @@ function activatePendingGeneration(
     gen.isSkillChild = true
   }
   const subagentType = getSessionSubagentType(sessionId, gen.traceId)
-  if (subagentType && gen.generationData.metadata.subagent_type !== subagentType) {
+  if (subagentType && gen.generationData.metadata.subagentName !== subagentType) {
     gen.generationData.metadata = {
       ...gen.generationData.metadata,
-      subagent_type: subagentType,
+      subagentName: subagentType,
     }
   }
 
@@ -1031,6 +1058,9 @@ function migrateTraceId(oldTraceId: string, newTraceId: string) {
 
   migrateQueuedIngestionTraceId(oldTraceId, newTraceId)
   migrateCompletedObservationState(oldTraceId, newTraceId)
+  for (const invocation of subagentInvocations.values()) {
+    if (invocation.traceId === oldTraceId) invocation.traceId = newTraceId
+  }
 
   const batch = traceBatches.get(oldTraceId)
   if (batch) {
@@ -1332,14 +1362,6 @@ function getSessionObservationParent(
   const agentSpanId = sessionToAgentSpan.get(sessionId)
   if (agentSpanId) return agentSpanId
 
-  // A few hook sequences are delivered before session.created has associated
-  // the session. In that window use the trace-level skill parent, matching the
-  // original skill-stack behaviour and keeping following LLM/tool nodes under
-  // the skill that opened the group.
-  if (traceId) {
-    const activeSkillSpanId = activeSkillSpanByTrace.get(traceId)
-    if (activeSkillSpanId) return activeSkillSpanId
-  }
 
   return undefined
 }
@@ -1391,7 +1413,15 @@ export function selectPendingSubagentIndex(
   entries: PendingSubagentLaunch[],
   hint?: { callID?: string; title?: string; description?: string; agent?: string },
 ) {
-  if (entries.length <= 1) return entries.length - 1
+  if (!entries.length) return -1
+  if (entries.length === 1) {
+    const description = normalizedSubagentDescription(hint?.description ?? hint?.title)
+    const expectedDescription = normalizedSubagentDescription(entries[0].description)
+    if (description && expectedDescription && description !== expectedDescription) return -1
+    if (hint?.agent && entries[0].subagentType && hint.agent !== entries[0].subagentType) return -1
+    if (hint?.callID && hint.callID !== entries[0].callID) return -1
+    return 0
+  }
   if (!hint) return -1
 
   if (hint.callID) {
@@ -1417,15 +1447,23 @@ export function selectPendingSubagentIndex(
 
 async function queuePendingSubagent(parentSessionId: string, entry: PendingSubagentLaunch) {
   const waitingSessions = pendingSubagentSessions.get(parentSessionId)
-  let waitingIndex = waitingSessions?.findIndex((session) => {
+  const matchingSessions = (waitingSessions ?? []).map((session, index) => ({ session, index })).filter(({ session }) => {
     const description = normalizedSubagentDescription(session.title)
     return (
       !!description &&
       description === normalizedSubagentDescription(entry.description) &&
       (!session.agent || !entry.subagentType || session.agent === entry.subagentType)
     )
-  }) ?? -1
-  if (waitingIndex < 0 && waitingSessions?.length === 1) waitingIndex = 0
+  })
+  let waitingIndex = matchingSessions.length === 1 ? matchingSessions[0].index : -1
+  if (waitingIndex < 0 && waitingSessions?.length === 1) {
+    const session = waitingSessions[0]
+    const expectedDescription = normalizedSubagentDescription(entry.description)
+    const description = normalizedSubagentDescription(session.title)
+    const descriptionCompatible = !description || !expectedDescription || description === expectedDescription
+    const agentCompatible = !session.agent || !entry.subagentType || session.agent === entry.subagentType
+    if (descriptionCompatible && agentCompatible) waitingIndex = 0
+  }
   const waitingSession = waitingIndex >= 0 ? waitingSessions?.splice(waitingIndex, 1)[0] : undefined
   if (waitingSessions && waitingSessions.length === 0) pendingSubagentSessions.delete(parentSessionId)
 
@@ -1520,32 +1558,62 @@ function isSubagentSession(sessionId: string): boolean {
   return sessionToAgentSpan.has(sessionId) || subagentParentBySession.has(sessionId)
 }
 
-async function attachSubagentSession(sessionId: string, traceId: string, agentSpanId: string) {
+async function attachSubagentSession(sessionId: string, traceId: string, agentSpanId: string, claimProvisional = true) {
+  const invocation = subagentInvocations.get(agentSpanId)
+  if (!invocation) return
+  invocation.childSessionId = sessionId
+  const activeInvocationId = sessionToAgentSpan.get(sessionId)
+  const activeInvocation = activeInvocationId ? subagentInvocations.get(activeInvocationId) : undefined
+  // A delayed task.after/session.created for A may arrive while B is already
+  // running in the same child. Repair A's own records without stealing B.
+  const mayActivate = !activeInvocation || invocation.sequence >= activeInvocation.sequence
+  const retiringTerminal = mayActivate && activeInvocationId && activeInvocationId !== agentSpanId
+    ? pendingSessionFinalizations.get(sessionId)
+    : undefined
   const existingTraceId = sessionToTrace.get(sessionId)
-  if (existingTraceId && existingTraceId !== traceId) {
+  if (mayActivate && existingTraceId && existingTraceId !== traceId) {
     migrateTraceId(existingTraceId, traceId)
   }
-  sessionToTrace.set(sessionId, traceId)
-  sessionToAgentSpan.set(sessionId, agentSpanId)
-  currentTraceId = traceId
+  if (mayActivate) {
+    if (activeInvocationId && activeInvocationId !== agentSpanId) {
+      // A skill belongs to its invocation, not to every later resume of the
+      // child session. Preserve its completed node but retire the active scope.
+      endActiveSkillLifecycle(sessionId, new Date(), "session.idle")
+      if (activeInvocation) activeInvocation.assistantOutput = sessionAssistantOutputs.get(sessionId)
+      activeSkillContexts.delete(sessionId)
+      sessionAssistantOutputs.delete(sessionId)
+      idleSessionIds.delete(sessionId)
+      sessionTerminalDetails.delete(sessionId)
+      pendingSessionFinalizations.delete(sessionId)
+    }
+    sessionToTrace.set(sessionId, traceId)
+    sessionToAgentSpan.set(sessionId, agentSpanId)
+    subagentParentBySession.set(sessionId, invocation.parentSessionId)
+    currentTraceId = traceId
+  }
+  if (retiringTerminal && retiringTerminal.agentInvocationId === activeInvocationId) {
+    // A fast resume can begin before A's settling timer fires. Finish A using
+    // its captured scope after B is active, so this cannot close B or the trace.
+    await finalizeSessionTerminal(sessionId, retiringTerminal.traceId,
+      retiringTerminal.source, retiringTerminal.errorMessage, activeInvocationId)
+  }
   const agentSpan = traceBatches.get(traceId)?.spans.find((span) => span.id === agentSpanId)
   if (agentSpan) {
-    const traceOwnerSessionId = getTraceOwnerSessionId(sessionId, traceId)
+    const traceOwnerSessionId = getTraceOwnerSessionId(invocation.parentSessionId, traceId)
     const agentUpdates: Partial<SpanData> = {
       metadata: {
         ...agentSpan.metadata,
         ...(traceOwnerSessionId ? { sessionId: traceOwnerSessionId } : {}),
         childSessionId: sessionId,
-        ...(subagentParentBySession.get(sessionId)
-          ? { parentSessionId: subagentParentBySession.get(sessionId) }
-          : {}),
+        subagentObservationId: agentSpanId,
+        parentSessionId: invocation.parentSessionId,
       },
     }
     updateSpanInBatch(traceId, agentSpanId, agentUpdates)
     updateSpanImmediately(traceId, agentSpanId, agentUpdates)
   }
-  await reparentSessionObservations(sessionId, traceId, agentSpanId)
-  if (idleSessionIds.has(sessionId)) {
+  await reparentSessionObservations(sessionId, traceId, agentSpanId, claimProvisional)
+  if (mayActivate && idleSessionIds.has(sessionId)) {
     const terminal = sessionTerminalDetails.get(sessionId)
     endActiveSkillLifecycle(
       sessionId,
@@ -1572,27 +1640,31 @@ function completeSubagentSpan(
 ) {
   const existingAgentSpan = traceBatches.get(traceId)?.spans.find((span) => span.id === agentSpanId)
   if (!existingAgentSpan) return
+  const invocation = subagentInvocations.get(agentSpanId)
 
   const childGenerations = allGenerations.filter(
-    (generation) => generation.sessionId === sessionId && generation.traceId === traceId,
+    (generation) => generation.traceId === traceId &&
+      observationInvocationOwners.get(generation.genId) === agentSpanId,
   )
   const lastChildGeneration = childGenerations[childGenerations.length - 1]
-  const traceOwnerSessionId = getTraceOwnerSessionId(sessionId, traceId)
+  const traceOwnerSessionId = getTraceOwnerSessionId(invocation?.parentSessionId ?? sessionId, traceId)
   const spanUpdates: Partial<SpanData> = {
     endTime: existingAgentSpan.endTime ?? new Date().toISOString(),
     // Empty text is a valid final result (for example a tool-call-only
     // response). Do not replace it with the child prompt.
     output:
       lastChildGeneration?.finalOutput?.text ??
-      sessionAssistantOutputs.get(sessionId) ??
-      userInputs.get(sessionId) ??
+      existingAgentSpan.output ??
+      invocation?.assistantOutput ??
+      (sessionToAgentSpan.get(sessionId) === agentSpanId ? sessionAssistantOutputs.get(sessionId) : undefined) ??
       "",
     metadata: {
       ...(existingAgentSpan.metadata ?? {}),
       ...(traceOwnerSessionId ? { sessionId: traceOwnerSessionId } : {}),
       childSessionId: sessionId,
-      ...(subagentParentBySession.get(sessionId)
-        ? { parentSessionId: subagentParentBySession.get(sessionId) }
+      subagentObservationId: agentSpanId,
+      ...(invocation?.parentSessionId
+        ? { parentSessionId: invocation.parentSessionId }
         : {}),
       ...(errorMessage ? { error: errorMessage } : {}),
     },
@@ -1612,22 +1684,59 @@ function completeSubagentSpan(
   }
 }
 
-function recordSessionSpan(sessionId: string, spanId: string) {
+function recordObservationInvocation(sessionId: string, observationId: string, agentSpanId = sessionToAgentSpan.get(sessionId)) {
+  if (observationInvocationOwners.has(observationId) || !agentSpanId) return
+  const invocation = subagentInvocations.get(agentSpanId)
+  if (!invocation) return
+  observationInvocationOwners.set(observationId, agentSpanId)
+  invocation.observationIds.add(observationId)
+}
+
+function withObservationInvocationMetadata(observationId: string, metadata: Record<string, any>): Record<string, any> {
+  // Wrappers identify their own invocation using childSessionId. Their owner
+  // may itself be another invocation, so do not give wrappers the caller's
+  // subagentSessionId as if it were their called child.
+  const ownInvocation = subagentInvocations.get(observationId)
+  if (ownInvocation) return { ...metadata, subagentObservationId: ownInvocation.agentSpanId }
+  const ownerId = observationInvocationOwners.get(observationId)
+  const owner = ownerId ? subagentInvocations.get(ownerId) : undefined
+  const subagentType = owner ? getObservationSubagentType(owner.traceId, owner.agentSpanId) : undefined
+  return owner
+    ? { ...metadata, subagentObservationId: owner.agentSpanId, ...(owner.childSessionId ? { subagentSessionId: owner.childSessionId } : {}), ...(subagentType ? { subagentName: subagentType } : {}) }
+    : metadata
+}
+
+function recordSessionSpan(sessionId: string, spanId: string, agentSpanId = sessionToAgentSpan.get(sessionId)) {
   const spanIds = sessionSpanIds.get(sessionId) ?? new Set<string>()
   spanIds.add(spanId)
   sessionSpanIds.set(sessionId, spanIds)
+  recordObservationInvocation(sessionId, spanId, agentSpanId)
 }
 
-async function reparentSessionObservations(sessionId: string, traceId: string, agentSpanId: string) {
+async function reparentSessionObservations(sessionId: string, traceId: string, agentSpanId: string,
+  claimProvisional = sessionToAgentSpan.get(sessionId) === agentSpanId) {
+  const invocation = subagentInvocations.get(agentSpanId)
+  if (!invocation) return
   const subagentType = getObservationSubagentType(traceId, agentSpanId)
   const traceOwnerSessionId = getTraceOwnerSessionId(sessionId, traceId) ?? sessionId
-  const sessionOwnedObservationIds = new Set(sessionSpanIds.get(sessionId) ?? [])
-  for (const generation of allGenerations) {
-    if (generation.sessionId === sessionId && generation.traceId === traceId) {
-      sessionOwnedObservationIds.add(generation.genId)
+  // Claim only unassociated provisional observations. An earlier invocation's
+  // ownership is immutable even when it used this exact same child session.
+  if (claimProvisional) {
+    for (const spanId of sessionSpanIds.get(sessionId) ?? []) recordObservationInvocation(sessionId, spanId, agentSpanId)
+    for (const generation of [...allGenerations, ...(pendingGenerations.get(sessionId) ?? [])]) {
+      if (generation.sessionId === sessionId && generation.traceId === traceId) {
+        recordObservationInvocation(sessionId, generation.genId, agentSpanId)
+        generation.agentInvocationId ??= observationInvocationOwners.get(generation.genId)
+      }
     }
   }
-  for (const gen of allGenerations.filter((g) => g.sessionId === sessionId && g.traceId === traceId)) {
+  const sessionOwnedObservationIds = invocation.observationIds
+  for (const generation of allGenerations) {
+    if (generation.sessionId === sessionId && generation.traceId === traceId) {
+      if (observationInvocationOwners.get(generation.genId) === agentSpanId) sessionOwnedObservationIds.add(generation.genId)
+    }
+  }
+  for (const gen of allGenerations.filter((g) => g.traceId === traceId && observationInvocationOwners.get(g.genId) === agentSpanId)) {
     const existingGeneration = traceBatches.get(traceId)?.generations.find((item) => item.id === gen.genId)
     // Preserve nesting that is already internal to this child session (for
     // example agent -> skill -> LLM/tool). Only replace a missing or foreign parent.
@@ -1636,29 +1745,33 @@ async function reparentSessionObservations(sessionId: string, traceId: string, a
       agentSpanId,
       sessionOwnedObservationIds,
     )
-    const needsSubagentTypeUpdate = !!subagentType && existingGeneration?.metadata?.subagent_type !== subagentType
+    const needsSubagentTypeUpdate = !!subagentType && existingGeneration?.metadata?.subagentName !== subagentType
     const needsSessionUpdate = existingGeneration?.metadata?.sessionId !== traceOwnerSessionId
-    if (!needsParentUpdate && !needsSubagentTypeUpdate && !needsSessionUpdate) continue
+    const needsInvocationUpdate = existingGeneration?.metadata?.subagentObservationId !== agentSpanId ||
+      existingGeneration?.metadata?.subagentSessionId !== sessionId
+    if (!needsParentUpdate && !needsSubagentTypeUpdate && !needsSessionUpdate && !needsInvocationUpdate) continue
 
     if (needsParentUpdate) {
       gen.parentObservationId = agentSpanId
       gen.generationData.parentObservationId = agentSpanId
     }
-    if (needsSubagentTypeUpdate || needsSessionUpdate) {
+    if (needsSubagentTypeUpdate || needsSessionUpdate || needsInvocationUpdate) {
       gen.generationData.metadata = withObservationSessionMetadata({
         ...(existingGeneration?.metadata ?? gen.generationData.metadata),
-        ...(subagentType ? { subagent_type: subagentType } : {}),
+        ...(subagentType ? { subagentName: subagentType } : {}),
+        subagentSessionId: sessionId,
+        subagentObservationId: agentSpanId,
       }, traceOwnerSessionId)
     }
     const generationUpdates: Partial<GenerationData> = {
       ...(needsParentUpdate ? { parentObservationId: agentSpanId } : {}),
-      ...(needsSubagentTypeUpdate || needsSessionUpdate ? { metadata: gen.generationData.metadata } : {}),
+      ...(needsSubagentTypeUpdate || needsSessionUpdate || needsInvocationUpdate ? { metadata: gen.generationData.metadata } : {}),
     }
     updateGenerationInBatch(traceId, gen.genId, generationUpdates)
     updateGenerationImmediately(traceId, gen.genId, generationUpdates)
   }
 
-  for (const spanId of sessionSpanIds.get(sessionId) ?? []) {
+  for (const spanId of invocation.observationIds) {
     const span = traceBatches.get(traceId)?.spans.find((s) => s.id === spanId)
     if (!span || span.id === agentSpanId) continue
     const needsParentUpdate = shouldReparentSessionObservation(
@@ -1666,16 +1779,19 @@ async function reparentSessionObservations(sessionId: string, traceId: string, a
       agentSpanId,
       sessionOwnedObservationIds,
     )
-    const needsSubagentTypeUpdate = !!subagentType && span.metadata?.subagent_type !== subagentType
+    const needsSubagentTypeUpdate = span.metadata?.nodeType !== "subagent" &&
+      !!subagentType && span.metadata?.subagentName !== subagentType
     const needsSessionUpdate = span.metadata?.sessionId !== traceOwnerSessionId
-    if (!needsParentUpdate && !needsSubagentTypeUpdate && !needsSessionUpdate) continue
+    const needsInvocationUpdate = span.metadata?.nodeType !== "subagent" &&
+      (span.metadata?.subagentObservationId !== agentSpanId || span.metadata?.subagentSessionId !== sessionId)
+    if (!needsParentUpdate && !needsSubagentTypeUpdate && !needsSessionUpdate && !needsInvocationUpdate) continue
 
     const spanUpdates: Partial<SpanData> = {
       ...(needsParentUpdate ? { parentObservationId: agentSpanId } : {}),
-      ...(needsSubagentTypeUpdate || needsSessionUpdate
+      ...(needsSubagentTypeUpdate || needsSessionUpdate || needsInvocationUpdate
         ? {
             metadata: withObservationSessionMetadata(
-              { ...span.metadata, ...(subagentType ? { subagent_type: subagentType } : {}) },
+              withObservationInvocationMetadata(span.id, { ...span.metadata, ...(needsSubagentTypeUpdate ? { subagentName: subagentType } : {}) }),
               traceOwnerSessionId,
             ),
           }
@@ -1708,6 +1824,11 @@ function cleanupTraceState(traceId: string, sessionIds: string[]) {
     const timer = generationCompletionTimers.get(generation.id)
     if (timer) clearTimeout(timer)
     generationCompletionTimers.delete(generation.id)
+  }
+  for (const [agentSpanId, invocation] of subagentInvocations) {
+    if (invocation.traceId !== traceId) continue
+    for (const observationId of invocation.observationIds) observationInvocationOwners.delete(observationId)
+    subagentInvocations.delete(agentSpanId)
   }
 
   traceBatches.delete(traceId)
@@ -2078,9 +2199,15 @@ function withEventBodyTags(event: any) {
 }
 
 function toUploadIngestionEvent(event: any) {
-  if (!event || typeof event !== "object" || event.__langfuseRetryCount === undefined) return event
+  if (!event || typeof event !== "object") return event
   const { __langfuseRetryCount: _retryCount, ...ingestionEvent } = event
-  return ingestionEvent
+  // endTime describes the observation, not when a later correction happened.
+  // Use the captured event creation time so retries retain the same ordering.
+  // Keep the existing work-environment event types for compatibility.
+  const timestamp = event.type?.endsWith("-update") && event.body?.metadata?.hookReceivedAt
+    ? event.body.metadata.hookReceivedAt
+    : event.timestamp
+  return { ...ingestionEvent, timestamp }
 }
 
 function jsonByteLength(value: unknown): number {
@@ -2252,13 +2379,23 @@ function withEventMetadataTags(body: any, hookReceivedAt?: string) {
   }
 }
 
+let lastIngestionEventCreatedAtMs = 0
+
 function buildIngestionEvent(type: string, body: any, timestamp = new Date().toISOString(), hookReceivedAt = new Date().toISOString()) {
+  // Worker ordering has no arrival-time tie breaker. Even two hooks received
+  // in one millisecond need a stable order before an upload or retry occurs.
+  const receivedAtMs = Date.parse(hookReceivedAt)
+  lastIngestionEventCreatedAtMs = Math.max(
+    Number.isFinite(receivedAtMs) ? receivedAtMs : Date.now(),
+    lastIngestionEventCreatedAtMs + 1,
+  )
+  const eventCreatedAt = new Date(lastIngestionEventCreatedAtMs).toISOString()
   return {
     id: generateUUID(),
     timestamp,
     type,
     body: {
-      ...withEventMetadataTags(body, hookReceivedAt),
+      ...withEventMetadataTags(body, eventCreatedAt),
       release: TESTAGENT_VERSION,
     },
   }
@@ -3132,26 +3269,51 @@ function createSpanImmediately(span: SpanData) {
 }
 
 function updateSpanImmediately(traceId: string, spanId: string, updates: Partial<SpanData>) {
-  const normalizedUpdates =
-    updates.metadata !== undefined
-      ? { ...updates, metadata: withTraceSkillInfoForObservationUpdate(traceId, spanId, updates.metadata) }
-      : updates
   const existingSpan = traceBatches.get(traceId)?.spans.find((span) => span.id === spanId)
+  // A reused child session can be reparented after its tool result has already
+  // left the upload queue. Carry the current span state in every update so a
+  // parent-only correction retains classification metadata and so replacing a
+  // still-pending update cannot discard its output or other terminal fields.
+  const preservedState: Partial<SpanData> = existingSpan
+    ? {
+        name: existingSpan.name,
+        input: existingSpan.input,
+        output: existingSpan.output,
+        startTime: existingSpan.startTime,
+        endTime: existingSpan.endTime,
+        parentObservationId: existingSpan.parentObservationId,
+        level: existingSpan.level,
+        metadata: existingSpan.metadata,
+        tags: existingSpan.tags,
+      }
+    : {}
+  // Undefined fields are omitted by the ingestion transport, so they must not
+  // erase an existing value when constructing the replacement snapshot.
+  const definedUpdates = Object.fromEntries(
+    Object.entries(updates).filter(([, value]) => value !== undefined),
+  ) as Partial<SpanData>
+  const effectiveUpdates = { ...preservedState, ...definedUpdates }
+  if (existingSpan?.metadata !== undefined || definedUpdates.metadata !== undefined) {
+    effectiveUpdates.metadata = withTraceSkillInfoForObservationUpdate(traceId, spanId, {
+      ...(existingSpan?.metadata ?? {}),
+      ...(definedUpdates.metadata ?? {}),
+    })
+  }
   const outgoingUpdates =
-    normalizedUpdates.metadata !== undefined
+    effectiveUpdates.metadata !== undefined
       ? {
-          ...normalizedUpdates,
+          ...effectiveUpdates,
           metadata: withoutObservationCompletionFields(
             withParentObservationMetadata(
-              normalizedUpdates.metadata,
-              normalizedUpdates.parentObservationId ?? existingSpan?.parentObservationId,
+              effectiveUpdates.metadata,
+              effectiveUpdates.parentObservationId,
             ),
           ),
         }
-      : normalizedUpdates
+      : effectiveUpdates
   // Do not let a late metadata/parent update reopen a completed tool span.
   // Keep both the body endTime and ingestion timestamp on the original end.
-  const endTime = normalizedUpdates.endTime ?? existingSpan?.endTime
+  const endTime = effectiveUpdates.endTime ?? existingSpan?.endTime
   scheduleBackgroundIngestion([
     buildIngestionEvent(
       "span-update",
@@ -3294,11 +3456,15 @@ async function updateToolSpanOutput(
 ) {
   const existingSpan = traceBatches.get(traceId)?.spans.find((span) => span.id === spanId)
   const spanOutput = toSpanOutput(snapshot.output)
+  // The skill observation represents the loaded instruction document. Its
+  // authoritative output is written by tool.execute.after; message-part tool
+  // snapshots must not replace it with a runtime result.
+  const isSkill = existingSpan?.metadata?.nodeType === "skill"
   const isOpenSkill =
-    existingSpan?.metadata?.nodeType === "skill" &&
+    isSkill &&
     existingSpan?.metadata?.skillLifecycleEnded !== true
   const spanUpdates: Partial<SpanData> = {
-    ...(spanOutput !== undefined ? { output: spanOutput } : {}),
+    ...(!isSkill && spanOutput !== undefined ? { output: spanOutput } : {}),
     // A completed tool result can be observed more than once: first from the
     // message part and again when its result is included in the next LLM input.
     // Keep the first completion time so a delayed duplicate does not inflate the
@@ -3316,11 +3482,15 @@ async function updateToolSpanOutput(
       ...(snapshot.toolPartCompleted !== undefined ? { toolPartCompleted: snapshot.toolPartCompleted } : {}),
       ...(snapshot.toolCompletionSource ? { toolCompletionSource: snapshot.toolCompletionSource } : {}),
       tags: OBSERVATION_TAGS,
-      output: {
-        title: snapshot.title,
-        output: snapshot.output,
-        metadata: snapshot.metadata,
-      },
+      ...(!isSkill
+        ? {
+            output: {
+              title: snapshot.title,
+              output: snapshot.output,
+              metadata: snapshot.metadata,
+            },
+          }
+        : {}),
       ...baseMetadata(sessionId ?? existingSpan?.metadata?.sessionId, traceId),
     },
   }
@@ -4065,7 +4235,7 @@ function installProcessHandlers() {
 function addGenerationToBatch(traceId: string, gen: GenerationData) {
   const batch = traceBatches.get(traceId)
   if (batch) {
-    gen.metadata = withTraceSkillInfo(traceId, gen.metadata)
+    gen.metadata = withObservationInvocationMetadata(gen.id, withTraceSkillInfo(traceId, gen.metadata))
     rememberObservationSkillInfoCount(traceId, gen.id)
     batch.generations.push(gen)
   }
@@ -4077,7 +4247,7 @@ function addGenerationToBatch(traceId: string, gen: GenerationData) {
 function addSpanToBatch(traceId: string, span: SpanData) {
   const batch = traceBatches.get(traceId)
   if (batch) {
-    span.metadata = withTraceSkillInfo(traceId, span.metadata)
+    span.metadata = withObservationInvocationMetadata(span.id, withTraceSkillInfo(traceId, span.metadata))
     rememberObservationSkillInfoCount(traceId, span.id)
     batch.spans.push(span)
   }
@@ -4092,6 +4262,10 @@ function updateGenerationInBatch(traceId: string, genId: string, updates: Partia
 
   const idx = batch.generations.findIndex((g) => g.id === genId)
   if (idx !== -1) {
+    // The same update object is subsequently sent by updateGenerationImmediately.
+    // Restore identity from this observation's captured owner before either path
+    // sees metadata rebuilt by a late finalization.
+    if (updates.metadata !== undefined) updates.metadata = withObservationInvocationMetadata(genId, updates.metadata)
     const normalizedUpdates =
       updates.metadata !== undefined
         ? { ...updates, metadata: withTraceSkillInfoForObservationUpdate(traceId, genId, updates.metadata) }
@@ -4109,6 +4283,7 @@ function updateSpanInBatch(traceId: string, spanId: string, updates: Partial<Spa
 
   const idx = batch.spans.findIndex((s) => s.id === spanId)
   if (idx !== -1) {
+    if (updates.metadata !== undefined) updates.metadata = withObservationInvocationMetadata(spanId, updates.metadata)
     const normalizedUpdates =
       updates.metadata !== undefined
         ? { ...updates, metadata: withTraceSkillInfoForObservationUpdate(traceId, spanId, updates.metadata) }
@@ -5225,14 +5400,17 @@ function scheduleSessionTerminalFinalization(
     // If both terminal events arrive, retain the error semantics while keeping
     // the single settling timer used for late step-finish events.
     if (source === "session.error") {
-      pendingSessionFinalizations.set(sessionId, { traceId, source, errorMessage })
+      Object.assign(pending, { traceId, source, errorMessage })
     }
     return
   }
-  pendingSessionFinalizations.set(sessionId, { traceId, source, errorMessage })
+  const scheduledTerminal = { traceId, source, errorMessage, agentInvocationId: sessionToAgentSpan.get(sessionId) }
+  pendingSessionFinalizations.set(sessionId, scheduledTerminal)
 
   setTimeout(() => {
     const terminal = pendingSessionFinalizations.get(sessionId)
+    // An old A timer must not consume a new terminal event scheduled for B.
+    if (terminal !== scheduledTerminal) return
     pendingSessionFinalizations.delete(sessionId)
     if (terminal && idleSessionIds.has(sessionId)) {
       void finalizeSessionTerminal(
@@ -5240,6 +5418,7 @@ function scheduleSessionTerminalFinalization(
         terminal.traceId,
         terminal.source,
         terminal.errorMessage,
+        terminal.agentInvocationId,
       )
     }
   }, SESSION_IDLE_FINALIZATION_WAIT_MS)
@@ -5250,6 +5429,7 @@ async function finalizeSessionTerminal(
   traceId: string,
   source: SessionTerminalSource,
   errorMessage?: string,
+  terminalAgentSpanId = sessionToAgentSpan.get(sessionId),
 ) {
   // A very fast child can become idle before its delayed session.created event
   // is delivered. Resolve once more at the terminal boundary so its completed
@@ -5265,14 +5445,16 @@ async function finalizeSessionTerminal(
     }
   }
 
-  const associatedTraceId = sessionToTrace.get(sessionId)
+  const associatedTraceId = (terminalAgentSpanId ? subagentInvocations.get(terminalAgentSpanId)?.traceId : undefined) ?? sessionToTrace.get(sessionId)
   if (associatedTraceId && associatedTraceId !== traceId) {
     traceId = associatedTraceId
   }
   if (!traceBatches.has(traceId)) return
+  terminalAgentSpanId ??= sessionToAgentSpan.get(sessionId)
 
   for (const g of allGenerations.filter(
-    (gen) => gen.sessionId === sessionId && gen.traceId === traceId && !gen.finalOutput,
+    (gen) => gen.sessionId === sessionId && gen.traceId === traceId && !gen.finalOutput &&
+      (!terminalAgentSpanId || observationInvocationOwners.get(gen.genId) === terminalAgentSpanId),
   )) {
     await finalizeGeneration(sessionId, g)
   }
@@ -5283,14 +5465,17 @@ async function finalizeSessionTerminal(
   // Close only the skill owned by this Agent session. For a child Agent this
   // deliberately leaves its caller's skill active, restoring the hierarchy to
   // that parent Skill after the child Agent span ends.
-  endActiveSkillLifecycle(sessionId, new Date(), source, errorMessage)
+  if (!terminalAgentSpanId || sessionToAgentSpan.get(sessionId) === terminalAgentSpanId) {
+    endActiveSkillLifecycle(sessionId, new Date(), source, errorMessage)
+  }
 
   if (sessionId !== rootSessionId && isSubagentSession(sessionId)) {
 
-    const agentSpanId = sessionToAgentSpan.get(sessionId)
+    const agentSpanId = terminalAgentSpanId
     if (agentSpanId) {
       completeSubagentSpan(sessionId, traceId, agentSpanId, source, errorMessage)
     }
+    if (sessionToAgentSpan.get(sessionId) !== terminalAgentSpanId) return
 
     // Keep the child-to-trace and child-to-agent ownership until the entire
     // trace is complete. Concurrent sibling agents and late task completion
@@ -5354,6 +5539,7 @@ export const LangfusePlugin: Plugin = async (ctx) => {
   }
 
   const user = User.get()
+  const userOrg = typeof user.pathName === "string" ? user.pathName.trim() : ""
   // const user = {
   //   userId: "80295981",
   //   userName: "张丹",
@@ -5446,6 +5632,7 @@ export const LangfusePlugin: Plugin = async (ctx) => {
     const m: Record<string, string> = {}
     if (project_id) m.projectId = project_id
     if (userIdMetadata) m.user_id = userIdMetadata
+    if (userOrg) m.user_org = userOrg
     const observationSessionId = getTraceOwnerSessionId(sessionId ?? currentSessionId ?? undefined, traceId)
     if (observationSessionId) m["sessionId"] = observationSessionId
     m.source = "testagent"
@@ -5584,6 +5771,7 @@ export const LangfusePlugin: Plugin = async (ctx) => {
       // Snapshot ownership before any await. Session association can pause this
       // handler while a later skill changes the active context.
       const parentObservationId = getSessionObservationParent(sessionId)
+      const agentInvocationId = sessionToAgentSpan.get(sessionId)
       const isSkillChild = !!getCurrentSkillContext(sessionId, sessionToTrace.get(sessionId) || currentTraceId)
       const pendingSequence = ++pendingGenerationSequence
       const traceId = await getTraceIdAfterSessionCreated(sessionId)
@@ -5608,6 +5796,7 @@ export const LangfusePlugin: Plugin = async (ctx) => {
       // it with the first concrete message-part timestamp before ingestion.
       const startTime = new Date()
       const genId = generateUUID()
+      recordObservationInvocation(sessionId, genId, agentInvocationId)
 
       const modelParameters: Record<string, any> = {}
       if (output.temperature !== undefined) modelParameters.temperature = output.temperature
@@ -5629,7 +5818,7 @@ export const LangfusePlugin: Plugin = async (ctx) => {
         }),
         output: {},
         tags: OBSERVATION_TAGS,
-        ...(childSubagentType ? { subagent_type: childSubagentType } : {}),
+        ...(childSubagentType ? { subagentName: childSubagentType } : {}),
         ...(commandMeta ? {commandData: commandMeta} : {}),
         ...baseMetadata(sessionId, traceId),
       }
@@ -5653,6 +5842,7 @@ export const LangfusePlugin: Plugin = async (ctx) => {
         traceId,
         genId,
         sessionId,
+        agentInvocationId,
         parentObservationId,
         selectedModel,
         resolvedModel,
@@ -5717,6 +5907,8 @@ export const LangfusePlugin: Plugin = async (ctx) => {
     "tool.execute.before": async (input, output) => {
       // transformWriteArgs(input.tool, output.args)
 
+      // Preserve launch order across awaits as well as response/idle timers.
+      const taskInvocationSequence = input.tool === "task" ? ++subagentInvocationSequence : undefined
       // Keep the start boundary stable if this handler later waits for session
       // association. The hook payload timestamp remains preferred when present.
       const toolObservedAt = new Date()
@@ -5725,6 +5917,7 @@ export const LangfusePlugin: Plugin = async (ctx) => {
 
       const sessionId = input.sessionID || currentSessionId || [...trackedSessionIds].pop()
       if (!sessionId) return
+      const toolInvocationId = sessionToAgentSpan.get(sessionId)
 
       // Activate the LLM that issued this tool call before changing skill
       // ownership. Otherwise a still-pending caller generation could be
@@ -5783,7 +5976,7 @@ export const LangfusePlugin: Plugin = async (ctx) => {
       // The child can become associated while the hook is awaiting
       // session.created. Replace only a provisional trace-level parent; a real
       // skill owned by this session remains the more specific parent.
-      const resolvedAgentParent = sessionToAgentSpan.get(sessionId)
+      const resolvedAgentParent = toolInvocationId ?? sessionToAgentSpan.get(sessionId)
       if (!hadSessionSkillParent && resolvedAgentParent) {
         toolParentObservationId = resolvedAgentParent
         agentParentObservationId = resolvedAgentParent
@@ -5822,7 +6015,7 @@ export const LangfusePlugin: Plugin = async (ctx) => {
             spanKind: "TOOL",
             nodeType: isSkill ? "skill" : "tool",
             tags: OBSERVATION_TAGS,
-            ...(childSubagentType ? { subagent_type: childSubagentType } : {}),
+            ...(childSubagentType ? { subagentName: childSubagentType } : {}),
             input: {
               tool: input.tool,
               args: output.args,
@@ -5833,6 +6026,7 @@ export const LangfusePlugin: Plugin = async (ctx) => {
         ),
         tags: OBSERVATION_TAGS,
       }
+      recordSessionSpan(sessionId, spanId, toolInvocationId ?? resolvedAgentParent)
 
       if (isSkill) {
         appendTraceSkillInfo(traceId, { skillName, skillSpanId: spanId })
@@ -5852,7 +6046,6 @@ export const LangfusePlugin: Plugin = async (ctx) => {
       }
       toolSpanIds.set(input.callID, spanId)
       toolCallInfos.set(input.callID, { spanId, traceId, sessionId, toolName: input.tool })
-      recordSessionSpan(sessionId, spanId)
 
       let agentSpanId: string | undefined
       if (isTask && subagentType) {
@@ -5869,7 +6062,7 @@ export const LangfusePlugin: Plugin = async (ctx) => {
           metadata: {
             spanKind: "AGENT",
             nodeType: "subagent",
-            subagent_type: subagentType,
+            subagentName: subagentType,
             description: output.args.description,
             tags: OBSERVATION_TAGS,
             trigger: {
@@ -5881,10 +6074,16 @@ export const LangfusePlugin: Plugin = async (ctx) => {
           },
           tags: OBSERVATION_TAGS,
         }
-
+        subagentInvocations.set(agentSpanId, {
+          agentSpanId,
+          traceId,
+          parentSessionId: sessionId,
+          sequence: taskInvocationSequence!,
+          observationIds: new Set(),
+        })
+        recordSessionSpan(sessionId, agentSpanId, toolInvocationId ?? resolvedAgentParent)
         addSpanToBatch(traceId, agentSpanData)
         createSpanImmediately(agentSpanData)
-        recordSessionSpan(sessionId, agentSpanId)
         toolCallInfos.set(input.callID, {
           spanId,
           traceId,
@@ -5892,13 +6091,20 @@ export const LangfusePlugin: Plugin = async (ctx) => {
           toolName: input.tool,
           agentSpanId,
         })
-        await queuePendingSubagent(sessionId, {
-          traceId,
-          agentSpanId,
-          callID: input.callID,
-          description: output.args?.description ?? input.args?.description,
-          subagentType,
-        })
+        const reusedChildSessionId = output.args?.task_id ?? input.args?.task_id
+        if (typeof reusedChildSessionId === "string" && reusedChildSessionId.trim()) {
+          // Resume is known before task execution starts. session.created will
+          // not fire again, so bind the new invocation now, not at task.after.
+          await attachSubagentSession(reusedChildSessionId, traceId, agentSpanId, false)
+        } else {
+          await queuePendingSubagent(sessionId, {
+            traceId,
+            agentSpanId,
+            callID: input.callID,
+            description: output.args?.description ?? input.args?.description,
+            subagentType,
+          })
+        }
 
         // console.log("[langfuse] subagent call detected:", subagentType, "toolSpanId:", spanId, "agentSpanId:", agentSpanId)
       }
@@ -6065,7 +6271,6 @@ export const LangfusePlugin: Plugin = async (ctx) => {
           resolveTaskChildSessionId(effectiveOutput, effectiveMetadata) ??
           resolveTaskChildSessionId(cachedResult?.output, cachedResult?.metadata)
         if (childSessionId) {
-          subagentParentBySession.set(childSessionId, callInfo.sessionId)
           removePendingSubagentLaunch(callInfo.sessionId, callInfo.agentSpanId)
           removePendingSubagentSession(callInfo.sessionId, childSessionId)
           await attachSubagentSession(childSessionId, traceId, callInfo.agentSpanId)
@@ -6080,6 +6285,10 @@ export const LangfusePlugin: Plugin = async (ctx) => {
         : cachedResult?.toolCompletionSource ??
           existingSpan?.metadata?.toolCompletionSource ??
           "tool.execute.after"
+      // OpenCode's skill result is the canonical prompt payload: it includes
+      // <skill_content> and <skill_file> wrappers around the loaded skill.
+      // Do not replace it with the on-disk file; snapshot updates are blocked
+      // above so this value remains stable after tool.execute.after.
       const spanOutput = toSpanOutput(effectiveOutput)
       const skillLifecycleEnded = existingSpan?.metadata?.skillLifecycleEnded === true
 

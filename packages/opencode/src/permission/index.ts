@@ -316,7 +316,21 @@ export const layer = Layer.effect(
           pattern,
           action: "allow" as const,
         }))
-        if (alwaysRules.length > 0) yield* config.updateGlobal({ permission: toConfig(alwaysRules) })
+        if (alwaysRules.length > 0) {
+          // testagent_change start: Preserve existing wildcard rule when adding specific patterns
+          const cfg = yield* config.get()
+          const existingPerm = cfg.permission?.[existing.info.permission]
+          const newConfig = toConfig(alwaysRules)
+          // If the current config is a simple string (e.g. "bash": "ask"), preserve it as "*": "ask"
+          if (typeof existingPerm === "string" && newConfig[existing.info.permission]) {
+            const permConfig = newConfig[existing.info.permission]
+            if (typeof permConfig === "object") {
+              newConfig[existing.info.permission] = { ...permConfig, "*": existingPerm }
+            }
+          }
+          yield* config.updateGlobal({ permission: newConfig })
+          // testagent_change end
+        }
       }
       // kilocode_change end
     })
@@ -348,7 +362,21 @@ export const layer = Layer.effect(
 
       s.approved.push(...rules)
       existing.saved = true
-      if (rules.length > 0) yield* config.updateGlobal({ permission: toConfig(rules) })
+      if (rules.length > 0) {
+        // testagent_change start: Preserve existing wildcard rule when adding specific patterns
+        const cfg = yield* config.get()
+        const existingPerm = cfg.permission?.[existing.info.permission]
+        const newConfig = toConfig(rules)
+        // If the current config is a simple string (e.g. "bash": "ask"), preserve it as "*": "ask"
+        if (typeof existingPerm === "string" && newConfig[existing.info.permission]) {
+          const permConfig = newConfig[existing.info.permission]
+          if (typeof permConfig === "object") {
+            newConfig[existing.info.permission] = { ...permConfig, "*": existingPerm }
+          }
+        }
+        yield* config.updateGlobal({ permission: newConfig })
+        // testagent_change end
+      }
       return true
     })
     // kilocode_change end

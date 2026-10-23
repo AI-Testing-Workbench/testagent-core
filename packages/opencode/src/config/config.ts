@@ -511,6 +511,38 @@ function globalConfigFile() {
 }
 
 function patchJsonc(input: string, patch: unknown, path: string[] = []): string {
+  // testagent_change start - handle object replacing primitive value
+  // When patch is an object but the current value at path is a primitive (string/number/boolean),
+  // we must replace the entire primitive with the object, not recursively patch its properties.
+  // Example: replacing `"ask"` with `{"*":"allow","1221":"ask"}` at path ["permission","external_directory"]
+  if (isRecord(patch) && path.length > 0) {
+    try {
+      const parsed = JSON.parse(input)
+      let current: unknown = parsed
+      // Navigate to the target location
+      for (const segment of path) {
+        if (isRecord(current)) {
+          current = current[segment]
+        } else {
+          break
+        }
+      }
+      // If current value is a primitive, replace it directly with the patch object
+      if (current !== undefined && !isRecord(current) && !Array.isArray(current)) {
+        const edits = modify(input, path, patch, {
+          formattingOptions: {
+            insertSpaces: true,
+            tabSize: 2,
+          },
+        })
+        return applyEdits(input, edits)
+      }
+    } catch {
+      // Parse error - fall through to default recursive behavior
+    }
+  }
+  // testagent_change end
+
   if (!isRecord(patch)) {
     // null is a delete sentinel: convert to undefined so jsonc-parser removes the key.
     // jsonc-parser's setProperty throws "Can not delete in empty document" when value
