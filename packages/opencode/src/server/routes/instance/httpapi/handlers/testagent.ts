@@ -12,6 +12,7 @@ import {
   EnvVarBatchDeletePayload,
   EnvVarBatchQueryPayload,
   EnvVarBatchUpdatePayload,
+  ServerAuthResult, // testagent_change
   TestagentUserPayload,
   ZhAnswerTogglePayload, // testagent_change
   YoloGetResult, // testagent_change
@@ -199,7 +200,20 @@ export const testagentHandlers = HttpApiBuilder.group(RootHttpApi, "testagent", 
     })
     // testagent_change end
 
+    // testagent_change start - web UI 分享链接所需凭据（与 extension 的 share-link.ts 算法一致）
+    const serverAuth = Effect.fn("TestagentHttpApi.serverAuth")(function* () {
+      const password = process.env["OPENCODE_SERVER_PASSWORD"]
+      const username = process.env["OPENCODE_SERVER_USERNAME"] ?? "opencode"
+      const result: typeof ServerAuthResult.Type = {
+        username,
+        token: password ? Buffer.from(`${username}:${password}`).toString("base64") : null,
+      }
+      return result
+    })
+    // testagent_change end
+
     return handlers
+      .handle("serverAuth", serverAuth) // testagent_change
       .handle("userSet", userSet)
       .handle("envVarsList", envVarsList)
       .handle("envVarBatchQuery", envVarBatchQuery)

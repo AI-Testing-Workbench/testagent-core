@@ -62,6 +62,13 @@ export const YoloGetResult = Schema.Struct({
 })
 // testagent_change end
 
+// testagent_change start - 服务器 Basic 认证凭据（= web UI 分享链接里的 auth_token）
+export const ServerAuthResult = Schema.Struct({
+  username: Schema.String,
+  token: Schema.NullOr(Schema.String),
+})
+// testagent_change end
+
 export const EnvVarBatchCreatePayload = Schema.Array(EnvVarSetPayload)
 
 export const EnvVarBatchUpdatePayload = Schema.Array(EnvVarSetPayload)
@@ -127,6 +134,7 @@ export const AgentOverrideResult = Schema.Struct({
 // testagent_change end
 
 export const TestagentPaths = {
+  serverAuth: "/testagent/server/auth", // testagent_change - web UI 分享链接凭据
   userSet: "/testagent/user",
   envVarsList: "/testagent/env-vars",
   envVarBatchQuery: "/testagent/env-vars/query",
@@ -303,6 +311,20 @@ export const TestagentApi = HttpApi.make("testagent").add(
           identifier: "testagent.yolo.get",
           summary: "Get YOLO mode (global)",
           description: "Query whether YOLO mode is currently enabled.",
+        }),
+      ),
+    )
+    // testagent_change end
+    // testagent_change start - web UI 分享链接所需凭据
+    .add(
+      HttpApiEndpoint.get("serverAuth", TestagentPaths.serverAuth, {
+        success: described(ServerAuthResult, "服务器认证凭据（未设置密码时 token 为 null）"),
+      }).annotateMerge(
+        OpenApi.annotations({
+          identifier: "testagent.server.auth",
+          summary: "Get server Basic auth credential",
+          description:
+            "Returns the username and base64 credential (base64 of `user:password`) that the web UI share link embeds as `?auth_token=`. When no server password is configured the token is null and no auth is required. When a password is configured this route is reachable without credentials from loopback, or from any host when TESTAGENT_SERVER_AUTH_PUBLIC is set.",
         }),
       ),
     )
