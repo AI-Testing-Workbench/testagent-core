@@ -1,6 +1,6 @@
 import { ServerAuth } from "@/server/auth"
 import { setAccountInfo } from "@opencode-ai/core/effect/observability"
-import { Effect, Encoding, Layer, Redacted } from "effect"
+import { Effect, Encoding, Layer, Option, Redacted } from "effect"
 import { HttpEffect, HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/unstable/http"
 import { HttpApiError, HttpApiMiddleware } from "effect/unstable/httpapi"
 import { hasPtyConnectTicketURL } from "@/server/shared/pty-ticket"
@@ -9,6 +9,21 @@ import { isPublicUIPath } from "@/server/shared/public-ui"
 const AUTH_TOKEN_QUERY = "auth_token"
 const UNAUTHORIZED = 401
 const WWW_AUTHENTICATE = 'Basic realm="Secure Area"'
+
+// testagent_change start - 允许免凭据读取 web UI 的 auth_token（否则要先有凭据才能拿凭据）
+const AUTH_BOOTSTRAP_PATH = "/testagent/server/auth"
+const LOOPBACK = new Set(["127.0.0.1", "::1", "::ffff:127.0.0.1"])
+
+// 本机进程始终可自举；远程（k8s pod、多人共享）需要显式开启，
+// 因为一旦开启，任何能访问该端口的人都能拿到完整凭据。
+function isAuthBootstrap(method: string, pathname: string, remote: Option.Option<string> | undefined) {
+  if (method !== "GET") return false
+  if (pathname !== AUTH_BOOTSTRAP_PATH) return false
+  if (process.env["TESTAGENT_SERVER_AUTH_PUBLIC"] === "1") return true
+  const ip = remote ? Option.getOrUndefined(remote) : undefined
+  return ip !== undefined && LOOPBACK.has(ip)
+}
+// testagent_change end
 
 // Avoid HttpApiSecurity alternatives here: Effect security middleware wraps the
 // full handler, so a downstream failure can make the next auth alternative run
@@ -118,6 +133,10 @@ export const authorizationLayer = Layer.effect(
     return Authorization.of((effect) =>
       Effect.gen(function* () {
         const request = yield* HttpServerRequest.HttpServerRequest
+        // testagent_change start
+        const url = new URL(request.url, "http://localhost")
+        if (isAuthBootstrap(request.method, url.pathname, request.remoteAddress)) return yield* effect
+        // testagent_change end
         return yield* credentialFromRequest(request).pipe(
           Effect.flatMap((credential) => validateCredential(effect, credential, config)),
         )
