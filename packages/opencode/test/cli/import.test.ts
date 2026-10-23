@@ -1,5 +1,7 @@
 import { test, expect } from "bun:test"
+import yargs from "yargs" // testagent_change
 import {
+  ImportCommand, // testagent_change
   parseShareUrl,
   shouldAttachShareAuthHeaders,
   transformShareData,
@@ -52,3 +54,12 @@ test("returns null for invalid share data", () => {
   expect(transformShareData([{ type: "message", data: {} as any }])).toBeNull()
   expect(transformShareData([{ type: "session", data: { id: "s" } as any }])).toBeNull() // no messages
 })
+
+// testagent_change start - verify the import CLI exposes and parses Fork mode
+test("import command accepts --fork", async () => {
+  const builder = ImportCommand.builder
+  if (typeof builder !== "function") throw new Error("Import command builder is missing")
+  expect((await builder(yargs())).parseSync(["--fork", "archive.json"]).fork).toBe(true)
+  expect((await builder(yargs())).parseSync(["archive.json"]).fork).toBe(false)
+})
+// testagent_change end

@@ -1,5 +1,5 @@
 import { Session } from "@/session/session"
-import { MessageV2 } from "../../session/message-v2"
+import { SessionArchive } from "@/session/archive" // testagent_change
 import { SessionID } from "../../session/schema"
 import { effectCmd, fail } from "../effect-cmd"
 import { UI } from "../ui"
@@ -7,6 +7,8 @@ import * as prompts from "@clack/prompts"
 import { EOL } from "os"
 import { Effect } from "effect"
 
+// testagent_change start - retain the removed CLI-local sanitizer; the active copy now lives in session/archive.ts
+/*
 function redact(kind: string, id: string, value: string) {
   return value.trim() ? `[redacted:${kind}:${id}]` : value
 }
@@ -217,6 +219,8 @@ function sanitize(data: { info: Session.Info; messages: MessageV2.WithParts[] })
     })),
   }
 }
+*/
+// testagent_change end
 
 export const ExportCommand = effectCmd({
   command: "export [sessionID]",
@@ -280,12 +284,24 @@ const run = Effect.fn("Cli.export.body")(function* (args: { sessionID?: string; 
   // Match legacy try/catch — catches both typed failures and defects
   // (Session.Service.get throws NotFoundError as a defect, not a typed E).
   return yield* Effect.gen(function* () {
+    // testagent_change start - retain the removed CLI-local export dispatch; active path uses SessionArchive below
+    /*
     const sessionInfo = yield* svc.get(sessionID!)
     const messages = yield* svc.messages({ sessionID: sessionInfo.id })
 
     const exportData = { info: sessionInfo, messages }
 
     process.stdout.write(JSON.stringify(args.sanitize ? sanitize(exportData) : exportData, null, 2))
+    */
+    // testagent_change end
+    // testagent_change start - replace CLI-local archive/sanitize logic with the shared export use case
+    const archive = yield* SessionArchive.exportSession({
+      session: svc,
+      sessionID: sessionID!,
+      sanitize: args.sanitize,
+    })
+    process.stdout.write(JSON.stringify(archive, null, 2))
+    // testagent_change end
     process.stdout.write(EOL)
   }).pipe(Effect.catchCause(() => fail(`Session not found: ${sessionID!}`)))
 })

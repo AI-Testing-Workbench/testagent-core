@@ -19,6 +19,7 @@ import { Todo } from "@/session/todo"
 import { MessageID, PartID, SessionID } from "@/session/schema"
 import { cancelTree } from "@/testagent/cancel" // testagent_change - 停止 subagent 的 tree 取消编排
 import { clearPermissions, clearQuestions } from "@/testagent/requests" // testagent_change - 清理挂起的人机交互请求
+import { SessionArchive } from "@/session/archive" // testagent_change
 import { NotFoundError } from "@/storage/storage"
 import { NamedError } from "@opencode-ai/core/util/error"
 import * as Log from "@opencode-ai/core/util/log" // testagent_change
@@ -30,6 +31,7 @@ import { InstanceHttpApi } from "../api"
 import {
   CommandPayload,
   DiffQuery,
+  ExportQuery, // testagent_change
   ForkPayload,
   InitPayload,
   ListQuery,
@@ -82,6 +84,48 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
     const get = Effect.fn("SessionHttpApi.get")(function* (ctx: { params: { sessionID: SessionID } }) {
       return yield* SessionError.mapStorageNotFound(session.get(ctx.params.sessionID))
     })
+
+    // testagent_change start - share archive operations and map fork validation errors at the HTTP boundary
+    const exportArchive = Effect.fn("SessionHttpApi.exportArchive")(function* (ctx: {
+      params: { sessionID: SessionID }
+      query: typeof ExportQuery.Type
+    }) {
+      return yield* SessionError.mapStorageNotFound(
+        SessionArchive.exportSession({
+          session,
+          sessionID: ctx.params.sessionID,
+          sanitize: ctx.query.sanitize,
+        }),
+      )
+    })
+
+    const importArchive = Effect.fn("SessionHttpApi.importArchive")(function* (ctx: {
+      params: { sessionID: SessionID }
+      payload: typeof SessionArchive.Archive.Type
+    }) {
+      if (ctx.params.sessionID !== ctx.payload.info.id) return yield* new HttpApiError.BadRequest({})
+      const instance = yield* InstanceState.context
+      const sessionID = yield* SessionArchive.importSession({
+        archive: ctx.payload,
+        projectID: instance.project.id,
+      })
+      return {
+        sourceSessionID: ctx.params.sessionID,
+        sessionID,
+        forked: false,
+      }
+    })
+
+    const importForkArchive = Effect.fn("SessionHttpApi.importForkArchive")(function* (ctx: {
+      params: { sessionID: SessionID }
+      payload: typeof SessionArchive.Archive.Type
+    }) {
+      if (ctx.params.sessionID !== ctx.payload.info.id) return yield* new HttpApiError.BadRequest({})
+      return yield* SessionArchive.forkSession({ archive: ctx.payload }).pipe(
+        Effect.catchTag("SessionArchive.InvalidForkArchiveError", () => Effect.fail(new HttpApiError.BadRequest({}))),
+      )
+    })
+    // testagent_change end
 
     const children = Effect.fn("SessionHttpApi.children")(function* (ctx: { params: { sessionID: SessionID } }) {
       return yield* session.children(ctx.params.sessionID)
@@ -506,6 +550,9 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       .handle("list", list)
       .handle("status", status)
       .handle("get", get)
+      .handle("exportArchive", exportArchive) // testagent_change
+      .handle("importArchive", importArchive) // testagent_change
+      .handle("importForkArchive", importForkArchive) // testagent_change
       .handle("children", children)
       .handle("todo", todo)
       .handle("diff", diff)
