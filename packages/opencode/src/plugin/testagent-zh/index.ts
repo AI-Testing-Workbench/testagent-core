@@ -2,6 +2,7 @@
 import type { Plugin, PluginInput } from "@opencode-ai/plugin"
 import type { TextPart } from "@opencode-ai/sdk"
 import { existsSync } from "node:fs"
+import { networkInterfaces } from "node:os"
 import { ServerAuth } from "@/server/auth"
 import { GlobalBus } from "@/bus/global"
 
@@ -31,10 +32,35 @@ type Pending = {
 
 const ASK_TIMEOUT_MS = 0 // 0 = 永不超时，一直轮询
 const ANSWER_POLL_MS = 15_000 // relay answer 轮询间隔
+// 启动通知：serve 起来后推一条「沙箱启动成功 + Web UI 地址」。登录态（userId/token）由扩展或
+// env-vars 系统变量注入，可能晚于插件加载，缺失时按 START_RETRY_MS 重试，最多 START_RETRY_MAX 次。
+const START_RETRY_MS = 5_000
+const START_RETRY_MAX = 24 // 约 2 分钟
+// 进程级去重：插件按目录实例化，多工作区/多实例时启动通知只发一次
+let startStarted = false
 const pending = new Map<string, Pending>()
 let pollLoop: Promise<void> | null = null
 // 插件自己注入的回复 id（轮询拿到招乎答案后由插件回复 serve），这些事件不应触发 relay 删除
 const pluginReplied = new Set<string>()
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+// Web UI 远程访问 host：与扩展的「复制 Web UI 链接」按钮
+// （kilo-vscode/src/services/cli-backend/share-link.ts）同一口径——
+// TESTAGENT_SHARE_HOST 覆盖 → 首个非内网 IPv4 → 127.0.0.1，保证通知里的地址和按钮复制的一致。
+function shareHost(): string {
+  const override = process.env.TESTAGENT_SHARE_HOST
+  if (override) return override
+  const nets = networkInterfaces()
+  for (const name of Object.keys(nets)) {
+    for (const info of nets[name] ?? []) {
+      if (info.family === "IPv4" && !info.internal) return info.address
+    }
+  }
+  return "127.0.0.1"
+}
 
 // 日志优先走插件 log 通道（写入服务端日志文件）；插件初始化前回退 console
 let serverLog: PluginInput["log"]
@@ -265,6 +291,7 @@ export const ZhBridgePlugin: Plugin = async ({ client, directory, serverUrl, log
             userId: USER_ID(),
             // 正文为空（极端情况：没有 text part）时退回抬头，避免发出空 content 被拒
             content: answer || text,
+            sessionId: sessionID,
           }
         : {
             sessionId: sessionID,
@@ -343,6 +370,71 @@ export const ZhBridgePlugin: Plugin = async ({ client, directory, serverUrl, log
       }
     })()
   }
+
+  // Web UI 远程访问地址：与扩展「复制 Web UI 链接」按钮拼出的字符串一致。
+  // 端口取 serve 实际监听端口（Server.url）；auth_token 为 base64(username:password)，
+  // 与 GET /testagent/server/auth 返回值同源；serve 未设密码（独立 CLI）时不带 auth_token。
+  function shareLink() {
+    const url = new URL(String(serverUrl))
+    const port = url.port || (url.protocol === "https:" ? "443" : "80")
+    const host = shareHost()
+    const password = process.env["OPENCODE_SERVER_PASSWORD"]
+    if (!password) return `http://${host}:${port}/`
+    const username = process.env["OPENCODE_SERVER_USERNAME"] ?? "opencode"
+    const token = Buffer.from(`${username}:${password}`).toString("base64")
+    return `http://${host}:${port}/?auth_token=${encodeURIComponent(token)}`
+  }
+
+  // 启动通知：项目/沙箱启动成功后推一条「沙箱启动成功 + Web UI 地址」，
+  // 与完成通知相互独立（不受 enabled 开关影响，也不会因为某个 session 才触发）。
+  // 复用招乎已有的 /message/testagent/notification/notify 卡片接口（与本地完成通知同一个），
+  // 不新增 relay 端点；没有 session，所以卡片只带标题 + 正文，不带 sessionId/answer。
+  // 仅云端发送——消息语义就是沙箱就绪，本地启动不需要通知。
+  // 重试策略：登录态未就绪 / 401·403 / 网络异常 → 等 START_RETRY_MS 再试；
+  // 其它 HTTP 失败直接放弃，避免对 relay 造成无意义轮询。
+  function notifyStartup() {
+    if (startStarted) return
+    startStarted = true
+    if (!isCloudMode()) {
+      zhLog("info", "startup notify skipped: not cloud mode")
+      return
+    }
+    void (async () => {
+      for (let attempt = 1; attempt <= START_RETRY_MAX; attempt++) {
+        if (!USER_ID() || !USER_TOKEN()) {
+          zhLog("info", "startup notify waiting for login", { attempt })
+          await sleep(START_RETRY_MS)
+          continue
+        }
+        const url = `${RELAY_URL}/message/testagent/notification/notify`
+        const body = {
+          content: [
+            { type: "title", content: "TestAgent沙箱通知", style: 1 },
+            { type: "content", list: [{ content: `沙箱启动成功，远程访问地址：${shareLink()}`, style: 0 }] },
+          ],
+          userId: USER_ID(),
+        }
+        zhLog("info", "startup notify request", { attempt, url, body })
+        try {
+          const res = await fetch(url, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", ...relayHeaders() },
+            body: JSON.stringify(body),
+          })
+          const data = await res.json().catch(() => ({}))
+          zhLog("info", "startup notify response", { attempt, status: res.status, body: data })
+          if (res.ok && data.returnCode === "SUC0000") return
+          if (res.status !== 401 && res.status !== 403) return
+        } catch (err) {
+          zhLog("warn", "startup notify failed", { attempt, error: String(err) })
+        }
+        await sleep(START_RETRY_MS)
+      }
+      zhLog("warn", "startup notify gave up", { attempts: START_RETRY_MAX })
+    })()
+  }
+
+  notifyStartup()
 
   return {
     async event({ event }) {
