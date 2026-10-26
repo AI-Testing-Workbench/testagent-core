@@ -396,7 +396,12 @@ export const ZhBridgePlugin: Plugin = async ({ client, directory, serverUrl, log
     if (startStarted) return
     startStarted = true
     if (!isCloudMode()) {
-      zhLog("info", "startup notify skipped: not cloud mode")
+      // 本地不发送，但仍打印一次待发送内容，便于核对 dir 取值是否符合预期
+      zhLog("info", "startup notify skipped: not cloud mode", {
+        directory,
+        localUrl: `${RELAY_URL}/message/testagent/tscode/jump?dir=${encodeURIComponent(directory)}`,
+        shareLink: shareLink(),
+      })
       return
     }
     void (async () => {
@@ -407,14 +412,27 @@ export const ZhBridgePlugin: Plugin = async ({ client, directory, serverUrl, log
           continue
         }
         const url = `${RELAY_URL}/message/testagent/notification/notify`
+        // dir 取插件实例目录（PluginInput.directory）：serve 由扩展以工作区根目录为 cwd 派生，
+        // 首个请求的 ?directory= / x-opencode-directory 也由它携带，Session.create 正是把这个值
+        // 原样写进 Session.Info.directory，所以它就是 Web UI 深链 /<base64url(dir)> 的那一段。
+        // 路径含空格/中文/反斜杠，必须编码后再放进 query。
+        const localUrl = `${RELAY_URL}/message/testagent/tscode/jump?dir=${encodeURIComponent(directory)}`
+        // shareLink 是函数，必须调用；写成 ${shareLink} 会把函数源码原样拼进 url
+        const webLink = shareLink()
         const body = {
           content: [
-            { type: "title", content: "TestAgent沙箱通知", style: 1 },
-            { type: "content", list: [{ content: `沙箱启动成功，远程访问地址：${shareLink()}`, style: 0 }] },
+            { type: "title", content: "沙箱通知", style: 1 },
+            {
+              type: "content",
+              list: [
+                { content: `点击浏览器打开\n`, type: [3], link: { url: webLink } },
+                { content: `点击本地工作台打开`, type: [3], link: { url: localUrl } },
+              ],
+            },
           ],
           userId: USER_ID(),
         }
-        zhLog("info", "startup notify request", { attempt, url, body })
+        zhLog("info", "startup notify request", { attempt, url, directory, localUrl, body })
         try {
           const res = await fetch(url, {
             method: "POST",
