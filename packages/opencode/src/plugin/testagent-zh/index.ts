@@ -1,7 +1,17 @@
 // testagent_change - new file
 import type { Plugin, PluginInput } from "@opencode-ai/plugin"
+import type { TextPart } from "@opencode-ai/sdk"
+import { existsSync } from "node:fs"
 import { ServerAuth } from "@/server/auth"
 import { GlobalBus } from "@/bus/global"
+
+// 云端判定：与 extension 的 isCloudMode()（kilo-vscode/src/services/cli-backend/cloud-mode.ts，
+// 决定「复制 Web UI 链接」按钮是否显示）同一口径——env 或 marker 文件，任一命中即云端。
+// serve 进程由扩展派生，继承同一份 env、看到同一个 marker 文件，判定结果必然与按钮一致；
+// 独立启动的 CLI 同样靠这两个信号，不额外引入第三种判定。
+function isCloudMode(): boolean {
+  return process.env["TESTAGENT_CLOUD_MODE"] === "1" || existsSync("/etc/tscode-cloud-mode")
+}
 
 // ZH relay 地址：云端由 sandbox-service 注入 ZH_RELAY_URL；本地可用环境变量覆盖（ZH_RELAY_URL 或
 // 兼容历史命名 TESTAGENT_ZH_RELAY_URL），未注入时使用内置默认地址。默认地址 base64 编码存储，使用前解码。
@@ -192,6 +202,32 @@ export const ZhBridgePlugin: Plugin = async ({ client, directory, serverUrl, log
       .catch((err) => zhLog("warn", "delete failed", { id: askId, error: String(err) }))
   }
 
+  // 取本轮最终回答正文：从最新一条 assistant 消息往前找，拼出所有正文 text part。
+  // /session/:id/message 按 (time_created, id) 升序返回，所以从尾部倒着找即可；
+  // 摘要消息（compaction）不算回答，空文本（thinking 分隔符）也跳过，继续往前找。
+  // text part 存的就是模型原始输出的 markdown 原文（processor 只做 delta 拼接，不转 HTML），
+  // 所以这里原样返回；多段之间用空行拼接，保持 markdown 块级结构。
+  async function fetchAnswer(sessionID: string) {
+    try {
+      const result = await client.session.messages({ path: { id: sessionID }, query: { limit: 50 } })
+      const msgs = result.data ?? []
+      for (let i = msgs.length - 1; i >= 0; i--) {
+        const msg = msgs[i]
+        if (!msg || msg.info.role !== "assistant") continue
+        if (msg.info.summary) continue
+        const text = msg.parts
+          .filter((p): p is TextPart => p.type === "text" && !p.synthetic && !p.ignored)
+          .map((p) => p.text.trim())
+          .filter((p) => p.length > 0)
+          .join("\n\n")
+        if (text) return text
+      }
+    } catch (err) {
+      zhLog("warn", "session answer fetch failed", { sessionID, error: String(err) })
+    }
+    return ""
+  }
+
   // 任务完成通知：session 空闲且 reason=completed 时推送到招乎（开关激活后生效），异步不阻塞
   function notifyCompletion(sessionID: string) {
     void (async () => {
@@ -213,17 +249,40 @@ export const ZhBridgePlugin: Plugin = async ({ client, directory, serverUrl, log
         })
         return
       }
-      
+
+      // 带上最终回答正文（markdown 原文）：
+      // - 云端：新接口 /message/testagent/cloud/notify，请求体只有 userId + content，
+      //   content 直接用正文，不加「xxx 任务完成」前缀（云端不需要这层抬头）；
+      // - 本地：沿用招乎卡片接口，额外带 sessionId / answer 便于定位会话。
+      const answer = await fetchAnswer(sessionID)
       const text = title ? `${title} 任务完成` : "任务完成"
-      const url = `${RELAY_URL}/message/testagent/notification/notify`
-      const body = {
-        content: [
-          { type: "title", content: "TestAgent任务通知", style: 1 },
-          { type: "content", list: [{ content: text, style: 0 }] },
-        ],
-        userId: USER_ID(),
-      }
-      zhLog("info", "completion notify request", { sessionID, title, url, body })
+      const cloud = isCloudMode()
+      const url = cloud
+        ? `${RELAY_URL}/message/testagent/cloud/notify`
+        : `${RELAY_URL}/message/testagent/notification/notify`
+      const body = cloud
+        ? {
+            userId: USER_ID(),
+            // 正文为空（极端情况：没有 text part）时退回抬头，避免发出空 content 被拒
+            content: answer || text,
+          }
+        : {
+            sessionId: sessionID,
+            answer,
+            content: [
+              { type: "title", content: "TestAgent任务通知", style: 1 },
+              { type: "content", list: [{ content: text, style: 0 }] },
+            ],
+            userId: USER_ID(),
+          }
+      zhLog("info", "completion notify request", {
+        sessionID,
+        title,
+        cloud,
+        answerLength: answer.length,
+        url,
+        body,
+      })
       try {
         const res = await fetch(url, {
           method: "POST",
