@@ -1996,6 +1996,9 @@ NOTE: At any point in time through this workflow you should feel free to ask the
     // loop 会重新找到最后一条 user 消息，重新发起 LLM 请求，生成全新的 assistant 消息。
     const resume: (input: ResumeInput) => Effect.Effect<MessageV2.WithParts> = Effect.fn("SessionPrompt.resume")(
       function* (input: ResumeInput) {
+        // testagent_change - 运行中的会话直接拒绝：ensureRunning 会挂起等待旧 run 并把新 work 丢弃，
+        // 调用方只看到请求无响应（subagent 在跑时父 runner 必然还在运行，恢复无意义）
+        yield* state.assertNotBusy(input.sessionID)
         return yield* state.ensureRunning(
           input.sessionID,
           lastAssistant(input.sessionID),
@@ -2055,6 +2058,32 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                   { message: userMsg.info, parts: userMsg.parts },
                 )
               }
+            }
+
+            // testagent_change - 清理上次中断遗留的未完成工具调用（进程崩溃时 processor 来不及收尾）：
+            // 标记为 aborted，避免 loop 带着悬空的 running part 重新请求 LLM，UI 也不再显示"启动中"
+            const stale = (yield* MessageV2.filterCompactedEffect(input.sessionID)).flatMap((m) =>
+              m.info.role === "assistant"
+                ? m.parts.flatMap((p) =>
+                    p.type === "tool" && (p.state.status === "running" || p.state.status === "pending") ? [p] : [],
+                  )
+                : [],
+            )
+            for (const part of stale) {
+              const end = Date.now()
+              yield* sessions.updatePart({
+                ...part,
+                state: {
+                  status: "error",
+                  error: "Tool execution aborted",
+                  input: part.state.input,
+                  metadata: {
+                    ...(part.state.status === "running" ? part.state.metadata : undefined),
+                    interrupted: true,
+                  },
+                  time: { start: part.state.status === "running" ? part.state.time.start : end, end },
+                },
+              } satisfies MessageV2.ToolPart)
             }
 
             // 重新跑 loop，它会找到最后一条 user 消息并重新发起 LLM 请求
