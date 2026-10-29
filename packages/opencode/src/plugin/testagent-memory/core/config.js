@@ -9,16 +9,14 @@ export const MemoryConfig = z.object({
     /** 是否开启调试，打印详细日志 */
     debug: z.boolean().default(false),
     // 是否初始化命令
-    cmd: z
-        .object({
+    cmd: z.object({
         // 是否初始化提取命令
         memory: z.boolean().default(true),
         // 是否初始化整理命令
         dream: z.boolean().default(true),
     })
         .default({ memory: true, dream: true }),
-    memory: z
-        .object({
+    memory: z.object({
         /** 记忆提取最大长度 */
         autoExtractMaxLength: z.number().default(10000),
         /** 记忆提取缓存大小 */
@@ -34,12 +32,10 @@ export const MemoryConfig = z.object({
         /** 控制是否开启自动提取 */
         autoExtractEnable: z.boolean().default(true),
         personalMemoryBackupSize: z.number().default(10),
-    })
-        .default({ autoExtractMaxLength: 10000, autoExtractBufferSize: 10, autoExtractBatchSize: 6, personalMemoryEnable: true,
+    }).default({ autoExtractMaxLength: 10000, autoExtractBufferSize: 10, autoExtractBatchSize: 6, personalMemoryEnable: true,
         personalMemoryPrompt: "", autoDreamEnable: true, autoExtractEnable: true, personalMemoryBackupSize: 10,
         autoExtractBatchToken: 10000 }),
-    recall: z
-        .object({
+    recall: z.object({
         recallEnable: z.boolean().default(true),
         /** 是否使用模型进行语义分析召回，false：仅使用向量分析召回 */
         llmRecall: z.boolean().default(false),
@@ -59,6 +55,13 @@ export const MemoryConfig = z.object({
         enable: z.boolean().default(false),
     }).default({
         enable: false
+    }),
+    predict: z.object({
+        url: z.string().default("http://55.106.92.129:8092/api/predict"),
+        timeoutMs: z.number().default(1500),
+    }).default({
+        url: "http://55.106.92.129:8092/api/predict",
+        timeoutMs: 1500,
     }),
     /** 子Agent默认使用的模型配置 */
     subAgentModel: z.object({

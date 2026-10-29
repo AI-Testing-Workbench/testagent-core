@@ -187,12 +187,13 @@ export class DatabaseManager {
         if (!this.db) {
             throw new Error('Database not initialized');
         }
-        const stmt = this.db.prepare('SELECT file_path, vector, content FROM memory_vectors WHERE worktree = ?');
+        const stmt = this.db.prepare('SELECT file_path, vector, content, updated_at FROM memory_vectors WHERE worktree = ?');
         const rows = stmt.all(worktree);
         return rows.map(row => ({
             filePath: row.file_path,
             vector: Array.from(new Float32Array(row.vector.buffer, row.vector.byteOffset, row.vector.byteLength / Float32Array.BYTES_PER_ELEMENT)),
             content: row.content ?? '',
+            updatedAt: row.updated_at,
         }));
     }
     /**

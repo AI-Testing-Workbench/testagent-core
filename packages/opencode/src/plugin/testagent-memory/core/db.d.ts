@@ -65,6 +65,7 @@ export declare class DatabaseManager {
         filePath: string;
         vector: number[];
         content: string;
+        updatedAt: number;
     }>;
     /**
      * Query all records by project_id with optional status filter

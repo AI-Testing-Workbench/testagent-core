@@ -104,24 +104,28 @@ export class EmbeddingService {
             // 从 SQLite 加载已存储的向量和缓存内容
             const db = await getDatabase();
             const storedVectors = db.getAllMemoryVectors(worktree);
-            const vectorByFilename = new Map(storedVectors.map(v => [v.filePath, v.vector]));
-            const contentByFilename = new Map(storedVectors.map(v => [v.filePath, v.content]));
+            const vectorByFilename = new Map(storedVectors.map(v => [v.filePath, { vector: v.vector, updatedAt: v.updatedAt }]));
+            const contentByFilename = new Map(storedVectors.map(v => [v.filePath, { content: v.content, updatedAt: v.updatedAt }]));
             const memoryTexts = [];
             const memoryIndexMap = new Map();
             const cachedContentByPath = new Map();
             for (let i = 0; i < filteredMemories.length; i++) {
                 const memory = filteredMemories[i];
                 try {
-                    // 优先用 DB 缓存的内容，否则读磁盘
-                    let content = contentByFilename.get(memory.filename);
-                    let isCached = true;
-                    if (content === undefined) {
+                    // 优先用 DB 缓存的内容，但需检查是否过期
+                    const storedData = contentByFilename.get(memory.filename);
+                    let content;
+                    let isCached = false;
+                    if (storedData !== undefined && memory.mtimeMs <= storedData.updatedAt) {
+                        // DB 中有缓存且未过期
+                        content = storedData.content;
+                        isCached = true;
+                        cachedContentByPath.set(memory.filePath, content);
+                    }
+                    else {
+                        // DB 中无缓存或已过期，从磁盘读取
                         const rawContent = readMemoryContent(memory.filePath);
                         content = truncateMemoryContent(rawContent);
-                        isCached = false;
-                    }
-                    if (isCached) {
-                        cachedContentByPath.set(memory.filePath, content);
                     }
                     const WEIGHT_DESC = 2.8;
                     const WEIGHT_NAME = 2.2;
@@ -147,8 +151,8 @@ export class EmbeddingService {
                     const fullText = parts.join("\n");
                     memoryTexts.push(fullText);
                     // 只在 SQLite 有此记忆的向量时才加入索引
-                    const vec = vectorByFilename.get(memory.filename);
-                    if (vec) {
+                    const storedVec = vectorByFilename.get(memory.filename);
+                    if (storedVec) {
                         memoryIndexMap.set(memory.filePath, i);
                     }
                 }
@@ -176,15 +180,31 @@ export class EmbeddingService {
                 const vecIndex = memoryIndexMap.get(filePath);
                 if (vecIndex === undefined)
                     continue;
-                const vec = vectorByFilename.get(memory.filename);
-                if (!vec)
+                const storedVec = vectorByFilename.get(memory.filename);
+                if (!storedVec)
                     continue;
                 try {
-                    // 优先用 DB 缓存内容，否则读磁盘
-                    let content = cachedContentByPath.get(filePath);
-                    if (content === undefined) {
+                    // 检测向量是否过期：文件修改时间晚于向量入库时间
+                    let vec;
+                    let content;
+                    if (memory.mtimeMs > storedVec.updatedAt) {
+                        // 向量已过期，重新生成
+                        log.info(`[retrieveMemory] 检测到文件过期，重新生成向量: ${memory.filename}`);
                         const rawContent = readMemoryContent(memory.filePath);
                         content = truncateMemoryContent(rawContent);
+                        const newVecRaw = await this.getSingleEmbedding(content);
+                        vec = Array.from(normalizeVector(newVecRaw));
+                        // 更新数据库
+                        db.upsertMemoryVector(memory.filename, worktree, newVecRaw, content);
+                    }
+                    else {
+                        // 向量未过期，使用库中的
+                        vec = storedVec.vector;
+                        // 优先用缓存内容，否则读磁盘
+                        content = cachedContentByPath.get(filePath) ?? (() => {
+                            const rawContent = readMemoryContent(memory.filePath);
+                            return truncateMemoryContent(rawContent);
+                        })();
                     }
                     const baseSim = cosineSimilarity(queryNorm, vec);
                     const fullText = memoryTexts[vecIndex];

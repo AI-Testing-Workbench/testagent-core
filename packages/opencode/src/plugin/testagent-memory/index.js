@@ -1,10 +1,8 @@
 import { tool } from "@opencode-ai/plugin";
 import { join, resolve } from "path";
 import { existsSync, statSync } from "fs";
-import { buildMemorySystemPrompt, shouldIncludeSaveGuide } from "./prompt.js";
+import { buildMemorySystemPrompt, shouldIncludeSaveGuide, buildSdtMemoryExtractionPrompt } from "./prompt.js";
 import { searchHybrid, recallRelevantMemoriesByLLM, formatRecalledMemories } from "./recall.js";
-import { cosineSimilarity, calcBm25KeywordBonus, buildCorpusStats } from "./vectorSearch.js";
-import { buildFtsTokens } from "./tokenizer.js";
 import { saveMemory, deleteMemory, listMemories, searchMemories, readMemory, MEMORY_TYPES, readPersonalMemory, savePersonalMemory, readMemoryByFilePath, } from "./memory.js";
 import { getMemoryDir, getOpencodeConfigHomeDir, getSkillsDir, getGlobalSkillsDir } from "./paths.js";
 import { createOpenCodeRecallLLMClient } from "./recall-llm-adapter.js";
@@ -21,16 +19,9 @@ import { load, config } from "./core/config.js";
 import { sendTraceLog } from "./core/trace-log.js";
 import { getDatabase } from "./core/db.js";
 import { setExternalLog } from "./core/log.js";
+import { judgeMemorySave } from "./memorySaveGuard.js";
 import { recordHybridMetrics, recordLlmSuccess, recordLlmFailure, recordFinalSuccess, recordFinalFailure, logRecallMetrics } from "./recall.js";
-import { EmbeddingService, normalizeVector } from "./embedding/service.js";
-// EmbeddingService 单例，延迟初始化避免启动时循环依赖
-let _embeddingService = null;
-async function getEmbeddingService() {
-    if (!_embeddingService) {
-        _embeddingService = new EmbeddingService();
-    }
-    return _embeddingService;
-}
+import { recommendQuestionAnswers, buildQuestionContent, extractAnswersByQuestion, } from "./recommendQuestion.js";
 let lastQuery;
 let lastResult = false;
 function shouldIgnoreMemoryContext(query) {
@@ -769,6 +760,17 @@ export const MemoryPlugin = async (params) => {
             const cfg = input;
             cfg.agent = {
                 ...cfg.agent,
+                "sdt-memory-extraction": {
+                    hidden: true,
+                    mode: "subagent",
+                    description: "Review conversation message and extract any information worth remembering for future sessions",
+                    permission: {
+                        "*": "deny",
+                        "memory_list": "allow",
+                        "memory_save": "allow",
+                    },
+                    prompt: buildSdtMemoryExtractionPrompt(getSkillsDir(projectPath), getGlobalSkillsDir()),
+                },
                 ...(config().enable ? {
                     "auto-extraction": {
                         hidden: true,
@@ -947,172 +949,17 @@ export const MemoryPlugin = async (params) => {
             if (input.tool !== "question" || !output.args)
                 return;
             // 注意：必须使用 await 等待异步操作完成，否则 output.args 的修改不会生效
-            try {
-                const args = output.args;
-                log.info("Recommend Quesitons 原始数据", JSON.stringify(args));
-                const qs = args.questions;
-                if (!qs || qs.length === 0)
-                    return;
-                const db = await getDatabase();
-                const candidates = await db.queryQuestionCandidates(input.callID, projectPath);
-                if (candidates.length === 0)
-                    return;
-                const now = Date.now();
-                // 批量预处理：把每条候选记录按 "题"="答" 拆成单题 unit，逐题参与打分
-                const units = [];
-                for (const c of candidates) {
-                    const pairs = extractAnswersByQuestion(c.content);
-                    for (const p of pairs) {
-                        if (!p.question.trim())
-                            continue;
-                        units.push({
-                            partId: c.part_id,
-                            sessionId: c.session_id,
-                            timeCreated: c.time_created,
-                            content: c.content,
-                            text: p.question.trim(),
-                            answer: p.answer,
-                        });
-                    }
-                }
-                if (units.length === 0)
-                    return;
-                const unitTexts = units.map(u => u.text);
-                let unitVecs = null;
-                try {
-                    const embedService = await getEmbeddingService();
-                    unitVecs = await embedService.getBatchEmbedding(unitTexts);
-                }
-                catch (e) {
-                    const err = e;
-                    log.error(`[tool.execute.before] embedService error:`, { message: err.message, stack: err.stack, error: err });
-                }
-                const allUnitTokens = unitTexts.map(text => buildFtsTokens(text, false));
-                const corpusStats = buildCorpusStats(allUnitTokens);
-                log.info("Recommend Quesitons corpusStats", JSON.stringify({
-                    docCount: corpusStats.docCount,
-                    avgDocLength: corpusStats.avgDocLength,
-                    sampleDocFreq: Array.from(corpusStats.docFreq.entries()).slice(0, 10)
-                }));
-                // 逐题推荐
-                const recs = [];
-                for (let qi = 0; qi < qs.length; qi++) {
-                    const q = qs[qi];
-                    const questionText = q.question;
-                    if (!questionText)
-                        continue;
-                    const options = q.options ?? [];
-                    let matched = null;
-                    // 1) exact match, same session
-                    for (const c of candidates) {
-                        if (c.session_id !== input.sessionID)
-                            continue;
-                        const hit = extractAnswersByQuestion(c.content).find(p => p.question === questionText);
-                        if (hit) {
-                            matched = { answer: hit.answer, score: 999, candidate: c.content };
-                            break;
-                        }
-                    }
-                    // 2) hybrid RRF across recent records
-                    if (!matched) {
-                        const queryTokens = buildFtsTokens(questionText, false);
-                        log.info("Recommend Quesitons queryTokens", queryTokens);
-                        let queryVec = null;
-                        try {
-                            const embedService = await getEmbeddingService();
-                            queryVec = await embedService.getSingleEmbedding(questionText);
-                        }
-                        catch (e) {
-                            const err = e;
-                            log.error(`[tool.execute.before] embedService error:`, { message: err.message, stack: err.stack, error: err });
-                        }
-                        if (!queryVec) {
-                            log.warn("query vector is null, skip normalize");
-                            continue; // 仅跳过当前问题，继续下一个
-                        }
-                        const queryNormalize = Array.from(normalizeVector(queryVec));
-                        const scored = [];
-                        const excludeQuesitons = [];
-                        for (let ui = 0; ui < units.length; ui++) {
-                            let excludeFlag = false;
-                            const text = unitTexts[ui];
-                            const vec = (unitVecs?.[ui]) ? cosineSimilarity(queryNormalize, Array.from(normalizeVector(unitVecs[ui]))) : 0;
-                            if (vec < 0.65) {
-                                excludeFlag = true;
-                            }
-                            const textTokens = allUnitTokens[ui];
-                            const kw = calcBm25KeywordBonus(queryTokens, textTokens, corpusStats);
-                            if (vec < 0.8 && kw < 0.35) {
-                                excludeFlag = true;
-                            }
-                            if (excludeFlag) {
-                                excludeQuesitons.push({ idx: ui, text, kw, vec });
-                                continue;
-                            }
-                            const ageHours = (now - units[ui].timeCreated) / 3600000;
-                            const time = Math.max(0, 1 - ageHours / 720);
-                            scored.push({ idx: ui, text, kw, vec, time });
-                        }
-                        log.info("Recommend Quesitons Scored", { userQuestion: questionText, scored });
-                        log.info("ExcludeQuesitons Scored", { userQuestion: questionText, excludeQuesitons });
-                        if (scored.length === 0)
-                            continue;
-                        const N = scored.length;
-                        // RRF (Reciprocal Rank Fusion) 融合排序
-                        // 公式：score = Σ (1 / (k + rank))，k 是常数参数
-                        const RRF_K = 60;
-                        const rankBy = (fn) => {
-                            const ids = Array.from({ length: N }, (_, i) => i).sort((a, b) => fn(b) - fn(a));
-                            const r = new Array(N);
-                            for (let i = 0; i < N; i++)
-                                r[ids[i]] = i + 1;
-                            return r;
-                        };
-                        const kwR = rankBy(i => scored[i].kw);
-                        const vecR = rankBy(i => scored[i].vec);
-                        const timeR = rankBy(i => scored[i].time);
-                        // 计算每个候选的 RRF 融合得分
-                        let bestIdx = -1, bestScore = -1;
-                        for (let i = 0; i < N; i++) {
-                            let s = (3 / (RRF_K + kwR[i])) + (6 / (RRF_K + vecR[i])) + (1 / (RRF_K + timeR[i]));
-                            // 同 session 的候选给予额外奖励
-                            if (units[scored[i].idx].sessionId === input.sessionID)
-                                s += 1 / (RRF_K + 1);
-                            log.info("Recommend Quesitons 最终得分", { content: scored[i].text, s, kw: scored[i].kw, vec: scored[i].vec, time: scored[i].time });
-                            if (s > bestScore) {
-                                bestScore = s;
-                                bestIdx = i;
-                            }
-                        }
-                        // 阈值设为 0.04（约等于最好情况的 85%）
-                        if (bestIdx === -1 || bestScore < 0.04)
-                            continue;
-                        const bestUnit = units[scored[bestIdx].idx];
-                        log.info("Recommend Quesitons 推荐答案", bestUnit.content);
-                        matched = { answer: bestUnit.answer, score: bestScore, candidate: bestUnit.content };
-                    }
-                    if (matched && options.length > 0) {
-                        recs.push({ qi, answer: matched.answer });
-                        sendSimilarAnswerInjectTrace({
-                            callID: input.callID,
-                            sessionID: input.sessionID,
-                            questionText,
-                            questionIndex: qi,
-                            options,
-                            score: matched.score,
-                            candidate: matched.candidate,
-                            recommended: matched.answer,
-                        });
-                        applyRecommendation(args, matched.answer, matched.score, qi);
-                    }
-                }
-                if (recs.length > 0) {
-                    recByCallID.set(input.callID, recs);
-                }
-            }
-            catch (e) {
-                const err = e;
-                log.error(`[tool.execute.before] question recommend failed:`, { message: err.message, stack: err.stack, error: err });
+            // 推荐问题答案逻辑由 recommendQuestion.js 独立管理：关键词+向量 RRF 融合选优、
+            // predict 接口二次判定（noul>0.7）、推荐写入 args.options 均由该模块完成
+            const recs = await recommendQuestionAnswers({
+                callID: input.callID,
+                sessionID: input.sessionID,
+                projectPath,
+                model: modelCache.get("currentModel"),
+                args: output.args,
+            });
+            if (recs.length > 0) {
+                recByCallID.set(input.callID, recs);
             }
         },
         "experimental.session.compacting": async (_input, output) => {
@@ -1275,6 +1122,29 @@ export const MemoryPlugin = async (params) => {
                     if (ctx.agent === 'sdt-memory-extraction') {
                         source = 'sdt';
                     }
+                    // 记忆保存守卫：对 memory_save 一律生效（config().guards.enable 控制开关），
+                    // 落盘前做去重 + 一次性运行日志语义判定（predict 接口，失败 fail-open 放行）。
+                    const existingList = listMemories(worktree);
+                    const guardArgs = {
+                        file_name: args.file_name,
+                        name: args.name,
+                        type: args.type,
+                        description: args.description,
+                        content: args.content,
+                    };
+                    const { decision } = await judgeMemorySave(existingList, guardArgs);
+                    if (decision.action === 'block') {
+                        return "Blocked: this memory was judged to be a one-shot run log / transient task snapshot (workflow trace, status, progress, subtask). " +
+                            "Such memories expire immediately after the task ends and have no cross-session reuse value. " +
+                            "Do not save it. If it contains a stable rule/decision worth keeping, save that instead.";
+                    }
+                    if (decision.action === 'skip') {
+                        return "Skipped duplicate save: an identical memory already exists under this file_name.";
+                    }
+                    if (decision.action === 'refuse') {
+                        return `Aborted save: identical content already exists as "${decision.canonicalFile}". ` +
+                            `Update that file instead of creating a duplicate (delete this pending entry if you already created it).`;
+                    }
                     const filePath = await saveMemory(worktree, args.file_name, args.name, args.description, args.type, args.content, source);
                     const result = `Memory saved to ${filePath}`;
                     // === 后置埋点：记录 sdt-memory-extraction 子agent 调用结果 ===
@@ -1391,110 +1261,4 @@ export const MemoryPlugin = async (params) => {
             } : {})
         },
     };
-    function extractQuestionText(input) {
-        if (!input)
-            return null;
-        const questions = input.questions;
-        if (!questions || questions.length === 0)
-            return null;
-        return questions[0].question || null;
-    }
-    function buildQuestionContent(input, outputText) {
-        const parts = [];
-        if (!input)
-            return outputText || "";
-        const questions = input.questions;
-        if (questions) {
-            for (const q of questions) {
-                if (q.question)
-                    parts.push(`Question: ${q.question}`);
-                if (q.options) {
-                    for (const o of q.options) {
-                        const line = o.description ? `${o.label} (${o.description})` : o.label;
-                        parts.push(`  - ${line}`);
-                    }
-                }
-            }
-        }
-        const pairs = extractAnswersByQuestion(outputText);
-        if (pairs.length > 0) {
-            pairs.forEach((p, i) => parts.push(`Answer[${i + 1}]: "${p.question}"="${p.answer}"`));
-        }
-        else if (outputText) {
-            parts.push(`Answer: ${outputText}`);
-        }
-        return parts.join("\n") || "";
-    }
-    function extractAnswersByQuestion(content) {
-        const out = [];
-        if (!content)
-            return out;
-        const unescaped = content.replace(/\\"/g, '"');
-        const re = /"([^"]*)"="([^"]*)"/g;
-        let m;
-        while ((m = re.exec(unescaped)) !== null) {
-            out.push({ question: m[1], answer: m[2] });
-        }
-        return out;
-    }
-    function extractAnswerText(content) {
-        if (!content)
-            return null;
-        const m = content.match(/="([^"]+)"/);
-        return m ? m[1].trim() : null;
-    }
-    function extractQuestionFromContent(content) {
-        if (!content)
-            return null;
-        const m = content.match(/^Question: (.+)$/m);
-        return m ? m[1].trim() : null;
-    }
-    function applyRecommendation(args, answerText, score, questionIndex = 0) {
-        const firstOptions = args.questions?.[questionIndex]?.options;
-        if (!firstOptions)
-            return;
-        const matched = firstOptions.find(o => o.label === answerText);
-        if (matched) {
-            const idx = firstOptions.indexOf(matched);
-            if (idx > 0) {
-                firstOptions.splice(idx, 1);
-                firstOptions.unshift(matched);
-            }
-            matched.description = "推荐答案（基于历史记录）" + matched.description || "推荐答案（基于历史记录）";
-            if (matched.label === "以上全部")
-                matched.label = "以下全部";
-            log.info(`[question recommend] reordered option "${answerText}" (score=${score.toFixed(3)})`);
-        }
-        else {
-            if (answerText === "以上全部")
-                answerText = "以下全部";
-            firstOptions.unshift({ label: answerText, description: "推荐答案（基于历史记录）" });
-            log.info(`[question recommend] inserted option "${answerText}" (score=${score.toFixed(3)})`);
-        }
-    }
-    function sendSimilarAnswerInjectTrace(opts) {
-        const model = modelCache.get("currentModel");
-        const userQuery = buildQuestionContent({ questions: [{ question: opts.questionText, options: opts.options }] }, null);
-        sendTraceLog({
-            user_query: userQuery,
-            provider_id: model?.providerID ?? "",
-            model_id: model?.modelID ?? "",
-            session_id: opts.sessionID,
-            agent_name: "tool_question",
-            op_type: "similar-answer-inject",
-            op_flag: "S",
-            event_source: "tool.execute.before",
-            input_content: opts.questionText,
-            output_content: opts.recommended,
-            other_content: JSON.stringify({
-                callID: opts.callID,
-                questionIndex: opts.questionIndex,
-                candidate: opts.candidate,
-                recommended: opts.recommended,
-                options: opts.options,
-            }),
-            message_id: "",
-            part_id: "",
-        });
-    }
 };

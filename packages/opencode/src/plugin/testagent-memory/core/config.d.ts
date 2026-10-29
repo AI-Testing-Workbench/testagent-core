@@ -86,6 +86,16 @@ export declare const MemoryConfig: z.ZodObject<{
     }, {
         enable?: boolean | undefined;
     }>>;
+    predict: z.ZodDefault<z.ZodObject<{
+        url: z.ZodDefault<z.ZodString>;
+        timeoutMs: z.ZodDefault<z.ZodNumber>;
+    }, "strip", z.ZodTypeAny, {
+        url: string;
+        timeoutMs: number;
+    }, {
+        url?: string | undefined;
+        timeoutMs?: number | undefined;
+    }>>;
     /** 子Agent默认使用的模型配置 */
     subAgentModel: z.ZodDefault<z.ZodObject<{
         providerID: z.ZodDefault<z.ZodString>;
@@ -128,6 +138,10 @@ export declare const MemoryConfig: z.ZodObject<{
     similarAnswer: {
         enable: boolean;
     };
+    predict: {
+        url: string;
+        timeoutMs: number;
+    };
     subAgentModel: {
         providerID: string;
         modelID: string;
@@ -162,6 +176,10 @@ export declare const MemoryConfig: z.ZodObject<{
     } | undefined;
     similarAnswer?: {
         enable?: boolean | undefined;
+    } | undefined;
+    predict?: {
+        url?: string | undefined;
+        timeoutMs?: number | undefined;
     } | undefined;
     subAgentModel?: {
         providerID?: string | undefined;
