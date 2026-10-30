@@ -421,7 +421,7 @@ export const ZhBridgePlugin: Plugin = async ({ client, directory, serverUrl, log
         const webLink = shareLink()
         const body = {
           content: [
-            { type: "title", content: "沙箱通知", style: 1 },
+            { type: "title", content: "沙箱启动成功通知", style: 1 },
             {
               type: "content",
               list: [
