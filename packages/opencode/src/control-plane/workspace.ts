@@ -636,8 +636,7 @@ export const layer = Layer.effect(
                 ),
               )
             } else {
-              // testagent_change - warp 打断当前会话：标记为 user_abort，避免终态通知误报「任务完成」
-              yield* prompt.cancel(input.sessionID, "user_abort")
+              yield* prompt.cancel(input.sessionID)
             }
 
             // "claim" this session so any future events coming from
