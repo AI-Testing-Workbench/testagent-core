@@ -28,6 +28,9 @@ const headers = Flag.OTEL_EXPORTER_OTLP_HEADERS
 
 export function resource(): { serviceName: string; serviceVersion: string; attributes: Record<string, string> } {
   const processMetadata = ensureProcessMetadata("main")
+  // testagent_change start - reuse cloud mode when exporting cloud env
+  const cloudMode = isCloudMode()
+  // testagent_change end
   const attributes: Record<string, string> = (() => {
     const value = process.env.OTEL_RESOURCE_ATTRIBUTES
     if (!value) return {}
@@ -56,11 +59,22 @@ export function resource(): { serviceName: string; serviceVersion: string; attri
       "user.name": userName,
       "account.username": accountUsername,
       "account.debuggerkey": accountPassword,
-      "testagent.client": isCloudMode()
+      "testagent.client": cloudMode // testagent_change
         ? "cloud"
         : process.env["KILO_CLIENT"] === "tscode" || process.env["KILOCODE_FEATURE"] === "tscode-extension" || process.env["KILO_PLATFORM"] === "tscode"
           ? "tscode"
           : "cli",
+      // testagent_change start - attach cloud-specific environment as JSON
+      "testagent.cloud_env": JSON.stringify(
+        cloudMode
+          ? Object.fromEntries(
+              Object.entries(process.env).filter(
+                ([key, value]) => key.startsWith("TESTAGENT_CLOUD") && value !== undefined,
+              ),
+            )
+          : {},
+      ),
+      // testagent_change end
       "testagent.process_role": processMetadata.processRole,
       "testagent.run_id": processMetadata.runID,
       "testagent.runtime": process.versions?.bun ? "bun" : "nodejs",
