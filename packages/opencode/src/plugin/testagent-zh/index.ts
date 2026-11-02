@@ -5,6 +5,7 @@ import { existsSync } from "node:fs"
 import { networkInterfaces } from "node:os"
 import { ServerAuth } from "@/server/auth"
 import { GlobalBus } from "@/bus/global"
+import type { IdleReason } from "@/session/status"
 
 // 云端判定：与 extension 的 isCloudMode()（kilo-vscode/src/services/cli-backend/cloud-mode.ts，
 // 决定「复制 Web UI 链接」按钮是否显示）同一口径——env 或 marker 文件，任一命中即云端。
@@ -32,6 +33,11 @@ type Pending = {
 
 const ASK_TIMEOUT_MS = 0 // 0 = 永不超时，一直轮询
 const ANSWER_POLL_MS = 15_000 // relay answer 轮询间隔
+// 终态通知读正文的重试次数/间隔：正文的 text-delta 只发事件不落库（session.updatePartDelta），
+// 真正写库在 text-end 与 processor 的 cleanup()，而 cleanup 在 idle 状态之后才跑，
+// 所以中断/异常停下时第一次读往往还是空正文。
+const TEXT_RETRY = 4
+const TEXT_RETRY_MS = 150
 // 启动通知：serve 起来后推一条「沙箱启动成功 + Web UI 地址」。登录态（userId/token）由扩展或
 // env-vars 系统变量注入，可能晚于插件加载，缺失时按 START_RETRY_MS 重试，最多 START_RETRY_MAX 次。
 const START_RETRY_MS = 5_000
@@ -228,34 +234,57 @@ export const ZhBridgePlugin: Plugin = async ({ client, directory, serverUrl, log
       .catch((err) => zhLog("warn", "delete failed", { id: askId, error: String(err) }))
   }
 
-  // 取本轮最终回答正文：从最新一条 assistant 消息往前找，拼出所有正文 text part。
-  // /session/:id/message 按 (time_created, id) 升序返回，所以从尾部倒着找即可；
-  // 摘要消息（compaction）不算回答，空文本（thinking 分隔符）也跳过，继续往前找。
+  // 单次读取本轮结局：回答正文 + 失败原因。
+  // 范围限定在「最后一条 user 消息之后」：本轮没有任何输出时（刚开局就停、整轮只有工具调用），
+  // 不能把上一轮的回答当成这次的结果发出去。同轮内多条 assistant 消息（多步工具调用）
+  // 仍从后往前找第一个有正文的；摘要消息（compaction）不算回答，空文本（thinking 分隔符）也跳过。
   // text part 存的就是模型原始输出的 markdown 原文（processor 只做 delta 拼接，不转 HTML），
   // 所以这里原样返回；多段之间用空行拼接，保持 markdown 块级结构。
-  async function fetchAnswer(sessionID: string) {
+  // 失败原因只认本轮最新一条 assistant：halt 把 error 挂在这轮正在写的那条上，
+  // 更早消息上的 error 属于上一轮，带出来会误导。
+  async function readOutcome(sessionID: string) {
     try {
       const result = await client.session.messages({ path: { id: sessionID }, query: { limit: 50 } })
       const msgs = result.data ?? []
-      for (let i = msgs.length - 1; i >= 0; i--) {
-        const msg = msgs[i]
-        if (!msg || msg.info.role !== "assistant") continue
-        if (msg.info.summary) continue
-        const text = msg.parts
+      const turn = msgs.slice(msgs.findLastIndex((m) => m.info.role === "user") + 1)
+      const error = (() => {
+        const last = [...turn].reverse().find((m) => m.info.role === "assistant")
+        const err = (last?.info as { error?: { data?: { message?: unknown } } } | undefined)?.error
+        return typeof err?.data?.message === "string" ? err.data.message : ""
+      })()
+      for (let i = turn.length - 1; i >= 0; i--) {
+        const msg = turn[i]
+        if (!msg || msg.info.role !== "assistant" || msg.info.summary) continue
+        const body = msg.parts
           .filter((p): p is TextPart => p.type === "text" && !p.synthetic && !p.ignored)
           .map((p) => p.text.trim())
           .filter((p) => p.length > 0)
           .join("\n\n")
-        if (text) return text
+        if (body) return { text: body, error }
       }
+      return { text: "", error }
     } catch (err) {
-      zhLog("warn", "session answer fetch failed", { sessionID, error: String(err) })
+      zhLog("warn", "session outcome fetch failed", { sessionID, error: String(err) })
+      return { text: "", error: "" }
     }
-    return ""
   }
 
-  // 任务完成通知：session 空闲且 reason=completed 时推送到招乎（开关激活后生效），异步不阻塞
-  function notifyCompletion(sessionID: string) {
+  // 取本轮结局：正文为空时重试几次（见 TEXT_RETRY 说明），拿到最后一次结果。
+  async function fetchOutcome(sessionID: string) {
+    for (let attempt = 1; ; attempt++) {
+      const outcome = await readOutcome(sessionID)
+      if (outcome.text || attempt >= TEXT_RETRY) return outcome
+      await sleep(TEXT_RETRY_MS)
+    }
+  }
+
+  // 终态通知：session 进入 idle 时推送到招乎（开关激活后生效），异步不阻塞。
+  // reason 来自 SessionStatus.IdleReason：
+  // - completed  正常结束（halt 前的正常收尾 / onIdle 默认值）——本地+云端都推
+  // - user_abort 用户手动停止（前端停止按钮、子 agent 被牵连取消）
+  // - error      异常结束（模型报错、工具失败、上下文溢出、网络错误等，processor.halt 判定）
+  // 后两种仅在云端推送，由事件处理处按 isCloudMode() 过滤。
+  function notifyCompletion(sessionID: string, reason: IdleReason) {
     void (async () => {
       let title = ""
       let parentID: string | undefined = undefined
@@ -277,11 +306,16 @@ export const ZhBridgePlugin: Plugin = async ({ client, directory, serverUrl, log
       }
 
       // 带上最终回答正文（markdown 原文）：
-      // - 云端：新接口 /message/testagent/cloud/notify，请求体只有 userId + content，
-      //   content 直接用正文，不加「xxx 任务完成」前缀（云端不需要这层抬头）；
+      // - 云端：新接口 /message/testagent/cloud/notify，请求体只有 userId + content；
+      //   正常完成时 content 直接用正文，不加「xxx 任务完成」前缀（云端不需要这层抬头）；
+      //   中断/失败时正文可能没有或只是半截，改用「抬头 + 失败原因 + 已有正文」拼装。
       // - 本地：沿用招乎卡片接口，额外带 sessionId / answer 便于定位会话。
-      const answer = await fetchAnswer(sessionID)
-      const text = title ? `${title} 任务完成` : "任务完成"
+      const outcome = await fetchOutcome(sessionID)
+      const answer = outcome.text
+      const status = reason === "user_abort" ? "任务已停止" : reason === "error" ? "任务失败" : "任务完成"
+      const text = title ? `${title} ${status}` : status
+      // 失败原因只在云端展示：中断时 assistant error 是 MessageAbortedError，带上反而多余
+      const reasonLine = reason === "error" && outcome.error ? `失败原因：${outcome.error}` : ""
       const cloud = isCloudMode()
       const url = cloud
         ? `${RELAY_URL}/message/testagent/cloud/notify`
@@ -290,7 +324,10 @@ export const ZhBridgePlugin: Plugin = async ({ client, directory, serverUrl, log
         ? {
             userId: USER_ID(),
             // 正文为空（极端情况：没有 text part）时退回抬头，避免发出空 content 被拒
-            content: answer || text,
+            content:
+              reason === "completed"
+                ? answer || text
+                : [text, reasonLine, answer].filter((x) => x.length > 0).join("\n\n"),
             sessionId: sessionID,
           }
         : {
@@ -304,6 +341,7 @@ export const ZhBridgePlugin: Plugin = async ({ client, directory, serverUrl, log
           }
       zhLog("info", "completion notify request", {
         sessionID,
+        reason,
         title,
         cloud,
         answerLength: answer.length,
@@ -421,7 +459,7 @@ export const ZhBridgePlugin: Plugin = async ({ client, directory, serverUrl, log
         const webLink = shareLink()
         const body = {
           content: [
-            { type: "title", content: "沙箱通知", style: 1 },
+            { type: "title", content: "沙箱启动成功通知", style: 1 },
             {
               type: "content",
               list: [
@@ -496,10 +534,14 @@ export const ZhBridgePlugin: Plugin = async ({ client, directory, serverUrl, log
         if (pluginReplied.delete(id)) return
         fireDelete(id)
       } else if (e.type === "session.status") {
-        const status = e.properties?.status
-        if (status?.type === "idle" && status.reason === "completed") {
-          notifyCompletion(e.properties?.sessionID)
-        }
+        const status = e.properties?.status as { type?: string; reason?: IdleReason } | undefined
+        const sessionID = e.properties?.sessionID
+        if (!sessionID || status?.type !== "idle") return
+        // reason 缺失按正常完成兜底；失败/中止通知只对云端有意义（沙箱里用户看不到界面），
+        // 本地用户就在机器前，仍维持原行为——只推正常完成。
+        const reason = status.reason ?? "completed"
+        if (reason !== "completed" && !isCloudMode()) return
+        notifyCompletion(sessionID, reason)
       }
     },
   }
