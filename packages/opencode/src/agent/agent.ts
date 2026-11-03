@@ -198,6 +198,7 @@ export const layer = Layer.effect(
             ...Object.fromEntries(whitelistedDirs.map((dir) => [dir, "allow"])),
           },
           sandbox: "deny",
+          jev: "deny", // testagent_change
           question: "deny",
           toast: "deny",
           plan_enter: "deny",
