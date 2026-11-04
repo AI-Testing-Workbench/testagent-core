@@ -13,6 +13,7 @@ import { WriteTool } from "./write"
 import { InvalidTool } from "./invalid"
 import { SkillTool } from "./skill"
 import { SandboxTool } from "../testagent/tool/sandbox" // testagent_change
+import { JevTool } from "../testagent/tool/jev" // testagent_change
 import { ToastTool } from "../testagent/tool/toast" // testagent_change
 import * as Tool from "./tool"
 import { Config } from "@/config/config"
@@ -131,6 +132,7 @@ export const layer: Layer.Layer<
     const patchtool = yield* ApplyPatchTool
     const skilltool = yield* SkillTool
     const sandbox = yield* SandboxTool // testagent_change
+    const jev = yield* JevTool // testagent_change
     // const toast = yield* ToastTool // testagent_change
     const agent = yield* Agent.Service
 
@@ -256,6 +258,7 @@ export const layer: Layer.Layer<
           lsp: Tool.init(lsptool),
           plan: Tool.init(plan),
           sandbox: Tool.init(sandbox), // testagent_change
+          jev: Tool.init(jev), // testagent_change
           // toast: Tool.init(toast), // testagent_change
         })
 
@@ -277,6 +280,7 @@ export const layer: Layer.Layer<
             tool.skill,
             tool.patch,
             tool.sandbox, // testagent_change
+            tool.jev, // testagent_change
             // tool.toast, // testagent_change
             ...(Flag.OPENCODE_EXPERIMENTAL_LSP_TOOL ? [tool.lsp] : []),
             ...(Flag.OPENCODE_EXPERIMENTAL_PLAN_MODE && Flag.OPENCODE_CLIENT === "cli" ? [tool.plan] : []),
