@@ -19,6 +19,7 @@ import type { Provider } from "@/provider/provider"
 import { Question } from "@/question"
 import { errorMessage } from "@/util/error"
 import * as Log from "@opencode-ai/core/util/log"
+import * as Latency from "@/testagent/latency" // testagent_change - 链路探针
 import { isRecord } from "@/util/record"
 import { EventV2 } from "@/v2/event"
 import { SessionEvent } from "@/v2/session-event"
@@ -616,6 +617,14 @@ export const layer: Layer.Layer<
 
           case "text-delta":
             if (!ctx.currentText) return
+            // testagent_change start - 链路探针①: LLM 首个正文字符到达
+            yield* Latency.markLlmFirstTokenFx({
+              sessionID: ctx.currentText.sessionID,
+              messageID: ctx.currentText.messageID,
+              partID: ctx.currentText.id,
+              kind: "text",
+            })
+            // testagent_change end
             ctx.currentText.text += value.text
             if (value.providerMetadata) ctx.currentText.metadata = value.providerMetadata
             yield* session.updatePartDelta({
