@@ -582,7 +582,31 @@ export const ShellTool = Tool.define(
 
         if (tokens.length && (!cmd || !CWD.has(cmd))) {
           scan.patterns.add(source(node))
-          scan.always.add(BashArity.prefix(tokens).join(" ") + " *")
+          
+          // testagent_change start - 为删除命令生成规则
+          // 检测命令中是否包含删除关键词
+          const deleteKeywords = /\b(rm|rmdir|del|erase|remove-item|rd|delete|unlink|remove|uninstall)\b/i
+          const commandText = source(node).toLowerCase()
+          const deleteMatch = commandText.match(deleteKeywords)
+          const prefixRule = BashArity.prefix(tokens).join(" ")
+          
+          if (deleteMatch) {
+            const deleteCmd = deleteMatch[1].toLowerCase()
+            
+            // 如果命令不是以删除命令开头（如 "forfiles ... del ..."）
+            // 需要添加前缀规则（如 "forfiles *"）
+            if (prefixRule.toLowerCase() !== deleteCmd) {
+              scan.always.add(prefixRule + " *")
+            }
+            
+            // 总是添加删除命令规则（精确匹配，不带通配符）
+            scan.always.add(deleteCmd)
+          } else {
+            // 非删除命令（如 "ls -la"）
+            // 正常添加前缀通配符规则
+            scan.always.add(prefixRule + " *")
+          }
+          // testagent_change end
         }
       }
 
