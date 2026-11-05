@@ -56,11 +56,15 @@ interface GitResult {
   readonly stderr: string
 }
 
-type State = Omit<Interface, "init">
+type State = Omit<Interface, "init" | "status"> & {
+  status: () => Effect.Effect<{ enabled: boolean; vcs: string }>
+}
 
 export interface Interface {
   readonly init: () => Effect.Effect<void>
   readonly cleanup: () => Effect.Effect<void>
+  /** testagent_change - 供耗时统计上报：是否启用、版本控制类型 */
+  readonly status: () => Effect.Effect<{ enabled: boolean; vcs: string }>
   readonly track: () => Effect.Effect<string | undefined>
   readonly patch: (hash: string) => Effect.Effect<Patch>
   readonly restore: (snapshot: string) => Effect.Effect<void>
@@ -771,7 +775,12 @@ export const layer: Layer.Layer<
           Effect.forkScoped,
         )
 
-        return { cleanup, track, patch, restore, revert, diff, diffFull }
+        // testagent_change - 供耗时统计上报：是否启用 + 版本控制类型
+        const status = Effect.fnUntraced(function* () {
+          return { enabled: yield* enabled(), vcs: state.vcs as string }
+        })
+
+        return { cleanup, track, patch, restore, revert, diff, diffFull, status }
       }),
     )
 
@@ -781,6 +790,10 @@ export const layer: Layer.Layer<
       }),
       cleanup: Effect.fn("Snapshot.cleanup")(function* () {
         return yield* InstanceState.useEffect(state, (s) => s.cleanup())
+      }),
+      // testagent_change - 供耗时统计上报
+      status: Effect.fn("Snapshot.status")(function* () {
+        return yield* InstanceState.useEffect(state, (s) => s.status())
       }),
       track: Effect.fn("Snapshot.track")(function* () {
         return yield* InstanceState.useEffect(state, (s) => s.track())

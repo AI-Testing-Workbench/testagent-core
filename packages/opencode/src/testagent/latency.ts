@@ -43,6 +43,9 @@ type Trace = {
 const traces = new Map<string, Trace>()
 const MAX_TRACES = 2000
 
+// testagent_change - 链路日志通道（①②③），本地可查
+const elog = EffectLogger.create({ service: "testagent.latency" })
+
 function num(value: number): string {
   if (value < 1) return value.toFixed(2)
   if (value < 100) return value.toFixed(1)
@@ -52,9 +55,6 @@ function num(value: number): string {
 export function enabled(): boolean {
   return ENABLED
 }
-
-// testagent_change - 仅远端 OTLP 通道（经 Observability.layer 上报）
-const elog = EffectLogger.create({ service: "testagent.latency" })
 
 /** 生成稳定的短 traceId，便于在日志里肉眼比对 */
 export function traceId(key: string): string {
