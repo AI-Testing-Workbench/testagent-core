@@ -341,5 +341,11 @@ export const sessionActualDuration = Metric.gauge("session.duration.actual", {
 export const sessionPermissionDuration = Metric.gauge("session.duration.permission", {
   description: "Time spent waiting for permission approval (s)",
 })
+export const modelOutputAbnormal = Metric.counter("session.model.output_abnormal", {
+  description: "Model output status abnormal (finish_reason length/stop with invalid tools), auto-stopped to prevent infinite loop",
+}) // testagent_change
+export const modelDuplicateOutput = Metric.counter("session.model.duplicate_output", { // testagent_change
+  description: "Model returned identical content 3 times consecutively, auto-stopped to prevent infinite loop", // testagent_change
+}) // testagent_change
 
 export const Observability = { enabled, layer }
