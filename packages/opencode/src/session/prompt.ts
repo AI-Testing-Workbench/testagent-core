@@ -26,7 +26,7 @@ import { ToolRegistry } from "@/tool/registry"
 import { MCP } from "../mcp"
 import { LSP } from "@/lsp/lsp"
 import { Flag } from "@opencode-ai/core/flag/flag"
-import { userPrompt } from "@opencode-ai/core/effect/observability"
+import { userPrompt, modelDuplicateOutput } from "@opencode-ai/core/effect/observability" // testagent_change
 import { ulid } from "ulid"
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
@@ -1552,6 +1552,64 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           const lastAssistantMsg = msgs.findLast(
             (msg) => msg.info.role === "assistant" && msg.info.id === lastAssistant?.id,
           )
+          
+          // testagent_change start - 检测模型连续 3 次返回相同内容（跨多个 assistant 消息）
+          // 更严谨的检测：比较完整内容指纹（文本 + 工具调用），而不仅仅是工具
+          if (step >= 3) {
+            // 生成消息内容指纹：包含所有文本和工具调用信息
+            const getMessageFingerprint = (msg: MessageV2.WithParts): string => {
+              const textParts = msg.parts
+                .filter((p): p is MessageV2.TextPart => p.type === "text")
+                .map((p) => p.text.trim())
+                .join("\n")
+              
+              const toolParts = msg.parts
+                .filter((p): p is MessageV2.ToolPart => p.type === "tool")
+                .map((p) => `${p.tool}:${JSON.stringify(p.state.input)}`)
+                .join("|")
+              
+              return `text:[${textParts}]||tools:[${toolParts}]`
+            }
+            
+            // 获取最近 3 个 assistant 消息的指纹
+            const assistantMsgs = msgs.filter((m) => m.info.role === "assistant")
+            const recentAssistants = assistantMsgs.slice(-3)
+            
+            if (recentAssistants.length === 3) {
+              const fingerprints = recentAssistants.map(getMessageFingerprint)
+              const [first, second, third] = fingerprints
+              
+              // 检查三个指纹是否完全相同
+              if (first === second && second === third && first.length > 0) {
+                // 记录模型重复输出到 metric
+                yield* Metric.update(Metric.withAttributes(modelDuplicateOutput, { 
+                  sessionID, 
+                }), 1)
+                
+                yield* slog.warn("检测到模型连续 3 次返回相同内容，防止死循环自动停止", {
+                  step,
+                  fingerprint: first.substring(0, 200),
+                  assistantIds: recentAssistants.map((m) => m.info.id),
+                })
+                
+                // 在最后一个 assistant message 上设置 error
+                const duplicateMsg = recentAssistants[2] // 第三个（最新的）
+                const error = new NamedError.Unknown({
+                  message: "检测到模型连续 3 次返回完全相同的内容，为防止死循环已自动停止。建议：更换模型进行重试。",
+                })
+                const errorObj = error.toObject()
+                // 更新消息，将 error 设置上去
+                yield* sessions.updateMessage({
+                  ...duplicateMsg.info,
+                  error: errorObj,
+                }) 
+                // 抛出错误停止执行
+                throw error
+              }
+            }
+          }
+          // testagent_change end
+          
           // Some providers return "stop" even when the assistant message contains tool calls.
           // Keep the loop running so tool results can be sent back to the model.
           // Skip provider-executed tool parts — those were fully handled within the

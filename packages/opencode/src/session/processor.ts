@@ -38,6 +38,7 @@ import {
   tokenCacheWrite,
   tokenTotal,
   sessionLlmDuration,
+  modelOutputAbnormal, // testagent_change
 } from "@opencode-ai/core/effect/observability" // testagent_change
 
 const DOOM_LOOP_THRESHOLD = 3
@@ -548,10 +549,13 @@ export const layer: Layer.Layer<
                 (p) => p.type === "tool" && p.tool === "invalid",
               )
               if (hasInvalidTools) {
+                // 记录 invalid tools 检测统计到 metric
+                yield* Metric.update(Metric.withAttributes(modelOutputAbnormal, { sessionID: ctx.sessionID, modelID: ctx.model.id, providerID: ctx.model.providerID, finishReason: value.finishReason }), 1)
+                
                 if (!ctx.assistantMessage.error) {
                   ctx.assistantMessage.error = {
                     name: "UnknownError" as const,
-                    data: { message: `模型侧的finish_reason输出异常【${value.finishReason}】` },
+                    data: { message: `检测到模型侧输出状态异常【${value.finishReason}】，为防止死循环已自动停止。建议：更换模型进行重试。` },
                   }
                 }
                 ctx.blocked = true

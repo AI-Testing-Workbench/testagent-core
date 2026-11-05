@@ -384,5 +384,11 @@ export const snapshotFailed = Metric.counter("session.snapshot.failed", {
   description: "Number of snapshot staging failures in the session",
 })
 // testagent_change end
+export const modelOutputAbnormal = Metric.counter("session.model.output_abnormal", {
+  description: "Model output status abnormal (finish_reason length/stop with invalid tools), auto-stopped to prevent infinite loop",
+}) // testagent_change
+export const modelDuplicateOutput = Metric.counter("session.model.duplicate_output", { // testagent_change
+  description: "Model returned identical content 3 times consecutively, auto-stopped to prevent infinite loop", // testagent_change
+}) // testagent_change
 
 export const Observability = { enabled, layer }
