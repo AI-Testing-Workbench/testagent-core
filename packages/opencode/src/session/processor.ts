@@ -19,6 +19,8 @@ import type { Provider } from "@/provider/provider"
 import { Question } from "@/question"
 import { errorMessage } from "@/util/error"
 import * as Log from "@opencode-ai/core/util/log"
+import * as Latency from "@/testagent/latency" // testagent_change - 链路探针
+import * as SnapshotStats from "@/testagent/snapshot-stats" // testagent_change - snapshot 指标
 import { isRecord } from "@/util/record"
 import { EventV2 } from "@/v2/event"
 import { SessionEvent } from "@/v2/session-event"
@@ -130,7 +132,22 @@ export const layer: Layer.Layer<
       // Pre-capture snapshot before the LLM stream starts. The AI SDK
       // may execute tools internally before emitting start-step events,
       // so capturing inside the event handler can be too late.
+      // testagent_change start - snapshot 耗时统计：先登记开关状态
+      const snapshotEnabled = SnapshotStats.enabled()
+      if (snapshotEnabled) {
+        const info = yield* snapshot.status()
+        SnapshotStats.init({ sessionID: input.sessionID, enabled: info.enabled, vcs: info.vcs })
+      }
+      const snapshotStart = performance.now()
       const initialSnapshot = yield* snapshot.track()
+      if (snapshotEnabled) {
+        SnapshotStats.track({
+          sessionID: input.sessionID,
+          elapsed: performance.now() - snapshotStart,
+          ok: initialSnapshot !== undefined,
+        })
+      }
+      // testagent_change end
       const ctx: ProcessorContext = {
         assistantMessage: input.assistantMessage,
         sessionID: input.sessionID,
@@ -570,7 +587,16 @@ export const layer: Layer.Layer<
             })
             yield* session.updateMessage(ctx.assistantMessage)
             if (ctx.snapshot) {
+              // testagent_change - snapshot 耗时统计
+              const patchedAt = performance.now()
               const patch = yield* snapshot.patch(ctx.snapshot)
+              if (SnapshotStats.enabled()) {
+                SnapshotStats.patch({
+                  sessionID: ctx.sessionID,
+                  elapsed: performance.now() - patchedAt,
+                  files: patch.files.length,
+                })
+              }
               if (patch.files.length) {
                 yield* session.updatePart({
                   id: PartID.ascending(),
@@ -620,6 +646,14 @@ export const layer: Layer.Layer<
 
           case "text-delta":
             if (!ctx.currentText) return
+            // testagent_change start - 链路探针①: LLM 首个正文字符到达
+            yield* Latency.markLlmFirstTokenFx({
+              sessionID: ctx.currentText.sessionID,
+              messageID: ctx.currentText.messageID,
+              partID: ctx.currentText.id,
+              kind: "text",
+            })
+            // testagent_change end
             ctx.currentText.text += value.text
             if (value.providerMetadata) ctx.currentText.metadata = value.providerMetadata
             yield* session.updatePartDelta({
@@ -672,7 +706,16 @@ export const layer: Layer.Layer<
 
       const cleanup = Effect.fn("SessionProcessor.cleanup")(function* () {
         if (ctx.snapshot) {
+          // testagent_change - snapshot 耗时统计
+          const patchedAt = performance.now()
           const patch = yield* snapshot.patch(ctx.snapshot)
+          if (SnapshotStats.enabled()) {
+            SnapshotStats.patch({
+              sessionID: ctx.sessionID,
+              elapsed: performance.now() - patchedAt,
+              files: patch.files.length,
+            })
+          }
           if (patch.files.length) {
             yield* session.updatePart({
               id: PartID.ascending(),
@@ -738,6 +781,9 @@ export const layer: Layer.Layer<
         ctx.toolcalls = {}
         ctx.assistantMessage.time.completed = Date.now()
         yield* session.updateMessage(ctx.assistantMessage)
+
+        // testagent_change - 本 session 结束，汇总上报 snapshot 耗时
+        yield* SnapshotStats.report(ctx.sessionID)
       })
 
       const halt = Effect.fn("SessionProcessor.halt")(function* (e: unknown) {

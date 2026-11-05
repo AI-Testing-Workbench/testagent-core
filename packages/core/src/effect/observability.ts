@@ -355,6 +355,35 @@ export const sessionActualDuration = Metric.gauge("session.duration.actual", {
 export const sessionPermissionDuration = Metric.gauge("session.duration.permission", {
   description: "Time spent waiting for permission approval (s)",
 })
+// testagent_change start - snapshot 耗时统计
+export const snapshotEnabled = Metric.gauge("session.snapshot.enabled", {
+  description: "Whether snapshot is enabled for the session (1 = enabled, 0 = disabled)",
+})
+export const snapshotVcs = Metric.gauge("session.snapshot.vcs", {
+  description: "VCS type used by snapshot (1 = git, 0 = other)",
+})
+export const snapshotTrackDuration = Metric.gauge("session.snapshot.track.duration", {
+  description: "Cumulative time spent in snapshot track for the session (s)",
+})
+export const snapshotTrackCount = Metric.counter("session.snapshot.track.count", {
+  description: "Number of snapshot track calls in the session",
+})
+export const snapshotPatchDuration = Metric.gauge("session.snapshot.patch.duration", {
+  description: "Cumulative time spent in snapshot patch for the session (s)",
+})
+export const snapshotPatchCount = Metric.counter("session.snapshot.patch.count", {
+  description: "Number of snapshot patch calls in the session",
+})
+export const snapshotTotalDuration = Metric.gauge("session.snapshot.total.duration", {
+  description: "Total time spent in snapshot for the session (s)",
+})
+export const snapshotMaxDuration = Metric.gauge("session.snapshot.max.duration", {
+  description: "Longest single snapshot operation in the session (s)",
+})
+export const snapshotFailed = Metric.counter("session.snapshot.failed", {
+  description: "Number of snapshot staging failures in the session",
+})
+// testagent_change end
 export const modelOutputAbnormal = Metric.counter("session.model.output_abnormal", {
   description: "Model output status abnormal (finish_reason length/stop with invalid tools), auto-stopped to prevent infinite loop",
 }) // testagent_change

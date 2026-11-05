@@ -2,6 +2,7 @@ import { Slug } from "@opencode-ai/core/util/slug"
 import path from "path"
 import { BusEvent } from "@/bus/bus-event"
 import { Bus } from "@/bus"
+import * as Latency from "@/testagent/latency" // testagent_change - 链路探针
 import { Decimal } from "decimal.js"
 import { type ProviderMetadata, type LanguageModelUsage } from "ai"
 import { Flag } from "@opencode-ai/core/flag/flag"
@@ -607,11 +608,23 @@ export const layer: Layer.Layer<Service, never, Bus.Service | Storage.Service | 
 
     const updatePart = <T extends MessageV2.Part>(part: T): Effect.Effect<T> =>
       Effect.gen(function* () {
+        // testagent_change start - 链路探针②: CLI 写入 part 并入库广播
+        const startedAt = Latency.enabled() ? performance.now() : 0
         yield* sync.run(MessageV2.Event.PartUpdated, {
           sessionID: part.sessionID,
           part: structuredClone(part),
           time: Date.now(),
         })
+        if (Latency.enabled()) {
+          yield* Latency.logCliPartFx({
+            sessionID: part.sessionID,
+            messageID: part.messageID,
+            partID: part.id,
+            kind: part.type,
+            elapsed: performance.now() - startedAt,
+          })
+        }
+        // testagent_change end
         return part
       }).pipe(Effect.withSpan("Session.updatePart"))
 
@@ -786,7 +799,20 @@ export const layer: Layer.Layer<Service, never, Bus.Service | Storage.Service | 
       field: string
       delta: string
     }) {
+      // testagent_change start - 链路探针②: 文本增量广播
+      const startedAt = Latency.enabled() ? performance.now() : 0
       yield* bus.publish(MessageV2.Event.PartDelta, input)
+      if (Latency.enabled()) {
+        yield* Latency.logCliPartFx({
+          sessionID: input.sessionID,
+          messageID: input.messageID,
+          partID: input.partID,
+          kind: `delta:${input.field}`,
+          elapsed: performance.now() - startedAt,
+          size: input.delta.length,
+        })
+      }
+      // testagent_change end
     })
 
     /** Finds the first message matching the predicate, searching newest-first. */
