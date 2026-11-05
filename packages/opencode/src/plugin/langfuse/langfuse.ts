@@ -17,7 +17,7 @@ import { Effect, Schema } from "effect"
 import { User } from "@/testagent/user"
 import { readFileSync, existsSync, writeFileSync, mkdirSync, renameSync, chmodSync } from "fs"
 import { readdir, unlink } from "fs/promises"
-import { dirname, join, resolve } from "path"
+import { dirname, join, resolve, isAbsolute } from "path"
 import { homedir } from "os"
 
 // testagent_change start - helper function to detect cloud mode
@@ -6167,48 +6167,65 @@ export const LangfusePlugin: Plugin = async (ctx) => {
         }
       }
       if (input.tool === "bash" && typeof input.args?.command === "string") {
-        if (BASH_FILE_RE.test(input.args.command)) {
-        const match = input.args.command.match(/["']([^"']*测试案例[/\\][^"']+\.(yaml|yml))["']/)
-        if (match) {
-          const filePath = match[1]
-          try {
-            const raw = readFileSync(filePath, "utf-8")
-            if (raw.includes("TESTCASE_ID")) {
-              const injectedContent = injectTestcaseIds(raw)
-              fileContent = injectedContent
-              writeFileSync(filePath, injectedContent, "utf-8")
-            } else {
-              // 检查是否有任何 testcase_id 符合 testagent 模式
-              // 正则匹配: TC + 2个字符 + t + 3个字符 + e + 2个字符 + s + 3个字符 + t + 2个字符 + a + 3个字符 + g + 2个字符 + e + 3个字符 + n + 2个字符 + t + 1个字符
-              const testagentPattern = /testcase_id:\s*(TC[a-f0-9]{2}t[a-f0-9]{3}e[a-f0-9]{2}s[a-f0-9]{3}t[a-f0-9]{2}a[a-f0-9]{3}g[a-f0-9]{2}e[a-f0-9]{3}n[a-f0-9]{2}t[a-f0-9])/gi
-              const hasTestagentId = testagentPattern.test(raw)
-              
-              if (hasTestagentId) {
-                // 替换所有不符合 testagent 模式的 testcase_id
-                const updatedContent = replaceNonTestagentTestcaseIds(raw)
-                if (updatedContent !== raw) {
-                  fileContent = updatedContent
-                  writeFileSync(filePath, updatedContent, "utf-8")
+        // testagent_change start - 优先检查 workdir 是否包含测试案例或自动化测试
+        const workdir = input.args?.workdir
+        // workdir 可能是相对路径，需要相对于进程工作目录解析为绝对路径
+        const resolvedWorkdir = workdir ? (isAbsolute(workdir) ? workdir : resolve(workdir)) : undefined
+        const hasTestCaseWorkdir = resolvedWorkdir && /[/\\]测试案例([/\\]|$)/.test(resolvedWorkdir)
+        const hasAutoTestWorkdir = resolvedWorkdir && /[/\\]自动化测试([/\\]|$)/.test(resolvedWorkdir)
+        
+        // 检查是否是测试案例相关的 YAML 文件
+        const hasTestCaseInCommand = BASH_FILE_RE.test(input.args.command)
+        if (hasTestCaseWorkdir || hasTestCaseInCommand) {
+          const match = input.args.command.match(/["']([^"']*测试案例[/\\][^"']+\.(yaml|yml))["']/) ||
+                        (hasTestCaseWorkdir && input.args.command.match(/["']([^"']*\.(yaml|yml))["']/))
+          if (match) {
+            const filePath = match[1]
+            const resolvedPath = resolvedWorkdir ? resolve(resolvedWorkdir, filePath) : resolve(filePath)
+            try {
+              const raw = readFileSync(resolvedPath, "utf-8")
+              if (raw.includes("TESTCASE_ID")) {
+                const injectedContent = injectTestcaseIds(raw)
+                fileContent = injectedContent
+                writeFileSync(resolvedPath, injectedContent, "utf-8")
+              } else {
+                // 检查是否有任何 testcase_id 符合 testagent 模式
+                // 正则匹配: TC + 2个字符 + t + 3个字符 + e + 2个字符 + s + 3个字符 + t + 2个字符 + a + 3个字符 + g + 2个字符 + e + 3个字符 + n + 2个字符 + t + 1个字符
+                const testagentPattern = /testcase_id:\s*(TC[a-f0-9]{2}t[a-f0-9]{3}e[a-f0-9]{2}s[a-f0-9]{3}t[a-f0-9]{2}a[a-f0-9]{3}g[a-f0-9]{2}e[a-f0-9]{3}n[a-f0-9]{2}t[a-f0-9])/gi
+                const hasTestagentId = testagentPattern.test(raw)
+                
+                if (hasTestagentId) {
+                  // 替换所有不符合 testagent 模式的 testcase_id
+                  const updatedContent = replaceNonTestagentTestcaseIds(raw)
+                  if (updatedContent !== raw) {
+                    fileContent = updatedContent
+                    writeFileSync(resolvedPath, updatedContent, "utf-8")
+                  }
                 }
               }
-            }
-          } catch (e) {
-            // 文件读写失败时静默忽略
-            }
-          }
-        } else if (/自动化测试[/\\].+\.py['"]/.test(input.args.command)) {
-          // 检查 bash 命令中是否包含自动化测试目录下的 Python 文件
-          const pyMatch = input.args.command.match(/["']([^"']*自动化测试[/\\][^"']+\.py)["']/)
-          if (pyMatch) {
-            const filePath = pyMatch[1]
-            try {
-              autoTestFilePath = resolve(filePath)
-              autoTestContent = readFileSync(filePath, "utf-8")
             } catch (e) {
               // 文件读写失败时静默忽略
             }
           }
         }
+        
+        // 检查是否是自动化测试相关的 Python 文件
+        const hasAutoTestInCommand = /自动化测试[/\\].+\.py['"]/.test(input.args.command)
+        if (hasAutoTestWorkdir || hasAutoTestInCommand) {
+          const pyMatch = input.args.command.match(/["']([^"']*自动化测试[/\\][^"']+\.py)["']/) ||
+                          (hasAutoTestWorkdir && input.args.command.match(/["']([^"']*\.py)["']/))
+          if (pyMatch) {
+            const filePath = pyMatch[1]
+            const resolvedPath = resolvedWorkdir ? resolve(resolvedWorkdir, filePath) : resolve(filePath)
+            try {
+              autoTestFilePath = resolvedPath
+              autoTestContent = readFileSync(resolvedPath, "utf-8")
+            } catch (e) {
+              // 文件读写失败时静默忽略
+            }
+          }
+        }
+        // testagent_change end
       }
 
       const callInfo = toolCallInfos.get(input.callID)
