@@ -1085,6 +1085,103 @@ it.live("assertNotBusy succeeds when idle", () =>
   ),
 )
 
+// Resume semantics
+
+it.live(
+  "resume rejects with BusyError when loop running",
+  () =>
+    provideTmpdirServer(
+      Effect.fnUntraced(function* ({ llm }) {
+        const prompt = yield* SessionPrompt.Service
+        const sessions = yield* Session.Service
+        yield* llm.hang
+
+        const chat = yield* sessions.create({})
+        yield* user(chat.id, "hi")
+
+        const fiber = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkChild)
+        yield* llm.wait(1)
+
+        const msgs = yield* sessions.messages({ sessionID: chat.id })
+        const last = msgs.filter((m) => m.info.role === "assistant").at(-1)
+        if (!last) throw new Error("expected assistant message")
+
+        const exit = yield* prompt.resume({ sessionID: chat.id, messageID: last.info.id }).pipe(Effect.exit)
+        expect(Exit.isFailure(exit)).toBe(true)
+        if (Exit.isFailure(exit)) {
+          expect(Cause.squash(exit.cause)).toBeInstanceOf(Session.BusyError)
+        }
+
+        yield* prompt.cancel(chat.id)
+        yield* Fiber.await(fiber)
+      }),
+      { git: true, config: providerCfg },
+    ),
+  10_000,
+)
+
+it.live(
+  "resume reruns the loop when idle",
+  () =>
+    provideTmpdirServer(
+      Effect.fnUntraced(function* ({ llm }) {
+        const prompt = yield* SessionPrompt.Service
+        const sessions = yield* Session.Service
+        const chat = yield* sessions.create({ title: "Pinned" })
+        yield* seed(chat.id, { finish: "tool-calls" })
+
+        const msgs = yield* sessions.messages({ sessionID: chat.id })
+        const last = msgs.filter((m) => m.info.role === "assistant").at(-1)
+        if (!last) throw new Error("expected assistant message")
+
+        yield* llm.text("resumed")
+        const result = yield* prompt.resume({ sessionID: chat.id, messageID: last.info.id })
+        expect(result.info.role).toBe("assistant")
+        expect(result.parts.some((p) => p.type === "text" && p.text === "resumed")).toBe(true)
+        expect(yield* llm.hits).toHaveLength(1)
+      }),
+      { git: true, config: providerCfg },
+    ),
+  10_000,
+)
+
+it.live(
+  "resume finalizes interrupted tool parts",
+  () =>
+    provideTmpdirServer(
+      Effect.fnUntraced(function* ({ llm }) {
+        const prompt = yield* SessionPrompt.Service
+        const sessions = yield* Session.Service
+        const chat = yield* sessions.create({ title: "Pinned" })
+        yield* seed(chat.id, { finish: "tool-calls" })
+
+        // 模拟进程崩溃遗留：assistant 消息上留一个 running 工具 part（processor 来不及收尾）
+        const msgs = yield* sessions.messages({ sessionID: chat.id })
+        const last = msgs.filter((m) => m.info.role === "assistant").at(-1)
+        if (!last) throw new Error("expected assistant message")
+        yield* sessions.updatePart({
+          id: PartID.ascending(),
+          messageID: last.info.id,
+          sessionID: chat.id,
+          type: "tool",
+          callID: "call_stale",
+          tool: "read",
+          state: { status: "running", input: { filePath: "a.ts" }, time: { start: Date.now() } },
+        } satisfies MessageV2.ToolPart)
+
+        yield* llm.text("resumed")
+        yield* prompt.resume({ sessionID: chat.id, messageID: last.info.id })
+
+        const after = yield* sessions.messages({ sessionID: chat.id })
+        const part = after.flatMap((m) => m.parts).find((p) => p.type === "tool")
+        expect(part?.state.status).toBe("error")
+        if (part?.state.status === "error") expect(part.state.error).toBe("Tool execution aborted")
+      }),
+      { git: true, config: providerCfg },
+    ),
+  10_000,
+)
+
 // Shell semantics
 
 it.live(
