@@ -192,17 +192,57 @@ export function args(file: string, command: string, cwd: string) {
   return ["-c", command]
 }
 
-const defaultPreferred = lazy(() => select(process.env.SHELL))
-const defaultAcceptable = lazy(() => select(process.env.SHELL, { acceptable: true }))
+// testagent_change start - prefer the ps-bash bundled by the extension on Windows.
+// PowerShell 5.1 strips embedded double quotes when passing arguments to native
+// executables, which corrupts inline JSON bodies. ps-bash runs commands through the
+// PowerShell SDK without rebuilding a command line, so quoting survives.
+// Resolution order: explicit config > bundled ps-bash > ambient SHELL > platform default.
+export const psbash = lazy(() => {
+  if (process.platform !== "win32") return
+  const file = process.env.TESTAGENT_PS_BASH
+  if (!file) return
+  const shell = full(file)
+  if (!rooted(shell)) return
+  if (!Filesystem.stat(shell)?.isFile()) return
+  return shell
+})
+
+// Once ps-bash fails to execute we stop selecting it for the rest of the process so
+// a broken bundle degrades to the ambient shell instead of failing every command.
+let broken = false
+
+export function breakPsBash() {
+  broken = true
+}
+
+export function isPsBash(shell: string | undefined) {
+  const file = psbash()
+  if (!file || !shell) return false
+  return Filesystem.windowsPath(shell).toLowerCase() === Filesystem.windowsPath(file).toLowerCase()
+}
+
+/** Shell to use when ps-bash is unavailable or broken: never ps-bash itself. */
+export function rescue() {
+  return select(process.env.SHELL, { acceptable: true })
+}
+// testagent_change end
+
+const defaultPreferred = lazy(() => psbash() ?? select(process.env.SHELL))
+const defaultAcceptable = lazy(() => psbash() ?? select(process.env.SHELL, { acceptable: true }))
 
 export function preferred(configShell?: string) {
   if (configShell) return select(configShell)
+  if (broken) return rescue()
   return defaultPreferred()
 }
-preferred.reset = () => defaultPreferred.reset()
+preferred.reset = () => {
+  broken = false
+  defaultPreferred.reset()
+}
 
 export function acceptable(configShell?: string) {
   if (configShell) return select(configShell, { acceptable: true })
+  if (broken) return rescue()
   return defaultAcceptable()
 }
 acceptable.reset = () => defaultAcceptable.reset()
