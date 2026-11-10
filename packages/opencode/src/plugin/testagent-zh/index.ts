@@ -6,6 +6,7 @@ import { networkInterfaces } from "node:os"
 import { ServerAuth } from "@/server/auth"
 import { GlobalBus } from "@/bus/global"
 import type { IdleReason } from "@/session/status"
+import * as Log from "@opencode-ai/core/util/log"
 
 // 云端判定：与 extension 的 isCloudMode()（kilo-vscode/src/services/cli-backend/cloud-mode.ts，
 // 决定「复制 Web UI 链接」按钮是否显示）同一口径——env 或 marker 文件，任一命中即云端。
@@ -68,17 +69,106 @@ function shareHost(): string {
   return "127.0.0.1"
 }
 
-// 日志优先走插件 log 通道（写入服务端日志文件）；插件初始化前回退 console
+// 日志优先走插件 log 通道（写入服务端日志文件）；插件未初始化时回退统一日志系统。
+// 不能用 console：serve 启动阶段 stdout 会被扩展用来解析端口，多打印一行就是噪音。
 let serverLog: PluginInput["log"]
+const serviceLog = Log.create({ service: "testagent-zh" })
 function zhLog(level: "info" | "warn" | "error", message: string, data?: unknown) {
   if (serverLog) {
     serverLog(level, message, (data ?? {}) as Record<string, unknown>)
     return
   }
-  const line = `[TESTAGENT_ZH] ${message}${data !== undefined ? ` ${JSON.stringify(data)}` : ""}`
-  if (level === "warn") console.warn(line)
-  else if (level === "error") console.error(line)
-  else console.log(line)
+  const extra = (data ?? {}) as Record<string, unknown>
+  if (level === "warn") serviceLog.warn(message, extra)
+  else if (level === "error") serviceLog.error(message, extra)
+  else serviceLog.info(message, extra)
+}
+
+// relay 鉴权头：登录态由 env-vars 注入，可能晚于启动，因此每次请求实时读取
+function relayHeaders() {
+  return { Authorization: `Bearer ${USER_TOKEN()}` }
+}
+
+// Web UI 远程访问地址：与扩展「复制 Web UI 链接」按钮拼出的字符串一致。
+// 端口取 serve 实际监听端口；auth_token 为 base64(username:password)，
+// 与 GET /testagent/server/auth 返回值同源；serve 未设密码（独立 CLI）时不带 auth_token。
+function shareLink(base: string | URL) {
+  const url = new URL(String(base))
+  const port = url.port || (url.protocol === "https:" ? "443" : "80")
+  const host = shareHost()
+  const password = process.env["OPENCODE_SERVER_PASSWORD"]
+  if (!password) return `http://${host}:${port}/`
+  const username = process.env["OPENCODE_SERVER_USERNAME"] ?? "opencode"
+  const token = Buffer.from(`${username}:${password}`).toString("base64")
+  return `http://${host}:${port}/?auth_token=${encodeURIComponent(token)}`
+}
+
+// 启动通知：serve 起来后推一条「沙箱启动成功 + Web UI 地址」。
+// 与完成通知相互独立（不受 enabled 开关影响，也不依赖某个 session）。
+// 复用招乎已有的 /message/testagent/notification/notify 卡片接口，不新增 relay 端点。
+// 仅云端发送——消息语义就是沙箱就绪，本地启动不需要通知。
+// 重试策略：登录态未就绪 / 401·403 / 网络异常 → 等 START_RETRY_MS 再试；其它 HTTP 失败直接放弃。
+//
+// 触发时机：cli/cmd/serve.ts 在监听起来后立刻调用，不再等首个请求触发插件实例化；
+// 插件工厂内仍保留一次调用作为兜底（TUI / run 等非 serve 入口），startStarted 保证进程内只发一次。
+export function notifyStartup(input: { directory: string; serverUrl: string | URL }) {
+  const directory = input.directory
+  if (startStarted) return
+  startStarted = true
+  if (!isCloudMode()) {
+    // 本地不发送，但仍打印一次待发送内容，便于核对 dir 取值是否符合预期
+    zhLog("info", "startup notify skipped: not cloud mode", {
+      directory,
+      localUrl: `${RELAY_URL}/message/testagent/tscode/jump?dir=${encodeURIComponent(directory)}`,
+      shareLink: shareLink(input.serverUrl),
+    })
+    return
+  }
+  void (async () => {
+    for (let attempt = 1; attempt <= START_RETRY_MAX; attempt++) {
+      if (!USER_ID() || !USER_TOKEN()) {
+        zhLog("info", "startup notify waiting for login", { attempt })
+        await sleep(START_RETRY_MS)
+        continue
+      }
+      const url = `${RELAY_URL}/message/testagent/notification/notify`
+      // dir 取 serve 的工作目录：扩展以工作区根目录为 cwd 派生 serve，首个请求的
+      // ?directory= / x-opencode-directory 也由它携带，Session.create 正是把这个值原样写进
+      // Session.Info.directory，所以它就是 Web UI 深链 /<base64url(dir)> 的那一段。
+      // 路径含空格/中文/反斜杠，必须编码后再放进 query。
+      const localUrl = `${RELAY_URL}/message/testagent/tscode/jump?dir=${encodeURIComponent(directory)}`
+      const webLink = shareLink(input.serverUrl)
+      const body = {
+        content: [
+          { type: "title", content: "沙箱启动成功通知", style: 1 },
+          {
+            type: "content",
+            list: [
+              { content: `点击浏览器打开\n`, type: [3], link: { url: webLink } },
+              { content: `点击本地工作台打开`, type: [3], link: { url: localUrl } },
+            ],
+          },
+        ],
+        userId: USER_ID(),
+      }
+      zhLog("info", "startup notify request", { attempt, url, directory, localUrl, body })
+      try {
+        const res = await fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", ...relayHeaders() },
+          body: JSON.stringify(body),
+        })
+        const data = await res.json().catch(() => ({}))
+        zhLog("info", "startup notify response", { attempt, status: res.status, body: data })
+        if (res.ok && data.returnCode === "SUC0000") return
+        if (res.status !== 401 && res.status !== 403) return
+      } catch (err) {
+        zhLog("warn", "startup notify failed", { attempt, error: String(err) })
+      }
+      await sleep(START_RETRY_MS)
+    }
+    zhLog("warn", "startup notify gave up", { attempts: START_RETRY_MAX })
+  })()
 }
 
 // 进程级全局开关监听（跨实例）：按钮经 GlobalBus 广播。
@@ -103,10 +193,6 @@ export const ZhBridgePlugin: Plugin = async ({ client, directory, serverUrl, log
     return {}
   }
   zhLog("info", "plugin loaded", { relay: RELAY_URL, token: USER_TOKEN() ? "present" : "missing", enabled, directory })
-
-  function relayHeaders() {
-    return { Authorization: `Bearer ${USER_TOKEN()}` }
-  }
 
   // 发送交互卡片（relay 接口 1/2）；失败抛错由调用方按"不阻塞本地确认"处理
   async function sendAsk(askId: string, kind: Pending["kind"], payload: any) {
@@ -409,88 +495,9 @@ export const ZhBridgePlugin: Plugin = async ({ client, directory, serverUrl, log
     })()
   }
 
-  // Web UI 远程访问地址：与扩展「复制 Web UI 链接」按钮拼出的字符串一致。
-  // 端口取 serve 实际监听端口（Server.url）；auth_token 为 base64(username:password)，
-  // 与 GET /testagent/server/auth 返回值同源；serve 未设密码（独立 CLI）时不带 auth_token。
-  function shareLink() {
-    const url = new URL(String(serverUrl))
-    const port = url.port || (url.protocol === "https:" ? "443" : "80")
-    const host = shareHost()
-    const password = process.env["OPENCODE_SERVER_PASSWORD"]
-    if (!password) return `http://${host}:${port}/`
-    const username = process.env["OPENCODE_SERVER_USERNAME"] ?? "opencode"
-    const token = Buffer.from(`${username}:${password}`).toString("base64")
-    return `http://${host}:${port}/?auth_token=${encodeURIComponent(token)}`
-  }
-
-  // 启动通知：项目/沙箱启动成功后推一条「沙箱启动成功 + Web UI 地址」，
-  // 与完成通知相互独立（不受 enabled 开关影响，也不会因为某个 session 才触发）。
-  // 复用招乎已有的 /message/testagent/notification/notify 卡片接口（与本地完成通知同一个），
-  // 不新增 relay 端点；没有 session，所以卡片只带标题 + 正文，不带 sessionId/answer。
-  // 仅云端发送——消息语义就是沙箱就绪，本地启动不需要通知。
-  // 重试策略：登录态未就绪 / 401·403 / 网络异常 → 等 START_RETRY_MS 再试；
-  // 其它 HTTP 失败直接放弃，避免对 relay 造成无意义轮询。
-  function notifyStartup() {
-    if (startStarted) return
-    startStarted = true
-    if (!isCloudMode()) {
-      // 本地不发送，但仍打印一次待发送内容，便于核对 dir 取值是否符合预期
-      zhLog("info", "startup notify skipped: not cloud mode", {
-        directory,
-        localUrl: `${RELAY_URL}/message/testagent/tscode/jump?dir=${encodeURIComponent(directory)}`,
-        shareLink: shareLink(),
-      })
-      return
-    }
-    void (async () => {
-      for (let attempt = 1; attempt <= START_RETRY_MAX; attempt++) {
-        if (!USER_ID() || !USER_TOKEN()) {
-          zhLog("info", "startup notify waiting for login", { attempt })
-          await sleep(START_RETRY_MS)
-          continue
-        }
-        const url = `${RELAY_URL}/message/testagent/notification/notify`
-        // dir 取插件实例目录（PluginInput.directory）：serve 由扩展以工作区根目录为 cwd 派生，
-        // 首个请求的 ?directory= / x-opencode-directory 也由它携带，Session.create 正是把这个值
-        // 原样写进 Session.Info.directory，所以它就是 Web UI 深链 /<base64url(dir)> 的那一段。
-        // 路径含空格/中文/反斜杠，必须编码后再放进 query。
-        const localUrl = `${RELAY_URL}/message/testagent/tscode/jump?dir=${encodeURIComponent(directory)}`
-        // shareLink 是函数，必须调用；写成 ${shareLink} 会把函数源码原样拼进 url
-        const webLink = shareLink()
-        const body = {
-          content: [
-            { type: "title", content: "沙箱启动成功通知", style: 1 },
-            {
-              type: "content",
-              list: [
-                { content: `点击浏览器打开\n`, type: [3], link: { url: webLink } },
-                { content: `点击本地工作台打开`, type: [3], link: { url: localUrl } },
-              ],
-            },
-          ],
-          userId: USER_ID(),
-        }
-        zhLog("info", "startup notify request", { attempt, url, directory, localUrl, body })
-        try {
-          const res = await fetch(url, {
-            method: "POST",
-            headers: { "Content-Type": "application/json", ...relayHeaders() },
-            body: JSON.stringify(body),
-          })
-          const data = await res.json().catch(() => ({}))
-          zhLog("info", "startup notify response", { attempt, status: res.status, body: data })
-          if (res.ok && data.returnCode === "SUC0000") return
-          if (res.status !== 401 && res.status !== 403) return
-        } catch (err) {
-          zhLog("warn", "startup notify failed", { attempt, error: String(err) })
-        }
-        await sleep(START_RETRY_MS)
-      }
-      zhLog("warn", "startup notify gave up", { attempts: START_RETRY_MAX })
-    })()
-  }
-
-  notifyStartup()
+  // serve 已在监听起来后调用过一次（cli/cmd/serve.ts）；这里兜底 TUI / run 等入口。
+  // startStarted 为模块级，重复调用直接返回。
+  notifyStartup({ directory, serverUrl })
 
   return {
     async event({ event }) {
