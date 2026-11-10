@@ -22,7 +22,9 @@ import { clearPermissions, clearQuestions } from "@/testagent/requests" // testa
 import { SessionArchive } from "@/session/archive" // testagent_change
 import { NotFoundError } from "@/storage/storage"
 import { NamedError } from "@opencode-ai/core/util/error"
+import { SessionReplay } from "@/testagent/session-replay"
 import * as Log from "@opencode-ai/core/util/log" // testagent_change
+import { ReplayScript } from "@/testagent/replay-script" // testagent_change
 import { Cause, Effect, Option, Schema, Scope } from "effect"
 import * as Stream from "effect/Stream"
 import { HttpServerRequest, HttpServerResponse } from "effect/unstable/http"
@@ -39,6 +41,8 @@ import {
   PermissionResponsePayload,
   PromptPayload,
   ResumePayload, // testagent_change - 添加 ResumePayload
+  ReplayPayload, // testagent_change
+  MaterializePayload, // testagent_change
   RevertPayload,
   ShellPayload,
   SummarizePayload,
@@ -62,6 +66,7 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
     const statusSvc = yield* SessionStatus.Service
     const todoSvc = yield* Todo.Service
     const summary = yield* SessionSummary.Service
+    const replaySvc = yield* SessionReplay.Service
     const bus = yield* Bus.Service
     const scope = yield* Scope.Scope
 
@@ -435,6 +440,48 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
     }) {
       return yield* promptSvc.resume({ sessionID: ctx.params.sessionID, ...ctx.payload })
     })
+    const replay = Effect.fn("SessionHttpApi.replay")(function* (ctx: {
+      params: { sessionID: SessionID }
+      payload: typeof ReplayPayload.Type
+    }) {
+      if (ctx.payload.mode === "loop") {
+        const first = ctx.payload.scripts ?? (ctx.payload.script ? [ctx.payload.script] : [])
+        if (first.length === 0) throw new Error("loop replay requires a script")
+        const extra = (ctx.payload.turns ?? []).filter((turn) => turn.scripts.length > 0 && turn.parts.length > 0)
+        ReplayScript.arm(ctx.params.sessionID, first)
+        log.info("loop replay", { sessionID: ctx.params.sessionID, steps: first.length, turns: extra.length })
+        return yield* Effect.gen(function* () {
+          const head = yield* promptSvc.loop({ sessionID: ctx.params.sessionID })
+          const tail = yield* Effect.forEach(
+            extra,
+            (turn) =>
+              Effect.gen(function* () {
+                ReplayScript.arm(ctx.params.sessionID, turn.scripts)
+                return yield* promptSvc.prompt({
+                  sessionID: ctx.params.sessionID,
+                  parts: turn.parts,
+                  agent: turn.agent,
+                  model: turn.model,
+                })
+              }),
+            { concurrency: 1 },
+          )
+          return tail.length > 0 ? tail[tail.length - 1] : head
+        }).pipe(Effect.ensuring(Effect.sync(() => ReplayScript.clear(ctx.params.sessionID))))
+      }
+      return yield* replaySvc.replay({
+        sessionID: ctx.params.sessionID,
+        messageID: ctx.payload.messageID,
+        partID: ctx.payload.partID,
+      })
+    })
+    const materialize = Effect.fn("SessionHttpApi.materialize")(function* (ctx: {
+      params: { sessionID: SessionID }
+      payload: typeof MaterializePayload.Type
+    }) {
+      yield* replaySvc.materialize({ sessionID: ctx.params.sessionID, ...ctx.payload })
+      return true
+    })
     // testagent_change end
 
     // testagent_change start - 添加 clearContext handler
@@ -574,6 +621,8 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       .handle("revert", revert)
       .handle("unrevert", unrevert)
       .handle("resume", resume) // testagent_change - 添加 resume handler
+      .handle("replay", replay) // testagent_change
+      .handle("materialize", materialize) // testagent_change
       .handle("clearContext", clearContext) // testagent_change - 添加 clearContext handler
       .handle("contextExtract", contextExtract) // testagent_change - 添加 contextExtract handler
       .handle("permissionRespond", permissionRespond)

@@ -1530,3 +1530,74 @@ test("revert handles large mixed batches across chunk boundaries", async () => {
     },
   })
 })
+
+test("materialize restores snapshot into a new directory without changing source", async () => {
+  await using tmp = await bootstrap()
+  const target = `${tmp.path}-target`
+  await fs.mkdir(target)
+
+  try {
+    await WithInstance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        await Filesystem.write(`${tmp.path}/extra.txt`, "EXTRA")
+        const before = await run(tmp.path, (snapshot) => snapshot.track())
+        expect(before).toBeTruthy()
+
+        await Filesystem.write(`${tmp.path}/a.txt`, "changed in source")
+
+        await run(tmp.path, (snapshot) => snapshot.materialize(before!, target))
+
+        expect(await fs.readFile(`${target}/a.txt`, "utf-8")).toBe(tmp.extra.aContent)
+        expect(await fs.readFile(`${target}/extra.txt`, "utf-8")).toBe("EXTRA")
+        expect(await fs.readFile(`${tmp.path}/a.txt`, "utf-8")).toBe("changed in source")
+        expect(await fs.readFile(`${tmp.path}/extra.txt`, "utf-8")).toBe("EXTRA")
+      },
+    })
+  } finally {
+    await $`rm -rf ${target}`.quiet()
+  }
+}, 20000)
+
+test("materialize restores snapshot into a git worktree without changing source", async () => {
+  await using tmp = await bootstrap()
+  const target = `${tmp.path}-worktree`
+  await $`git worktree add ${target} HEAD`.cwd(tmp.path).quiet()
+
+  try {
+    await WithInstance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        await Filesystem.write(`${tmp.path}/extra.txt`, "EXTRA")
+        const before = await run(tmp.path, (snapshot) => snapshot.track())
+        expect(before).toBeTruthy()
+
+        await Filesystem.write(`${tmp.path}/a.txt`, "changed in source")
+
+        await run(tmp.path, (snapshot) => snapshot.materialize(before!, target))
+
+        expect(await fs.readFile(`${target}/a.txt`, "utf-8")).toBe(tmp.extra.aContent)
+        expect(await fs.readFile(`${target}/extra.txt`, "utf-8")).toBe("EXTRA")
+        expect(await fs.readFile(`${tmp.path}/a.txt`, "utf-8")).toBe("changed in source")
+      },
+    })
+  } finally {
+    await $`git worktree remove --force ${target}`.cwd(tmp.path).quiet().nothrow()
+    await $`rm -rf ${target}`.quiet()
+  }
+}, 20000)
+
+test("materialize rejects a missing snapshot tree", async () => {
+  await using tmp = await bootstrap()
+  const target = `${tmp.path}-target`
+  await fs.mkdir(target)
+  await WithInstance.provide({
+    directory: tmp.path,
+    fn: async () => {
+      expect(await run(tmp.path, (snapshot) => snapshot.track())).toBeTruthy()
+      await expect(run(tmp.path, (snapshot) => snapshot.materialize("0".repeat(40), target))).rejects.toThrow(
+        /not a tree/,
+      )
+    },
+  })
+}, 20000)

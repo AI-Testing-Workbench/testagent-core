@@ -69,6 +69,7 @@ export interface Interface {
   readonly patch: (hash: string) => Effect.Effect<Patch>
   readonly restore: (snapshot: string) => Effect.Effect<void>
   readonly revert: (patches: Patch[]) => Effect.Effect<void>
+  readonly materialize: (snapshot: string, target: string) => Effect.Effect<void> // testagent_change
   readonly diff: (hash: string) => Effect.Effect<string>
   readonly diffFull: (from: string, to: string) => Effect.Effect<FileDiff[]>
 }
@@ -410,6 +411,83 @@ export const layer: Layer.Layer<
                 exitCode: result.code,
                 stderr: result.stderr,
               })
+            }),
+          )
+        })
+
+        // testagent_change start
+        const kind = Effect.fnUntraced(function* (gitdir: string, snapshot: string) {
+          const result = yield* git(["--git-dir", gitdir, "cat-file", "-t", snapshot])
+          return result.text.trim()
+        })
+
+        const locate = Effect.fnUntraced(function* (snapshot: string) {
+          const got = yield* kind(state.gitdir, snapshot)
+          if (got === "tree") return state.gitdir
+          const root = path.dirname(state.gitdir)
+          const entries = yield* fs.readDirectoryEntries(root).pipe(Effect.catch(() => Effect.succeed([])))
+          for (const entry of entries) {
+            if (entry.type !== "directory") continue
+            const candidate = path.join(root, entry.name)
+            if (candidate === state.gitdir) continue
+            const hit = yield* kind(candidate, snapshot)
+            if (hit !== "tree") continue
+            log.warn("snapshot found in sibling gitdir", { snapshot, gitdir: candidate, expected: state.gitdir })
+            return candidate
+          }
+          throw new Error(`Snapshot ${snapshot} is not a tree in ${state.gitdir} (type=${got || "missing"})`)
+        })
+        // testagent_change end
+
+        const materialize = Effect.fnUntraced(function* (snapshot: string, target: string) {
+          return yield* locked(
+            Effect.gen(function* () {
+              log.info("materialize", { commit: snapshot, target })
+              const gitdir = yield* locate(snapshot)
+              yield* fs.ensureDir(state.gitdir).pipe(Effect.orDie)
+              const index = path.join(state.gitdir, "materialize.index")
+              yield* remove(index)
+              yield* remove(`${index}.lock`)
+              const env = {
+                GIT_DIR: gitdir,
+                GIT_WORK_TREE: target,
+                GIT_INDEX_FILE: index,
+                GIT_OPTIONAL_LOCKS: "0",
+              }
+              log.info("materialize gitdir", { snapshot, target, gitdir })
+              return yield* Effect.gen(function* () {
+                const result = yield* git(
+                  [...core, "read-tree", snapshot],
+                  { cwd: gitdir, env },
+                )
+                if (result.code !== 0) {
+                  log.error("failed to materialize snapshot", {
+                    snapshot,
+                    target,
+                    gitdir,
+                    exitCode: result.code,
+                    stderr: result.stderr,
+                  })
+                  throw new Error(
+                    `Failed to materialize snapshot ${snapshot} from ${gitdir}: ${result.stderr.trim() || result.code}`,
+                  )
+                }
+                const checkout = yield* git(
+                  [...core, "checkout-index", "-a", "-f"],
+                  { cwd: gitdir, env },
+                )
+                if (checkout.code === 0) return
+                log.error("failed to materialize snapshot", {
+                  snapshot,
+                  target,
+                  gitdir,
+                  exitCode: checkout.code,
+                  stderr: checkout.stderr,
+                })
+                throw new Error(
+                  `Failed to materialize snapshot ${snapshot} from ${gitdir}: ${checkout.stderr.trim() || checkout.code}`,
+                )
+              }).pipe(Effect.ensuring(remove(index).pipe(Effect.andThen(remove(`${index}.lock`)))))
             }),
           )
         })
@@ -780,7 +858,7 @@ export const layer: Layer.Layer<
           return { enabled: yield* enabled(), vcs: state.vcs as string }
         })
 
-        return { cleanup, track, patch, restore, revert, diff, diffFull, status }
+        return { cleanup, track, patch, restore, revert, materialize, diff, diffFull, status }
       }),
     )
 
@@ -806,6 +884,9 @@ export const layer: Layer.Layer<
       }),
       revert: Effect.fn("Snapshot.revert")(function* (patches: Patch[]) {
         return yield* InstanceState.useEffect(state, (s) => s.revert(patches))
+      }),
+      materialize: Effect.fn("Snapshot.materialize")(function* (snapshot: string, target: string) {
+        return yield* InstanceState.useEffect(state, (s) => s.materialize(snapshot, target))
       }),
       diff: Effect.fn("Snapshot.diff")(function* (hash: string) {
         return yield* InstanceState.useEffect(state, (s) => s.diff(hash))

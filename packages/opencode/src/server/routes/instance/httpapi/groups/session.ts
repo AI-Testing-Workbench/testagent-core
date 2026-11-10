@@ -85,6 +85,50 @@ export const RevertPayload = Schema.Struct(Struct.omit(SessionRevert.RevertInput
 // testagent_change start - 添加 ResumePayload
 export const ResumePayload = Schema.Struct(Struct.omit(SessionPrompt.ResumeInput.fields, ["sessionID"]))
 // testagent_change end
+// testagent_change start - 单节点文字+工具回放
+const ReplayStep = Schema.Struct({
+  text: Schema.optional(Schema.String),
+  reasoning: Schema.optional(Schema.String),
+  tools: Schema.Array(
+    Schema.Struct({
+      tool: Schema.String,
+      callID: Schema.String,
+      input: Schema.Record(Schema.String, Schema.Any),
+    }),
+  ),
+  reason: Schema.optional(Schema.String),
+})
+const ReplayTurn = Schema.Struct({
+  parts: Schema.Array(
+    Schema.Union([
+      MessageV2.TextPartInput,
+      MessageV2.FilePartInput,
+      MessageV2.AgentPartInput,
+      MessageV2.SubtaskPartInput,
+    ]).annotate({ discriminator: "type" }),
+  ),
+  scripts: Schema.Array(ReplayStep),
+  agent: Schema.optional(Schema.String),
+  model: Schema.optional(
+    Schema.Struct({
+      providerID: ProviderID,
+      modelID: ModelID,
+    }),
+  ),
+})
+export const ReplayPayload = Schema.Struct({
+  messageID: MessageID,
+  partID: PartID,
+  mode: Schema.optional(Schema.Literals(["tools", "loop"])),
+  script: Schema.optional(ReplayStep),
+  scripts: Schema.optional(Schema.Array(ReplayStep)),
+  turns: Schema.optional(Schema.Array(ReplayTurn)),
+})
+export const MaterializePayload = Schema.Struct({
+  snapshot: Schema.String,
+  target: Schema.String,
+})
+// testagent_change end
 export const PermissionResponsePayload = Schema.Struct({
   response: Permission.Reply,
 })
@@ -140,6 +184,8 @@ export const SessionPaths = {
   revert: `${root}/:sessionID/revert`,
   unrevert: `${root}/:sessionID/unrevert`,
   resume: `${root}/:sessionID/resume`, // testagent_change - 添加 resume 路径
+  replay: `${root}/:sessionID/replay`, // testagent_change
+  materialize: `${root}/:sessionID/snapshot/materialize`, // testagent_change
   clearContext: `${root}/:sessionID/context-clear`, // testagent_change - 清空上下文路径
   contextExtract: `${root}/:sessionID/context-extract`, // testagent_change - 投影后的轻量上下文路径
   permissions: `${root}/:sessionID/permissions/:permissionID`,
@@ -466,6 +512,31 @@ export const SessionApi = HttpApi.make("session")
             identifier: "session.resume",
             summary: "Resume message generation",
             description: "Continue generating from an existing assistant message without creating a new message.",
+          }),
+        ),
+        HttpApiEndpoint.post("replay", SessionPaths.replay, {
+          params: { sessionID: SessionID },
+          payload: ReplayPayload,
+          success: described(MessageV2.WithParts, "Replayed message"),
+          error: [HttpApiError.BadRequest, HttpApiError.NotFound],
+        }).annotateMerge(
+          OpenApi.annotations({
+            identifier: "session.replay",
+            summary: "Replay a model step",
+            description:
+              "Replay a recorded model step. Default mode re-runs tools without calling the LLM. Loop mode feeds recorded output through the real agent loop.",
+          }),
+        ),
+        HttpApiEndpoint.post("materialize", SessionPaths.materialize, {
+          params: { sessionID: SessionID },
+          payload: MaterializePayload,
+          success: described(Schema.Boolean, "Snapshot materialized"),
+          error: [HttpApiError.BadRequest, HttpApiError.NotFound],
+        }).annotateMerge(
+          OpenApi.annotations({
+            identifier: "session.materialize",
+            summary: "Materialize a snapshot",
+            description: "Write a session snapshot into a target directory without changing the original workspace.",
           }),
         ),
         // testagent_change end

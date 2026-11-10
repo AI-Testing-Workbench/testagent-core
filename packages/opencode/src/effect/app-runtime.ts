@@ -54,6 +54,7 @@ import { SyncEvent } from "@/sync"
 import { Npm } from "@opencode-ai/core/npm"
 import { memoMap } from "@opencode-ai/core/effect/memo-map"
 import { WorktreeDiff } from "@/testagent/review/worktree-diff" // testagent_change
+import { SessionReplay } from "@/testagent/session-replay" // testagent_change
 
 export const AppLayer = Layer.mergeAll(
   Npm.defaultLayer,
@@ -106,6 +107,7 @@ export const AppLayer = Layer.mergeAll(
   SessionShare.defaultLayer,
   SyncEvent.defaultLayer,
   WorktreeDiff.defaultLayer, // testagent_change
+  SessionReplay.defaultLayer, // testagent_change
 ).pipe(Layer.provideMerge(InstanceLayer.layer), Layer.provideMerge(Observability.layer))
 
 const rt = ManagedRuntime.make(AppLayer, { memoMap })

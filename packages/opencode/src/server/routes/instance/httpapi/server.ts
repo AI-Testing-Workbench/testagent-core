@@ -52,6 +52,7 @@ import { lazy } from "@/util/lazy"
 import { Vcs } from "@/project/vcs"
 import { Worktree } from "@/worktree"
 import { WorktreeDiff } from "@/testagent/review/worktree-diff"
+import { SessionReplay } from "@/testagent/session-replay"
 import { Workspace } from "@/control-plane/workspace"
 import { CorsConfig, isAllowedCorsOrigin, type CorsOptions } from "@/server/cors"
 import * as Log from "@opencode-ai/core/util/log"
@@ -226,6 +227,7 @@ export function createRoutes(corsOptions?: CorsOptions) {
       Vcs.defaultLayer,
       Workspace.defaultLayer,
       WorktreeDiff.defaultLayer,
+      SessionReplay.defaultLayer,
       Worktree.appLayer,
       Bus.layer,
       AppFileSystem.defaultLayer,

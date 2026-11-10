@@ -44,6 +44,7 @@ import { Permission } from "@/permission"
 import { Yolo } from "@/testagent/yolo"
 import { YoloPrompt } from "@/testagent/yolo-prompt"
 import { Duration } from "effect"
+import { ReplayScript } from "@/testagent/replay-script"
 
 // YOLO 错误自动续跑：仅瞬态 API/未知流错误可恢复，≤3 次、2s 起指数退避；
 // abort/鉴权/结构化/溢出等确定性失败不复活（交给重试层或按原逻辑终止）
@@ -1626,6 +1627,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
             lastAssistant.parentID === lastUser.id
             // testagent_change end
           ) {
+            if (!ReplayScript.pending(sessionID)) { // testagent_change
             // testagent_change start - YOLO completion guard（移植 cline agent-runtime 的
             // requireCompletionTool 机制，见 agents/src/agent-runtime.ts L791-812）：
             // cline 下模型零 tool_calls 且未调用 submit_and_exit 时注入 [SYSTEM] 提醒并 continue，
@@ -1681,6 +1683,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
             })
             // testagent_change end
             break
+            }
           }
 
           step++
@@ -1725,7 +1728,8 @@ NOTE: At any point in time through this workflow you should feel free to ask the
 
           if (lastFinished && lastFinished.summary !== true) {
             const cfg = yield* config.get()
-            if (cfg.compaction?.auto !== false) {
+            // testagent_change - skip auto-compact while a loop replay script is armed
+            if (cfg.compaction?.auto !== false && !ReplayScript.live(sessionID)) {
               const agent = yield* agents.get(lastUser.agent)
               if (agent) {
                 const current = yield* estimateContext({ agent, model, messages: msgs })
@@ -1866,6 +1870,10 @@ NOTE: At any point in time through this workflow you should feel free to ask the
               model,
               toolChoice: format.type === "json_schema" ? "required" : undefined,
             })
+            // testagent_change start - stop after mocked loop replay step
+            if (ReplayScript.pending(sessionID)) return "continue" as const
+            if (ReplayScript.spent(sessionID)) return "break" as const
+            // testagent_change end
 
             if (structured !== undefined) {
               handle.message.structured = structured

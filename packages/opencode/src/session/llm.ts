@@ -26,6 +26,10 @@ import { EffectBridge } from "@/effect/bridge"
 // testagent_change start - YOLO 模式状态
 import { Yolo } from "@/testagent/yolo"
 // testagent_change end
+// testagent_change start - loop replay mock model
+import { ReplayScript } from "@/testagent/replay-script"
+import { ReplayModel } from "@/testagent/replay-model"
+// testagent_change end
 import * as Option from "effect/Option"
 import * as OtelTracer from "@effect/opentelemetry/Tracer"
 // testagent_change start - Global fallback for thinkingEnabled when user message field is lost during rewrites
@@ -94,7 +98,7 @@ const live: Layer.Layer<
         providerID: input.model.providerID,
       })
 
-      const [language, cfg, item, info] = yield* Effect.all(
+      const [fetched, cfg, item, info] = yield* Effect.all(
         [
           provider.getLanguage(input.model),
           config.get(),
@@ -103,6 +107,10 @@ const live: Layer.Layer<
         ],
         { concurrency: "unbounded" },
       )
+      // testagent_change start - loop replay uses recorded model output
+      const replayed = ReplayScript.pull(input.sessionID, { small: input.small === true, agent: input.agent.name })
+      const language = replayed ? ReplayModel.create(replayed) : fetched
+      // testagent_change end
 
       // TODO: move this to a proper hook
       const isOpenaiOauth = item.id === "openai" && info?.type === "oauth"
