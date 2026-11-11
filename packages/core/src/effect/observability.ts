@@ -390,5 +390,8 @@ export const modelOutputAbnormal = Metric.counter("session.model.output_abnormal
 export const modelDuplicateOutput = Metric.counter("session.model.duplicate_output", { // testagent_change
   description: "Model returned identical content 3 times consecutively, auto-stopped to prevent infinite loop", // testagent_change
 }) // testagent_change
+export const modelColonTerminated = Metric.counter("session.model.colon_terminated", { // testagent_change
+  description: "Model text output ended with non-terminator (colon, comma, etc) or empty, or last line only has text and spaces, no tool_calls - possible abnormal termination", // testagent_change
+}) // testagent_change
 
 export const Observability = { enabled, layer }

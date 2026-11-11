@@ -39,6 +39,7 @@ import {
   tokenTotal,
   sessionLlmDuration,
   modelOutputAbnormal, // testagent_change
+  modelColonTerminated, // testagent_change
 } from "@opencode-ai/core/effect/observability" // testagent_change
 
 const DOOM_LOOP_THRESHOLD = 3
@@ -559,6 +560,59 @@ export const layer: Layer.Layer<
                   }
                 }
                 ctx.blocked = true
+              }
+            }
+            // testagent_change end
+            
+            // testagent_change start - 检测文本以非结束符号结束或为空且无 tool_calls 的情况
+            // 当模型返回的文本内容 trim 后以非结束符号（冒号、逗号、顿号、分号等）结束，或为空串，或最后一行只有文本字符和空格，且没有工具调用时，
+            // 这可能是模型异常终止的信号，需要记录到 metric 中。
+            const parts = MessageV2.parts(ctx.assistantMessage.id)
+            const textParts = parts.filter((p) => p.type === "text") as MessageV2.TextPart[]
+            const toolParts = parts.filter((p) => p.type === "tool")
+            
+            // 只有在没有工具调用的情况下才检测
+            if (toolParts.length === 0) {
+              // 收集所有文本内容
+              const fullText = textParts.map((p) => p.text).join("")
+              const trimmedText = fullText.trim()
+              
+              // 检测是否以非结束符号结束（冒号、逗号、顿号、分号、左括号等）
+              // 不包括右括号、引号、省略号和破折号，因为它们可能是正常结束
+              const endsWithNonTerminator = /[:：,，、;；(（\[【{｛<《]$/.test(trimmedText)
+              
+              // 获取最后一行
+              const lines = trimmedText.split("\n")
+              const lastLine = lines[lines.length - 1] || ""
+              const trimmedLastLine = lastLine.trim()
+              
+              // 检测最后一行是否只包含字母、数字、空格、中文字符（无任何符号）
+              const onlyTextAndSpaces = /^[\w\s\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff]+$/
+              const lastLineOnlyText = trimmedLastLine.length > 0 && onlyTextAndSpaces.test(lastLine)
+              
+              // 检测是否以非结束符号结束、为空串、或最后一行只有文本和空格
+              if (endsWithNonTerminator || trimmedText === "" || lastLineOnlyText) {
+                // 记录冒号终止统计到 metric
+                yield* Metric.update(
+                  Metric.withAttributes(modelColonTerminated, {
+                    sessionID: ctx.sessionID,
+                    modelID: ctx.model.id,
+                    providerID: ctx.model.providerID,
+                    finishReason: value.finishReason,
+                  }),
+                  1,
+                )
+                
+                log.warn("检测到模型返回异常终止：文本以非结束符号结束、为空或最后一行只有文本，无 tool_calls", {
+                  sessionID: ctx.sessionID,
+                  messageID: ctx.assistantMessage.id,
+                  modelID: ctx.model.id,
+                  providerID: ctx.model.providerID,
+                  finishReason: value.finishReason,
+                  textLength: trimmedText.length,
+                  lastLine: lastLine.slice(0, 100),
+                  lastChars: trimmedText.length > 0 ? trimmedText.slice(-20) : "(empty)",
+                })
               }
             }
             // testagent_change end
