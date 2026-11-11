@@ -11,6 +11,8 @@ import { InstanceState } from "@/effect/instance-state"
 import { assertExternalDirectoryEffect } from "./external-directory"
 import { Instruction } from "../session/instruction"
 import { isPdfAttachment, sniffAttachmentMime } from "@/util/media"
+import { Metric } from "effect" // testagent_change
+import { readFileNotFound } from "@opencode-ai/core/effect/observability" // testagent_change
 // testagent_change start
 import { Sheet } from "@/testagent/sheet"
 import { Doc } from "@/testagent/doc"
@@ -47,7 +49,7 @@ export const ReadTool = Tool.define(
     const lsp = yield* LSP.Service
     const scope = yield* Scope.Scope
 
-    const miss = Effect.fn("ReadTool.miss")(function* (filepath: string) {
+    const miss = Effect.fn("ReadTool.miss")(function* (filepath: string, ctx: Tool.Context) { // testagent_change - add ctx param
       const dir = path.dirname(filepath)
       const base = path.basename(filepath)
       const items = yield* fs.readDirectory(dir).pipe(
@@ -69,6 +71,7 @@ export const ReadTool = Tool.define(
         )
       }
 
+      yield* Metric.update(Metric.withAttributes(readFileNotFound, { session_id: ctx.sessionID }), 1) // testagent_change
       return yield* Effect.fail(new Error(`File not found: ${filepath}`))
     })
 
@@ -187,7 +190,9 @@ export const ReadTool = Tool.define(
         metadata: {},
       })
 
-      if (!stat) return yield* miss(filepath)
+      if (!stat) {
+        return yield* miss(filepath, ctx) // testagent_change - pass ctx
+      }
 
       if (stat.type === "Directory") {
         const items = yield* list(filepath)

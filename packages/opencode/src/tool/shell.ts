@@ -1,4 +1,5 @@
 import { Effect, Stream } from "effect"
+import { Metric } from "effect" // testagent_change
 import os from "os"
 import { createWriteStream } from "node:fs"
 import * as Tool from "./tool"
@@ -25,6 +26,7 @@ import { ChildProcess } from "effect/unstable/process"
 import { ChildProcessSpawner } from "effect/unstable/process/ChildProcessSpawner"
 import { ShellPrompt, type Parameters } from "./shell/prompt"
 import { BashArity } from "@/permission/arity"
+import { shellNoOutput } from "@opencode-ai/core/effect/observability" // testagent_change
 
 // testagent_change start: Import for reading python config and checking file existence
 import { readFile, access } from "node:fs/promises"
@@ -818,7 +820,10 @@ export const ShellTool = Tool.define(
       }
 
       let output = end.text
-      if (!output) output = "(no output)"
+      if (!output) {
+        yield* Metric.update(Metric.withAttributes(shellNoOutput, { session_id: ctx.sessionID }), 1) // testagent_change
+        output = "(no output)"
+      }
 
       if (cut && file) {
         output = `...output truncated...\n\nFull output saved to: ${file}\n\n` + output
