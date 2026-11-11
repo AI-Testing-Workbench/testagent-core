@@ -390,6 +390,39 @@ export const modelOutputAbnormal = Metric.counter("session.model.output_abnormal
 export const modelDuplicateOutput = Metric.counter("session.model.duplicate_output", { // testagent_change
   description: "Model returned identical content 3 times consecutively, auto-stopped to prevent infinite loop", // testagent_change
 }) // testagent_change
+export const modelColonTerminated = Metric.counter("session.model.colon_terminated", { // testagent_change
+  description: "Model text output ended with non-terminator (colon, comma, etc) or empty, or last line only has text and spaces, no tool_calls - possible abnormal termination", // testagent_change
+}) // testagent_change
+export const grepNoFilesFound = Metric.counter("tool.grep.no_files_found", { // testagent_change
+  description: "Grep tool calls that found no matching files", // testagent_change
+}) // testagent_change
+export const readFileNotFound = Metric.counter("tool.read.file_not_found", { // testagent_change
+  description: "Read tool calls where the file was not found", // testagent_change
+}) // testagent_change
+export const globNoFilesFound = Metric.counter("tool.glob.no_files_found", { // testagent_change
+  description: "Glob tool calls that found no matching files", // testagent_change
+}) // testagent_change
+export const shellNoOutput = Metric.counter("tool.shell.no_output", { // testagent_change
+  description: "Shell tool calls that produced no output", // testagent_change
+}) // testagent_change
+export const skillNotFound = Metric.counter("tool.skill.not_found", { // testagent_change
+  description: "Skill tool calls where the requested skill was not found", // testagent_change
+}) // testagent_change
+export const editFileNotFound = Metric.counter("tool.edit.file_not_found", { // testagent_change
+  description: "Edit tool calls where the target file was not found", // testagent_change
+}) // testagent_change
+export const editPathIsDirectory = Metric.counter("tool.edit.path_is_directory", { // testagent_change
+  description: "Edit tool calls where the target path is a directory instead of a file", // testagent_change
+}) // testagent_change
+export const taskUnknownAgentType = Metric.counter("tool.task.unknown_agent_type", { // testagent_change
+  description: "Task tool calls where the specified subagent type is not valid", // testagent_change
+}) // testagent_change
+export const webfetchInvalidUrlScheme = Metric.counter("tool.webfetch.invalid_url_scheme", { // testagent_change
+  description: "Webfetch tool calls where the URL does not start with http:// or https://", // testagent_change
+}) // testagent_change
+export const webfetchResponseTooLarge = Metric.counter("tool.webfetch.response_too_large", { // testagent_change
+  description: "Webfetch tool calls where the response exceeds the 5MB size limit", // testagent_change
+}) // testagent_change
 
 // testagent_change start - bash tool shell instrumentation.
 // Measures whether a POSIX-compatible shell (ps-bash) fixes the failures that occur

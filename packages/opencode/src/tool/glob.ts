@@ -1,8 +1,9 @@
 import path from "path"
-import { Effect, Option, Schema } from "effect"
+import { Effect, Metric, Option, Schema } from "effect" // testagent_change - add Metric
 import * as Stream from "effect/Stream"
 import { InstanceState } from "@/effect/instance-state"
 import { AppFileSystem } from "@opencode-ai/core/filesystem"
+import { globNoFilesFound } from "@opencode-ai/core/effect/observability" // testagent_change
 import { Ripgrep } from "../file/ripgrep"
 import { assertExternalDirectoryEffect } from "./external-directory"
 import DESCRIPTION from "./glob.txt"
@@ -72,7 +73,10 @@ export const GlobTool = Tool.define(
           files.sort((a, b) => b.mtime - a.mtime)
 
           const output = []
-          if (files.length === 0) output.push("No files found")
+          if (files.length === 0) {
+            yield* Metric.update(Metric.withAttributes(globNoFilesFound, { session_id: ctx.sessionID }), 1) // testagent_change
+            output.push("No files found")
+          }
           if (files.length > 0) {
             output.push(...files.map((file) => file.path))
             if (truncated) {
