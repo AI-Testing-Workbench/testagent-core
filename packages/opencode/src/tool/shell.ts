@@ -18,6 +18,7 @@ import { Config } from "@/config/config"
 import { Flag } from "@opencode-ai/core/flag/flag"
 import { Shell } from "@/shell/shell"
 import { ShellID } from "./shell/id"
+import { MessageV2 } from "@/session/message-v2"
 
 import * as Truncate from "./truncate"
 import { Plugin } from "@/plugin"
@@ -25,6 +26,8 @@ import { ChildProcess } from "effect/unstable/process"
 import { ChildProcessSpawner } from "effect/unstable/process/ChildProcessSpawner"
 import { ShellPrompt, type Parameters } from "./shell/prompt"
 import { BashArity } from "@/permission/arity"
+// testagent_change - shell call telemetry for the ps-bash migration
+import * as ShellTelemetry from "@/testagent/shell/telemetry"
 
 // testagent_change start: Import for reading python config and checking file existence
 import { readFile, access } from "node:fs/promises"
@@ -348,6 +351,28 @@ function shouldUseWindowsShellDecoding(): boolean {
   // Git Bash and other POSIX shells can also output GBK-encoded text
   // when executing Windows-native commands like powershell.exe
   return process.platform === "win32"
+}
+// testagent_change end
+
+// testagent_change start - detect a ps-bash launch failure so a broken bundle degrades
+// to the ambient shell. Only .NET host loader errors qualify: a retry re-executes the
+// command, so a normal non-zero exit must never be treated as a ps-bash failure.
+function psBashFailed(result: { metadata?: { exit?: number | null; timeout?: boolean }; output?: string }) {
+  if (result.metadata?.exit === 0) return
+  if (result.metadata?.timeout) return
+  const output = result.output ?? ""
+  const patterns = [
+    "ps-bash-host",
+    "You must install or update .NET",
+    "Framework not found",
+    "The application to execute does not exist",
+    "Unable to load DLL",
+    "hostfxr",
+    "coreclr",
+  ]
+  for (const pattern of patterns) {
+    if (output.includes(pattern)) return pattern
+  }
 }
 // testagent_change end
 
@@ -693,6 +718,7 @@ export const ShellTool = Tool.define(
       }
       // testagent_change end
       
+      const started = Date.now() // testagent_change - shell call duration
       const limits = yield* trunc.limits()
       const keep = limits.maxBytes * 2
       let full = ""
@@ -838,6 +864,27 @@ export const ShellTool = Tool.define(
         )
       }
 
+      // testagent_change start - record shell/style/failure so we can measure whether
+      // ps-bash actually stops POSIX commands from failing on Windows PowerShell.
+      const msg = yield* Effect.try({
+        try: () => MessageV2.get({ sessionID: ctx.sessionID, messageID: ctx.messageID }),
+        catch: () => new Error("message not found"),
+      }).pipe(Effect.catch(() => Effect.succeed(undefined)))
+      yield* Effect.forEach(
+        ShellTelemetry.record({
+          shell: input.shell,
+          command: input.command,
+          output,
+          code,
+          ms: Date.now() - started,
+          modelID: msg?.info.role === "assistant" ? msg.info.modelID : undefined,
+          providerID: msg?.info.role === "assistant" ? msg.info.providerID : undefined,
+        }),
+        (update) => update,
+        { discard: true },
+      )
+      // testagent_change end
+
       return {
         title: input.description,
         metadata: {
@@ -889,18 +936,31 @@ export const ShellTool = Tool.define(
                 }),
               )
 
-              return yield* run(
-                {
-                  shell,
-                  command: params.command,
-                  cwd,
-                  env: yield* shellEnv(ctx, cwd),
-                  timeout,
-                  description: params.description,
-                  background: params.background ?? false,
-                },
-                ctx,
-              )
+              const env = yield* shellEnv(ctx, cwd)
+              const input = {
+                command: params.command,
+                cwd,
+                env,
+                timeout,
+                description: params.description,
+                background: params.background ?? false,
+              }
+              const first = yield* run({ ...input, shell }, ctx)
+              if (!Shell.isPsBash(shell)) return first
+
+              // testagent_change start - a broken ps-bash bundle must not brick the
+              // tool: retry once on the ambient shell and stop selecting ps-bash.
+              const failed = psBashFailed(first)
+              if (!failed) return first
+              Shell.breakPsBash()
+              const next = Shell.rescue()
+              yield* Effect.logInfo(`ps-bash failed (${failed}); retrying with shell="${next}"`)
+              const retry = yield* run({ ...input, shell: next }, ctx)
+              return {
+                ...retry,
+                output: `${retry.output}\n\n<shell_metadata>\nps-bash failed: ${failed}\nFalling back to ${next} for the rest of this session. Commands may hit Windows PowerShell quoting bugs; restart the extension to retry ps-bash.\n</shell_metadata>`,
+              }
+              // testagent_change end
             }),
         }
       })

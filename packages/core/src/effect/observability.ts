@@ -391,4 +391,22 @@ export const modelDuplicateOutput = Metric.counter("session.model.duplicate_outp
   description: "Model returned identical content 3 times consecutively, auto-stopped to prevent infinite loop", // testagent_change
 }) // testagent_change
 
+// testagent_change start - bash tool shell instrumentation.
+// Measures whether a POSIX-compatible shell (ps-bash) fixes the failures that occur
+// when an LLM emits bash syntax while Windows PowerShell executes it. The `shell`
+// attribute is the grouping dimension: powershell/pwsh are the baseline, ps-bash is
+// the treatment. `failure` classifies why a call failed, and `bash_style` marks
+// commands that only make sense in a POSIX shell, which is the population the fix
+// targets.
+export const shellCallTotal = Metric.counter("tool.shell.call.total", {
+  description: "Total bash tool calls, by shell kind and command style",
+})
+export const shellCallFailed = Metric.counter("tool.shell.call.failed", {
+  description: "Bash tool calls that failed, by shell kind, command style and failure class",
+})
+export const shellCallDuration = Metric.gauge("tool.shell.call.duration", {
+  description: "Bash tool call duration (ms), by shell kind",
+})
+// testagent_change end
+
 export const Observability = { enabled, layer }
