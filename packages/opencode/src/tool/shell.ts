@@ -18,6 +18,7 @@ import { Config } from "@/config/config"
 import { Flag } from "@opencode-ai/core/flag/flag"
 import { Shell } from "@/shell/shell"
 import { ShellID } from "./shell/id"
+import { MessageV2 } from "@/session/message-v2"
 
 import * as Truncate from "./truncate"
 import { Plugin } from "@/plugin"
@@ -841,6 +842,10 @@ export const ShellTool = Tool.define(
 
       // testagent_change start - record shell/style/failure so we can measure whether
       // ps-bash actually stops POSIX commands from failing on Windows PowerShell.
+      const msg = yield* Effect.try({
+        try: () => MessageV2.get({ sessionID: ctx.sessionID, messageID: ctx.messageID }),
+        catch: () => new Error("message not found"),
+      }).pipe(Effect.catch(() => Effect.succeed(undefined)))
       yield* Effect.forEach(
         ShellTelemetry.record({
           shell: input.shell,
@@ -848,6 +853,8 @@ export const ShellTool = Tool.define(
           output,
           code,
           ms: Date.now() - started,
+          modelID: msg?.info.role === "assistant" ? msg.info.modelID : undefined,
+          providerID: msg?.info.role === "assistant" ? msg.info.providerID : undefined,
         }),
         (update) => update,
         { discard: true },

@@ -7,7 +7,7 @@
 // 记指标时绝不记录完整命令或输出，只记录归一化特征，避免把业务 URL、参数、
 // 令牌写进遥测。
 
-import { Metric } from "effect"
+import { Effect, Metric } from "effect"
 import {
   shellCallTotal,
   shellCallFailed,
@@ -84,6 +84,10 @@ export interface Report {
   platform?: string
 }
 
+/** 失败时记录命令原文：指标属性带短文本（聚合分析），日志带长文本（排查现场）。 */
+const MAX_LOG = 2_000
+const MAX_ATTR = 200
+
 /** 记录一次 bash 工具调用：总数、风格、失败、耗时，全部带 shell 维度。 */
 export function record(input: Report) {
   const kind = name(input.shell)
@@ -102,7 +106,16 @@ export function record(input: Report) {
     Metric.update(Metric.withAttributes(shellCallDuration, base), Math.max(0, input.ms)),
   ]
   if (failed) {
-    updates.push(Metric.update(Metric.withAttributes(shellCallFailed, { ...base, failure: failed }), 1))
+    const short = input.command.replaceAll("\n", " ")
+    const cmd = short.length > MAX_ATTR ? `${short.slice(0, MAX_ATTR)}…` : short
+    updates.push(Metric.update(Metric.withAttributes(shellCallFailed, { ...base, failure: failed, command: cmd }), 1))
+    const long = input.command.length > MAX_LOG ? `${input.command.slice(0, MAX_LOG)}…` : input.command
+    updates.push(
+      Effect.logWarning(
+        `shell call failed shell="${kind}" style="${styleKind}" failure="${failed}" exit=${input.code ?? "null"} ms=${input.ms} command="${long}"`,
+        { shell: kind, style: styleKind, failure: failed, exit: input.code ?? null, ms: input.ms, command: long },
+      ),
+    )
   }
   return updates
 }
