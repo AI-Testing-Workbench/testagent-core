@@ -85,6 +85,17 @@ export const GoalCreateResult = Schema.Struct({
   objective: Schema.String,
   status: Schema.String,
 })
+
+export const GoalAutoContinuePayload = Schema.Struct({
+  sessionID: Schema.String,
+  /** true = 抑制该会话的自动续跑；false = 解除抑制 */
+  suppressed: Schema.Boolean,
+})
+
+export const GoalAutoContinueResult = Schema.Struct({
+  applied: Schema.Boolean,
+  suppressed: Schema.Boolean,
+})
 // testagent_change end
 
 // testagent_change start - 服务器 Basic 认证凭据（= web UI 分享链接里的 auth_token）
@@ -176,6 +187,7 @@ export const TestagentPaths = {
   goalSet: "/testagent/goal", // testagent_change
   goalGet: "/testagent/goal", // testagent_change
   goalCreate: "/testagent/goal/create", // testagent_change
+  goalAutoContinue: "/testagent/goal/auto-continue", // testagent_change
 } as const
 
 export const TestagentApi = HttpApi.make("testagent").add(
@@ -378,6 +390,19 @@ export const TestagentApi = HttpApi.make("testagent").add(
           summary: "Create a goal for a session",
           description:
             "Create (or replace) the long-running goal of the given session. Replaces an existing open goal so that repeated calls stay idempotent.",
+        }),
+      ),
+    )
+    .add(
+      HttpApiEndpoint.post("goalAutoContinue", TestagentPaths.goalAutoContinue, {
+        payload: GoalAutoContinuePayload,
+        success: described(GoalAutoContinueResult, "Goal auto-continue suppression applied"),
+      }).annotateMerge(
+        OpenApi.annotations({
+          identifier: "testagent.goal.auto_continue",
+          summary: "Suppress or release goal auto-continue for a session",
+          description:
+            "Control whether the goal plugin may auto-continue the given session when it goes idle. Suppress it when an external orchestrator drives the session turn-taking, so the two loops do not interleave prompts on the same session.",
         }),
       ),
     )

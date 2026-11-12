@@ -20,6 +20,8 @@ import {
   YoloSetResult, // testagent_change
   GoalCreatePayload, // testagent_change
   GoalCreateResult, // testagent_change
+  GoalAutoContinuePayload, // testagent_change
+  GoalAutoContinueResult, // testagent_change
   GoalGetResult, // testagent_change
   GoalSetPayload, // testagent_change
   GoalSetResult, // testagent_change
@@ -248,6 +250,21 @@ export const testagentHandlers = HttpApiBuilder.group(RootHttpApi, "testagent", 
       }
       return result
     })
+
+    // 抑制 / 解除指定会话的 goal 自动续跑。
+    // 外部编排器（如 SDT 阶段链）自己驱动回合时必须抑制，否则两套循环会往同一会话
+    // 交错注入 prompt。
+    const goalAutoContinue = Effect.fn("TestagentHttpApi.goalAutoContinue")(function* (ctx: {
+      payload: typeof GoalAutoContinuePayload.Type
+    }) {
+      if (ctx.payload.suppressed) Goal.suppressAutoContinue(ctx.payload.sessionID)
+      else Goal.releaseAutoContinue(ctx.payload.sessionID)
+      const result: typeof GoalAutoContinueResult.Type = {
+        applied: true,
+        suppressed: ctx.payload.suppressed,
+      }
+      return result
+    })
     // testagent_change end
 
     // testagent_change start - web UI 分享链接所需凭据（与 extension 的 share-link.ts 算法一致）
@@ -280,5 +297,6 @@ export const testagentHandlers = HttpApiBuilder.group(RootHttpApi, "testagent", 
       .handle("goalSet", goalSet) // testagent_change
       .handle("goalGet", goalGet) // testagent_change
       .handle("goalCreate", goalCreate) // testagent_change
+      .handle("goalAutoContinue", goalAutoContinue) // testagent_change
   }),
 )
