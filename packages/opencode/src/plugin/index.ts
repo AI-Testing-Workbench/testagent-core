@@ -262,10 +262,11 @@ export const layer = Layer.effect(
             yield* Effect.logInfo("Langfuse 插件已被配置禁用")
             continue
           }
-          if (plugin === GoalPlugin && cfg.goal?.enabled !== true) {
-            yield* Effect.logInfo("Goal plugin disabled by config")
-            continue
-          }
+          // testagent_change start - Goal 插件改为常驻加载 + 运行时门控。
+          // 原先按 cfg.goal.enabled 跳过插件，导致 goal 能力只能在服务器启动时决定，
+          // 运行时开关（PUT /testagent/goal）无从生效（插件实例化只在实例初始化时发生）。
+          // 现在插件始终加载，真正的开关下沉到插件内部（Goal.isEnabled()）。
+          // cfg.goal 保留为插件的静态 options（如 auto_continue）。
           // testagent_change end
           yield* Effect.logInfo("正在加载内置插件", { name: plugin.name })
           const opts = plugin === GoalPlugin ? cfg.goal : undefined

@@ -13,6 +13,9 @@ import {
   setGoalStatus,
 } from "./state"
 import { compactionContext, continuationPrompt, systemReminder } from "./prompts"
+// testagent_change start - Goal 运行时开关（全局能力开关）
+import { Goal } from "@/testagent/goal"
+// testagent_change end
 
 type Options = {
   auto_continue?: boolean
@@ -48,6 +51,16 @@ const GOAL_TOOL_IDS = ["get_goal", "create_goal", "set_goal", "update_goal", "up
 const activeContinuations = new Set<string>()
 const commandSessions = new Set<string>()
 
+// testagent_change start - 已注册的 goal 命令名（命令名可配，故按集合登记）。
+// Command 服务在读取命令列表时据此在 Goal 能力关闭时隐藏 /goal，无需失效配置缓存
+// （失效会连带把插件注册的内存态命令冲掉）。
+const goalCommandNames = new Set<string>()
+
+export function isGoalCommand(name: string): boolean {
+  return goalCommandNames.has(name)
+}
+// testagent_change end
+
 function goalCommandTemplate(commandName: string) {
   return `TestAgent goal mode command "/${commandName}" was invoked.
 
@@ -78,12 +91,20 @@ function commandNameFromOptions(options?: Options) {
 
 function registerDesktopCommand(config: Config, commandName: string) {
   config.command ??= {}
-  if (config.command[commandName]) return
+  if (config.command[commandName]) {
+    // testagent_change start - 已存在同名命令时也要登记，便于读取侧按开关隐藏
+    goalCommandNames.add(commandName)
+    // testagent_change end
+    return
+  }
   config.command[commandName] = {
     description: "Set or view the long-running session goal",
     template: goalCommandTemplate(commandName),
     subtask: false,
   }
+  // testagent_change start
+  goalCommandNames.add(commandName)
+  // testagent_change end
 }
 
 function textFromPart(part: unknown): string {
@@ -189,6 +210,15 @@ function disableGoalTools(message: { info: { role?: string; tools?: Record<strin
   }
 }
 
+// testagent_change start - Goal 能力未开启时的守卫。
+// 工具列表过滤（disableGoalTools）只在 turn 的第 2 步起生效——resolveTools 早于
+// messages.transform 执行，第 1 步的模型工具列表里 goal 工具摘不掉。
+// 用 execute 里的显式守卫兜住这条路径。
+function assertGoalEnabled() {
+  if (!Goal.isEnabled()) throw new Error("Goal mode is disabled on this server")
+}
+// testagent_change end
+
 export const GoalPlugin: Plugin = async ({ client }, options?: Options) => {
   const autoContinue = options?.auto_continue ?? true
   const maxAutoTurns = options?.max_auto_turns ?? DEFAULT_MAX_AUTO_TURNS
@@ -208,6 +238,7 @@ export const GoalPlugin: Plugin = async ({ client }, options?: Options) => {
           "Get the current goal for this OpenCode session, including status, observed token usage, and elapsed-time usage.",
         args: {},
         async execute(_args, context) {
+          assertGoalEnabled()
           return JSON.stringify({ goal: await getGoal(context.sessionID) }, null, 2)
         },
       },
@@ -218,6 +249,7 @@ export const GoalPlugin: Plugin = async ({ client }, options?: Options) => {
           objective: z.string().min(1).max(4000).describe("The concrete objective to start pursuing."),
         },
         async execute(args, context) {
+          assertGoalEnabled()
           const input = args as CreateGoalArgs
           const goal = await createGoal(context.sessionID, input.objective)
           return JSON.stringify({ goal }, null, 2)
@@ -230,6 +262,7 @@ export const GoalPlugin: Plugin = async ({ client }, options?: Options) => {
           objective: z.string().min(1).max(4000).describe("The model-formulated concrete objective to start pursuing."),
         },
         async execute(args, context) {
+          assertGoalEnabled()
           const input = args as CreateGoalArgs
           const goal = await createGoal(context.sessionID, input.objective)
           return JSON.stringify({ goal }, null, 2)
@@ -256,6 +289,7 @@ export const GoalPlugin: Plugin = async ({ client }, options?: Options) => {
             .describe("Required when status is unmet. Explain the concrete blocker or impossibility."),
         },
         async execute(args, context) {
+          assertGoalEnabled()
           const input = args as UpdateGoalArgs
           if (input.status === "complete") {
             const goal = await completeGoal(context.sessionID, input.evidence ?? "")
@@ -273,6 +307,7 @@ export const GoalPlugin: Plugin = async ({ client }, options?: Options) => {
           status: z.enum(["active", "paused"]).describe("active resumes a goal; paused pauses it without clearing it."),
         },
         async execute(args, context) {
+          assertGoalEnabled()
           const input = args as { status: "active" | "paused" }
           const goal = await setGoalStatus(context.sessionID, input.status)
           return JSON.stringify({ goal }, null, 2)
@@ -282,14 +317,17 @@ export const GoalPlugin: Plugin = async ({ client }, options?: Options) => {
         description: "Clear the current TestAgent goal for this session when the user explicitly asks to clear it.",
         args: {},
         async execute(_args, context) {
+          assertGoalEnabled()
           return JSON.stringify({ cleared: await clearGoal(context.sessionID) }, null, 2)
         },
       },
     },
     async "command.execute.before"(input, _output) {
-      if (input.command === commandName) {
+      // testagent_change start - Goal 能力关闭时，/goal 命令不应给会话解锁 goal 工具
+      if (input.command === commandName && Goal.isEnabled()) {
         commandSessions.add(input.sessionID)
       }
+      // testagent_change end
     },
     async "experimental.chat.messages.transform"(input, output) {
       const sessionID =
@@ -299,6 +337,13 @@ export const GoalPlugin: Plugin = async ({ client }, options?: Options) => {
       if (!sessionID) return
       await accountUsage(sessionID, tokensFromMessages(output.messages))
       const goal = await getGoal(sessionID)
+      // testagent_change start - Goal 能力关闭时一律禁用 goal 工具（即便会话有 active 目标）
+      if (!Goal.isEnabled()) {
+        const message = output.messages.findLast((message) => message.info.role === "user")
+        if (message) disableGoalTools(message)
+        return
+      }
+      // testagent_change end
       const enabled = commandSessions.delete(sessionID) || goal?.status === "active"
       if (enabled) return
       const message = output.messages.findLast((message) => message.info.role === "user")
@@ -306,6 +351,9 @@ export const GoalPlugin: Plugin = async ({ client }, options?: Options) => {
     },
     async "experimental.chat.system.transform"(input, output) {
       if (typeof input.sessionID !== "string") return
+      // testagent_change start - Goal 能力关闭时不注入目标提醒
+      if (!Goal.isEnabled()) return
+      // testagent_change end
       mergeSystemReminder(output, systemReminder(await getGoal(input.sessionID)))
     },
     async "experimental.session.compacting"(input, output) {
@@ -317,6 +365,12 @@ export const GoalPlugin: Plugin = async ({ client }, options?: Options) => {
       if (!autoContinue || !isIdleEvent(event as never)) return
       const sessionID = sessionIDFromEvent(event as never)
       if (!sessionID) return
+      // testagent_change start - Goal 能力关闭 / 会话被抑制时不做自动续跑。
+      // SDT 阶段链自己驱动回合（阶段链 + gate + retry），goal 的自动续跑会往同一会话
+      // 注入 promptAsync 与阶段推进交错，故由 SDT 侧按 session 抑制。
+      if (!Goal.isEnabled()) return
+      if (Goal.isAutoContinueSuppressed(sessionID)) return
+      // testagent_change end
       if (activeContinuations.has(sessionID)) return
       activeContinuations.add(sessionID)
       try {

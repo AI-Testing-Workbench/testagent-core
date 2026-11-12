@@ -62,6 +62,31 @@ export const YoloGetResult = Schema.Struct({
 })
 // testagent_change end
 
+// testagent_change start - Goal 模式开关 payload（全局能力开关，与 session 无关）
+export const GoalSetPayload = Schema.Struct({
+  enabled: Schema.Boolean,
+})
+
+export const GoalSetResult = Schema.Struct({
+  applied: Schema.Boolean,
+})
+
+export const GoalGetResult = Schema.Struct({
+  enabled: Schema.Boolean,
+})
+
+export const GoalCreatePayload = Schema.Struct({
+  sessionID: Schema.String,
+  objective: Schema.String,
+})
+
+export const GoalCreateResult = Schema.Struct({
+  created: Schema.Boolean,
+  objective: Schema.String,
+  status: Schema.String,
+})
+// testagent_change end
+
 // testagent_change start - 服务器 Basic 认证凭据（= web UI 分享链接里的 auth_token）
 export const ServerAuthResult = Schema.Struct({
   username: Schema.String,
@@ -148,6 +173,9 @@ export const TestagentPaths = {
   agentOverrideClear: "/testagent/agent/override",
   yoloSet: "/testagent/yolo", // testagent_change
   yoloGet: "/testagent/yolo", // testagent_change
+  goalSet: "/testagent/goal", // testagent_change
+  goalGet: "/testagent/goal", // testagent_change
+  goalCreate: "/testagent/goal/create", // testagent_change
 } as const
 
 export const TestagentApi = HttpApi.make("testagent").add(
@@ -311,6 +339,45 @@ export const TestagentApi = HttpApi.make("testagent").add(
           identifier: "testagent.yolo.get",
           summary: "Get YOLO mode (global)",
           description: "Query whether YOLO mode is currently enabled.",
+        }),
+      ),
+    )
+    // testagent_change end
+    // testagent_change start - Goal 模式开关（全局能力开关）+ 为会话建目标
+    .add(
+      HttpApiEndpoint.put("goalSet", TestagentPaths.goalSet, {
+        payload: GoalSetPayload,
+        success: described(GoalSetResult, "Goal mode set successfully"),
+      }).annotateMerge(
+        OpenApi.annotations({
+          identifier: "testagent.goal.set",
+          summary: "Toggle Goal mode (global)",
+          description:
+            "Enable or disable the goal tracking capability globally. When enabled, sessions can hold a long-running goal with completion-audit tooling. The goal itself is tracked per session and is unaffected by this switch. State resets on server restart.",
+        }),
+      ),
+    )
+    .add(
+      HttpApiEndpoint.get("goalGet", TestagentPaths.goalGet, {
+        success: described(GoalGetResult, "Current Goal mode"),
+      }).annotateMerge(
+        OpenApi.annotations({
+          identifier: "testagent.goal.get",
+          summary: "Get Goal mode (global)",
+          description: "Query whether the goal tracking capability is currently enabled.",
+        }),
+      ),
+    )
+    .add(
+      HttpApiEndpoint.post("goalCreate", TestagentPaths.goalCreate, {
+        payload: GoalCreatePayload,
+        success: described(GoalCreateResult, "Goal created successfully"),
+      }).annotateMerge(
+        OpenApi.annotations({
+          identifier: "testagent.goal.create",
+          summary: "Create a goal for a session",
+          description:
+            "Create (or replace) the long-running goal of the given session. Replaces an existing open goal so that repeated calls stay idempotent.",
         }),
       ),
     )

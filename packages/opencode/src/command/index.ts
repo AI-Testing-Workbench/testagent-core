@@ -10,6 +10,10 @@ import { withStatics } from "@/util/schema"
 import { Config } from "@/config/config"
 import { MCP } from "../mcp"
 import { Skill } from "../skill"
+// testagent_change start - Goal 能力关闭时隐藏 /goal 命令
+import { Goal } from "@/testagent/goal"
+import { isGoalCommand } from "@/plugin/testagent-goal/index"
+// testagent_change end
 import PROMPT_INITIALIZE from "./template/initialize.txt"
 import PROMPT_REVIEW from "./template/review.txt"
 
@@ -176,11 +180,18 @@ export const layer = Layer.effect(
 
     const get = Effect.fn("Command.get")(function* (name: string) {
       const s = yield* InstanceState.get(state)
+      // testagent_change start - Goal 能力关闭时不暴露 /goal
+      if (isGoalCommand(name) && !Goal.isEnabled()) return undefined
+      // testagent_change end
       return s.commands[name]
     })
 
     const list = Effect.fn("Command.list")(function* () {
       const s = yield* InstanceState.get(state)
+      // testagent_change start - Goal 能力关闭时不暴露 /goal。
+      // 读取时过滤而非失效配置缓存：后者会连带冲掉插件注册的内存态命令。
+      if (!Goal.isEnabled()) return Object.values(s.commands).filter((c) => !isGoalCommand(c.name))
+      // testagent_change end
       return Object.values(s.commands)
     })
 

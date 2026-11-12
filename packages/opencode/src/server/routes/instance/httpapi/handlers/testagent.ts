@@ -18,11 +18,20 @@ import {
   YoloGetResult, // testagent_change
   YoloSetPayload, // testagent_change
   YoloSetResult, // testagent_change
+  GoalCreatePayload, // testagent_change
+  GoalCreateResult, // testagent_change
+  GoalGetResult, // testagent_change
+  GoalSetPayload, // testagent_change
+  GoalSetResult, // testagent_change
 } from "../groups/testagent" // testagent_change
 import type { StoredToken } from "@/external-auth"
 import { EnvVarsConfigInvalidError } from "@/testagent/env-vars" // testagent_change
 // testagent_change start - YOLO 模式状态
 import { Yolo } from "@/testagent/yolo"
+// testagent_change end
+// testagent_change start - Goal 模式状态
+import { Goal } from "@/testagent/goal"
+import { clearGoal, createGoal } from "@/plugin/testagent-goal/state"
 // testagent_change end
 
 const log = Log.create({ service: "server" })
@@ -200,6 +209,47 @@ export const testagentHandlers = HttpApiBuilder.group(RootHttpApi, "testagent", 
     })
     // testagent_change end
 
+    // testagent_change start - Goal 模式开关 handler（全局能力开关，与 session 无关）
+    const goalSet = Effect.fn("TestagentHttpApi.goalSet")(function* (ctx: {
+      payload: typeof GoalSetPayload.Type
+    }) {
+      Goal.set(ctx.payload.enabled)
+      log.info("Goal mode toggled (global)", { enabled: ctx.payload.enabled })
+      const result: typeof GoalSetResult.Type = { applied: true }
+      return result
+    })
+
+    const goalGet = Effect.fn("TestagentHttpApi.goalGet")(function* () {
+      const result: typeof GoalGetResult.Type = { enabled: Goal.isEnabled() }
+      return result
+    })
+
+    // 为会话建目标：直接写 goal 状态，不消耗 LLM 回合。
+    // 已有未关闭目标时覆盖重建（replace-if-open），让流程重跑保持幂等。
+    const goalCreate = Effect.fn("TestagentHttpApi.goalCreate")(function* (ctx: {
+      payload: typeof GoalCreatePayload.Type
+    }) {
+      const goal = yield* Effect.promise(async () => {
+        try {
+          return await createGoal(ctx.payload.sessionID, ctx.payload.objective)
+        } catch (error) {
+          log.info("Goal already open for session, recreating", {
+            sessionID: ctx.payload.sessionID,
+            reason: error instanceof Error ? error.message : String(error),
+          })
+          await clearGoal(ctx.payload.sessionID)
+          return await createGoal(ctx.payload.sessionID, ctx.payload.objective)
+        }
+      })
+      const result: typeof GoalCreateResult.Type = {
+        created: true,
+        objective: goal.objective,
+        status: goal.status,
+      }
+      return result
+    })
+    // testagent_change end
+
     // testagent_change start - web UI 分享链接所需凭据（与 extension 的 share-link.ts 算法一致）
     const serverAuth = Effect.fn("TestagentHttpApi.serverAuth")(function* () {
       const password = process.env["OPENCODE_SERVER_PASSWORD"]
@@ -227,5 +277,8 @@ export const testagentHandlers = HttpApiBuilder.group(RootHttpApi, "testagent", 
       .handle("agentOverrideClear", agentOverrideClear) // testagent_change
       .handle("yoloSet", yoloSet) // testagent_change
       .handle("yoloGet", yoloGet) // testagent_change
+      .handle("goalSet", goalSet) // testagent_change
+      .handle("goalGet", goalGet) // testagent_change
+      .handle("goalCreate", goalCreate) // testagent_change
   }),
 )

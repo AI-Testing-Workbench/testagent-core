@@ -229,7 +229,27 @@ export const Info = Schema.Struct({
   goal: Schema.optional(
     Schema.Struct({
       enabled: Schema.optional(Schema.Boolean).annotate({
-        description: "Enable or disable the goal tracking plugin (default: false)",
+        description:
+          "Deprecated: the goal plugin is always loaded now. Use the runtime switch (PUT /testagent/goal) to enable/disable the capability.",
+      }),
+      auto_continue: Schema.optional(Schema.Boolean).annotate({
+        description:
+          "Let the agent auto-continue toward an active goal when the session goes idle (default: true). Disable when an external orchestrator drives the session.",
+      }),
+      max_auto_turns: Schema.optional(Schema.Number).annotate({
+        description: "Maximum number of auto-continuations per goal (default: 25)",
+      }),
+      min_continue_interval_seconds: Schema.optional(Schema.Number).annotate({
+        description: "Minimum interval between two auto-continuations in seconds (default: 3)",
+      }),
+      max_prompt_failures: Schema.optional(Schema.Number).annotate({
+        description: "Auto-pause the goal after this many consecutive auto-continue failures (default: 3)",
+      }),
+      register_command: Schema.optional(Schema.Boolean).annotate({
+        description: "Register the /goal slash command (default: true)",
+      }),
+      command_name: Schema.optional(Schema.String).annotate({
+        description: "Name of the goal slash command (default: goal)",
       }),
     }),
   ).annotate({
