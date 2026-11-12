@@ -364,13 +364,16 @@ export const sessionPermissionDuration = Metric.gauge("session.duration.permissi
 // commands that only make sense in a POSIX shell, which is the population the fix
 // targets.
 export const shellCallTotal = Metric.counter("tool.shell.call.total", {
-  description: "Total bash tool calls, by shell kind and command style",
+  description: "bash 工具调用总数（按 shell 类型、命令风格）",
 })
 export const shellCallFailed = Metric.counter("tool.shell.call.failed", {
-  description: "Bash tool calls that failed, by shell kind, command style and failure class",
+  description: "bash 工具失败调用（按 shell 类型、命令风格、失败原因）",
+})
+export const shellCallNonzero = Metric.counter("tool.shell.call.nonzero", {
+  description: "bash 工具非零退出但无已知错误特征的调用（不计入失败率）",
 })
 export const shellCallDuration = Metric.gauge("tool.shell.call.duration", {
-  description: "Bash tool call duration (ms), by shell kind",
+  description: "bash 工具调用耗时（毫秒，按 shell 类型）",
 })
 // testagent_change end
 

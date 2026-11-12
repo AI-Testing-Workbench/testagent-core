@@ -11,54 +11,56 @@ import { Effect, Metric } from "effect"
 import {
   shellCallTotal,
   shellCallFailed,
+  shellCallNonzero,
   shellCallDuration,
 } from "@opencode-ai/core/effect/observability"
 
-export type Style = "bash" | "native"
+export type Style = "Linux风格" | "本地风格"
 
 export type Failure =
-  | "alias_hijack"
-  | "param_binding"
-  | "json_invalid"
-  | "host_loader"
-  | "syntax"
-  | "not_found"
-  | "other"
+  | "别名劫持"
+  | "参数绑定失败"
+  | "JSON参数损坏"
+  | "ps-bash无法启动"
+  | "语法解析错误"
+  | "命令不存在"
+  | "非零退出"
 
 // PowerShell 系 shell 才会把 bash 命令搞坏，ps-bash 本身就是 bash 语义。
 const POWERSHELL = new Set(["pwsh", "powershell"])
 
-/** 命令里出现 POSIX-only 语法或参数，说明模型是按 bash 写的。 */
+/** 命令含只有 Linux/bash 才认的语法或参数，说明模型是按 Linux 习惯写的。 */
 export function style(command: string): Style {
   // 命令替换、组合、管道是最强的信号
-  if (/[^\\]`[^`]+`/.test(command)) return "bash"
-  if (/\$\([^)]+\)/.test(command)) return "bash"
-  if (/&&|\|\|/.test(command)) return "bash"
-  if (/\|\|?\s*(grep|sed|awk|sort|cut|tr|head|tail|uniq|wc|xargs|find)\b/.test(command)) return "bash"
+  if (/[^\\]`[^`]+`/.test(command)) return "Linux风格"
+  if (/\$\([^)]+\)/.test(command)) return "Linux风格"
+  if (/&&|\|\|/.test(command)) return "Linux风格"
+  if (/\|\|?\s*(grep|sed|awk|sort|cut|tr|head|tail|uniq|wc|xargs|find)\b/.test(command)) return "Linux风格"
   // POSIX 工具名直接出现（在 PowerShell 里这些会命中别名或不存在）
-  if (/(^|[;&|]\s*)(grep|sed|awk|sort|cut|tr|uniq|xargs|chmod|chown|find)\b/.test(command)) return "bash"
+  if (/(^|[;&|]\s*)(grep|sed|awk|sort|cut|tr|uniq|xargs|chmod|chown|find)\b/.test(command)) return "Linux风格"
   // bash 风格短参数：-rf、-la、-k5、-n1、--name、-H、-d
-  if (/(^|\s)(curl|wget)\s+(.+\s)?(-[a-zA-Z]|--[a-zA-Z])/.test(command)) return "bash"
-  if (/\s-rf\b|\s-la\b|\s-k\d|\s-n\d|\s-maxdepth\b/.test(command)) return "bash"
+  if (/(^|\s)(curl|wget)\s+(.+\s)?(-[a-zA-Z]|--[a-zA-Z])/.test(command)) return "Linux风格"
+  if (/\s-rf\b|\s-la\b|\s-k\d|\s-n\d|\s-maxdepth\b/.test(command)) return "Linux风格"
   // 单引号包 JSON 是 bash 习惯（PowerShell 里同样会踩 native 参数边界）
-  if (/'[^']*\{[^']*"[^']*'/.test(command)) return "bash"
-  return "native"
+  if (/'[^']*\{[^']*"[^']*'/.test(command)) return "Linux风格"
+  return "本地风格"
 }
 
 const PATTERNS: Array<[Failure, RegExp]> = [
-  ["alias_hijack", /Invoke-WebRequest|Invoke-RestMethod/i],
-  ["param_binding", /ParameterBindingException|CannotConvertArgument|无法绑定参数|找不到与参数名称|A parameter cannot be found/i],
-  ["json_invalid", /json_invalid|Expecting property name enclosed in double quotes/i],
-  ["host_loader", /hostfxr|coreclr|Unable to load DLL|ps-bash-host|You must install or update \.NET|Framework not found/i],
-  ["syntax", /Unexpected token|Missing closing|表达式或语句中包含意外的标记|ParserError/i],
-  ["not_found", /不是内部或外部命令|CommandNotFoundException|is not recognized as an internal or external command/i],
+  ["别名劫持", /Invoke-WebRequest|Invoke-RestMethod/i],
+  ["参数绑定失败", /ParameterBindingException|CannotConvertArgument|无法绑定参数|找不到与参数名称|A parameter cannot be found/i],
+  ["JSON参数损坏", /json_invalid|Expecting property name enclosed in double quotes/i],
+  ["ps-bash无法启动", /hostfxr|coreclr|Unable to load DLL|ps-bash-host|You must install or update \.NET|Framework not found/i],
+  ["语法解析错误", /Unexpected token|Missing closing|表达式或语句中包含意外的标记|ParserError/i],
+  ["命令不存在", /不是内部或外部命令|CommandNotFoundException|is not recognized as an internal or external command/i],
 ]
 
 /**
  * 判断一次调用是否失败以及失败类型。
  *
- * 只在「非零退出」或「输出命中已知错误特征」时算失败：很多命令会正常返回非零码
- * （如 grep 没匹配到），所以单看退出码会误报，必须叠加输出特征或明确的错误退出。
+ * 只有输出命中已知错误特征才算 shell 层失败。非零退出但没有任何错误特征时返回
+ * `非零退出`：这类命令（grep 无匹配、curl 连不上、ps-bash 透传不准的退出码等）
+ * 本身执行是正常的，计入失败会虚增失败率，单独用 nonzero 计数器监控。
  */
 export function classify(output: string, code: number | null | undefined): Failure | undefined {
   for (const [kind, pattern] of PATTERNS) {
@@ -66,7 +68,7 @@ export function classify(output: string, code: number | null | undefined): Failu
   }
   if (code === null || code === undefined) return undefined
   if (code === 0) return undefined
-  return "other"
+  return "非零退出"
 }
 
 export function name(file: string) {
@@ -105,6 +107,10 @@ export function record(input: Report) {
     Metric.update(Metric.withAttributes(shellCallTotal, base), 1),
     Metric.update(Metric.withAttributes(shellCallDuration, base), Math.max(0, input.ms)),
   ]
+  if (failed === "非零退出") {
+    updates.push(Metric.update(Metric.withAttributes(shellCallNonzero, base), 1))
+    return updates
+  }
   if (failed) {
     const short = input.command.replaceAll("\n", " ")
     const cmd = short.length > MAX_ATTR ? `${short.slice(0, MAX_ATTR)}…` : short
