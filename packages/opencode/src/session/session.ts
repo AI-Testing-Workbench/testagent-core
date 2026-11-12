@@ -3,6 +3,7 @@ import path from "path"
 import { BusEvent } from "@/bus/bus-event"
 import { Bus } from "@/bus"
 import * as Latency from "@/testagent/latency" // testagent_change - 链路探针
+import * as ToolGap from "@/testagent/tool-gap" // testagent_change - 工具完成→下一轮 LLM 请求间隙
 import { Decimal } from "decimal.js"
 import { type ProviderMetadata, type LanguageModelUsage } from "ai"
 import { Flag } from "@opencode-ai/core/flag/flag"
@@ -595,6 +596,7 @@ export const layer: Layer.Layer<Service, never, Bus.Service | Storage.Service | 
 
         yield* sync.run(Event.Deleted, { sessionID, info: session }, { publish: hasInstance })
         yield* sync.remove(sessionID)
+        ToolGap.reset(sessionID) // testagent_change - 释放会话残留标记
       } catch (e) {
         log.error(e)
       }

@@ -442,4 +442,21 @@ export const shellCallDuration = Metric.gauge("tool.shell.call.duration", {
 })
 // testagent_change end
 
+// testagent_change start - 「最后工具执行完成 → 下一轮 LLM 请求发出」间隙耗时
+// 以最后一个完成的工具为起点，累计到下一次 LLM 请求发出为止，包含：
+//   1) finish-step 收尾（token/usage 统计、snapshot.patch、summary fork）
+//   2) process cleanup
+//   3) 外层 agent loop 重入（消息重载、latest、model/agent 解析、insertReminders）
+//   4) processor.create 的 snapshot.track
+//   5) resolveTools
+//   6) system prompt / toModelMessages 组装
+//   7) process 入口（config.get、token 估算）
+// 并发工具时取最后完成的那个；每个 step 增量累加一次。
+// 按 sessionID 对增量求和，即为该会话「工具完成 → 下一轮 LLM 请求」的汇总耗时。
+export const toolToLlmTotal = Metric.counter("session.tool_to_llm.total", {
+  description:
+    "Sum of gaps (ms) from last tool completion to next LLM request send, incremented per step. Sum by sessionID for the session total. Includes finish-step finalization, cleanup, loop re-entry, context loading, snapshot.track, tool resolution, prompt assembly, and process entry.",
+})
+// testagent_change end
+
 export const Observability = { enabled, layer }

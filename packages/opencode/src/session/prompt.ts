@@ -53,6 +53,7 @@ const RESUME_WAIT = 2_000
 // testagent_change start
 import { Sheet } from "@/testagent/sheet"
 import { Doc } from "@/testagent/doc"
+import * as ToolGap from "@/testagent/tool-gap" // testagent_change - 工具完成→下一轮 LLM 请求间隙
 // testagent_change end
 import { SessionStatus, type IdleReason } from "./status"
 import { LLM } from "./llm"
@@ -1523,6 +1524,8 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         })
         // testagent_change end
 
+        // testagent_change - 新一轮 turn 开始，清掉上个 turn 可能残留的间隙标记，避免把用户空闲时间算进来
+        ToolGap.reset(sessionID)
         while (true) {
           yield* status.set(sessionID, { type: "busy" })
           yield* slog.info("loop", { step })
@@ -1941,7 +1944,10 @@ NOTE: At any point in time through this workflow you should feel free to ask the
             resume = 0 // testagent_change - 本轮取得进展（非错误终止），重置连续错误预算
             return "continue" as const
           }).pipe(Effect.ensuring(instruction.clear(handle.message.id)))
-          if (outcome === "break") break
+          if (outcome === "break") {
+            ToolGap.reset(sessionID) // testagent_change - 本轮结束，丢弃未消费的间隙标记
+            break
+          }
           continue
         }
 

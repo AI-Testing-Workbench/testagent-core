@@ -21,6 +21,7 @@ import { errorMessage } from "@/util/error"
 import * as Log from "@opencode-ai/core/util/log"
 import * as Latency from "@/testagent/latency" // testagent_change - 链路探针
 import * as SnapshotStats from "@/testagent/snapshot-stats" // testagent_change - snapshot 指标
+import * as ToolGap from "@/testagent/tool-gap" // testagent_change - 工具完成→下一轮 LLM 请求间隙
 import { isRecord } from "@/util/record"
 import { EventV2 } from "@/v2/event"
 import { SessionEvent } from "@/v2/session-event"
@@ -38,6 +39,7 @@ import {
   tokenCacheWrite,
   tokenTotal,
   sessionLlmDuration,
+  toolToLlmTotal, // testagent_change
   modelOutputAbnormal, // testagent_change
   modelColonTerminated, // testagent_change
 } from "@opencode-ai/core/effect/observability" // testagent_change
@@ -231,6 +233,7 @@ export const layer: Layer.Layer<
             attachments: output.attachments,
           },
         })
+        ToolGap.done(ctx.sessionID) // testagent_change - 记录工具完成时刻（并发取最晚）
         yield* settleToolCall(toolCallID)
       })
 
@@ -246,6 +249,7 @@ export const layer: Layer.Layer<
             time: { start: match.part.state.time.start, end: Date.now() },
           },
         })
+        ToolGap.done(ctx.sessionID) // testagent_change - 工具失败也算执行完成（并发取最晚）
         if (error instanceof Permission.RejectedError) {
           ctx.blocked = ctx.shouldBreak
         } else if (error instanceof Question.RejectedError) {
@@ -887,6 +891,20 @@ export const layer: Layer.Layer<
             ctx.emitted = false // testagent_change - 每次重试尝试重新计可见输出
             ctx.reasoningMap = {}
 
+            // testagent_change start - 上报「最后工具完成 → 本轮 LLM 请求发出」间隙
+            const gap = ToolGap.take(ctx.sessionID)
+            if (gap !== undefined) {
+              yield* Metric.update(
+                Metric.withAttributes(toolToLlmTotal, {
+                  sessionID: ctx.sessionID,
+                  modelID: streamInput.model.id,
+                  providerID: streamInput.model.providerID,
+                }),
+                gap,
+              )
+            }
+            // testagent_change end
+
             // testagent_change start - Add stream timing logs
             ctx.streamStartTime = Date.now()
             let eventCount = 0
@@ -1028,8 +1046,16 @@ export const layer: Layer.Layer<
             Effect.ensuring(cleanup()),
           )
 
-          if (ctx.needsCompaction) return "compact"
-          if (ctx.blocked || ctx.assistantMessage.error) return "stop"
+          // testagent_change start - 本轮结束不会再有下一次请求，丢弃未消费的间隙记录
+          if (ctx.needsCompaction) {
+            ToolGap.reset(ctx.sessionID)
+            return "compact"
+          }
+          if (ctx.blocked || ctx.assistantMessage.error) {
+            ToolGap.reset(ctx.sessionID)
+            return "stop"
+          }
+          // testagent_change end
           return "continue"
         })
       })
