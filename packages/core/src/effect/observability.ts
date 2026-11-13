@@ -152,6 +152,40 @@ function logs() {
 // which can only be called once per MetricReader instance.
 let metricsInit: Promise<void> | undefined
 
+// testagent_change start
+// delta 模式下 Effect 会把已注册的 counter series 每周期重复导出（无增量即 0），
+// 一次失败在 ES 里变成 1 条 1 值文档 + 持续不断的 0 值文档。导出前原地剔除
+// sum 类型（dataPointType 3）的 0 增量点：失败发生当拍报 1，之后不再刷屏。
+// 仅作用于 tool.shell.* 指标，其余指标保持原有行为。
+const SHELL_PREFIX = "tool.shell."
+
+function stripZeroSums(item: any) {
+  const rms = Array.isArray(item) ? item : [item]
+  for (const rm of rms) {
+    for (const sm of rm?.scopeMetrics ?? []) {
+      for (const m of sm?.metrics ?? []) {
+        if (!String(m.descriptor?.name ?? "").startsWith(SHELL_PREFIX)) continue
+        if (m.dataPointType !== 3 || !Array.isArray(m.dataPoints)) continue
+        const points = m.dataPoints
+        for (let i = points.length - 1; i >= 0; i--) {
+          if (Number(points[i]?.value) === 0) points.splice(i, 1)
+        }
+      }
+    }
+  }
+  return item
+}
+
+function zeroStripped(exporter: any) {
+  return {
+    export: (metrics: any, cb: any) => exporter.export(stripZeroSums(metrics), cb),
+    selectAggregationTemporality: (type: any) => exporter.selectAggregationTemporality(type),
+    shutdown: () => exporter.shutdown(),
+    forceFlush: () => exporter.forceFlush(),
+  }
+}
+// testagent_change end
+
 async function initMetrics() {
   if (metricsInit) return metricsInit
   metricsInit = (async () => {
@@ -168,11 +202,13 @@ async function initMetrics() {
       ),
     )
     const reader = new PeriodicExportingMetricReader({
-      exporter: new OTLPMetricExporter({
-        url: `${base}/v1/metrics`,
-        headers,
-        temporalityPreference: AggregationTemporalityPreference.DELTA,
-      }),
+      exporter: zeroStripped(
+        new OTLPMetricExporter({
+          url: `${base}/v1/metrics`,
+          headers,
+          temporalityPreference: AggregationTemporalityPreference.DELTA,
+        }),
+      ),
       exportIntervalMillis: 10000,
     })
     reader.setMetricProducer(producer)
@@ -432,13 +468,16 @@ export const webfetchResponseTooLarge = Metric.counter("tool.webfetch.response_t
 // commands that only make sense in a POSIX shell, which is the population the fix
 // targets.
 export const shellCallTotal = Metric.counter("tool.shell.call.total", {
-  description: "Total bash tool calls, by shell kind and command style",
+  description: "bash 工具调用总数（按 shell 类型、命令风格）",
 })
 export const shellCallFailed = Metric.counter("tool.shell.call.failed", {
-  description: "Bash tool calls that failed, by shell kind, command style and failure class",
+  description: "bash 工具失败调用（按 shell 类型、命令风格、失败原因）",
+})
+export const shellCallNonzero = Metric.counter("tool.shell.call.nonzero", {
+  description: "bash 工具非零退出但无已知错误特征的调用（不计入失败率）",
 })
 export const shellCallDuration = Metric.gauge("tool.shell.call.duration", {
-  description: "Bash tool call duration (ms), by shell kind",
+  description: "bash 工具调用耗时（毫秒，按 shell 类型）",
 })
 // testagent_change end
 
