@@ -209,7 +209,7 @@ async function initMetrics() {
           temporalityPreference: AggregationTemporalityPreference.DELTA,
         }),
       ),
-      exportIntervalMillis: 10000,
+      exportIntervalMillis: 60000, // testagent_change - 指标上传从 10s 降频为 60s
     })
     reader.setMetricProducer(producer)
   })()
