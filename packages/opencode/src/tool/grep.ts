@@ -1,8 +1,9 @@
 import path from "path"
 import { Schema } from "effect"
-import { Effect, Option } from "effect"
+import { Effect, Metric, Option } from "effect"
 import { InstanceState } from "@/effect/instance-state"
 import { AppFileSystem } from "@opencode-ai/core/filesystem"
+import { grepNoFilesFound } from "@opencode-ai/core/effect/observability" // testagent_change
 import { Ripgrep } from "../file/ripgrep"
 import { assertExternalDirectoryEffect } from "./external-directory"
 import DESCRIPTION from "./grep.txt"
@@ -71,7 +72,10 @@ export const GrepTool = Tool.define(
             file,
             signal: ctx.abort,
           })
-          if (result.items.length === 0) return empty
+          if (result.items.length === 0) {
+            yield* Metric.update(Metric.withAttributes(grepNoFilesFound, { session_id: ctx.sessionID }), 1) // testagent_change
+            return empty
+          }
 
           const rows = result.items.map((item) => ({
             path: AppFileSystem.resolve(

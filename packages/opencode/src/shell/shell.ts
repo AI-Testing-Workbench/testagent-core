@@ -192,20 +192,47 @@ export function args(file: string, command: string, cwd: string) {
   return ["-c", command]
 }
 
+// testagent_change start - ps-bash is opt-in and never the default: the extension offers a
+// download button in settings and the user picks the installed path as the terminal shell.
+// Resolution order is upstream again: explicit config > ambient SHELL > platform default.
+// Once a configured ps-bash fails to execute (a .NET host loader error) we stop selecting
+// it for the rest of the process so a broken install degrades to the ambient shell instead
+// of failing every command.
+let broken = false
+
+export function breakPsBash() {
+  broken = true
+}
+
+export function isPsBash(shell: string | undefined) {
+  return shell !== undefined && name(shell) === "ps-bash"
+}
+
+/** Shell to use when the configured ps-bash is broken: never ps-bash itself. */
+export function rescue() {
+  return select(process.env.SHELL, { acceptable: true })
+}
+
 const defaultPreferred = lazy(() => select(process.env.SHELL))
 const defaultAcceptable = lazy(() => select(process.env.SHELL, { acceptable: true }))
 
 export function preferred(configShell?: string) {
+  if (broken) return rescue()
   if (configShell) return select(configShell)
   return defaultPreferred()
 }
-preferred.reset = () => defaultPreferred.reset()
+preferred.reset = () => {
+  broken = false
+  defaultPreferred.reset()
+}
 
 export function acceptable(configShell?: string) {
+  if (broken) return rescue()
   if (configShell) return select(configShell, { acceptable: true })
   return defaultAcceptable()
 }
 acceptable.reset = () => defaultAcceptable.reset()
+// testagent_change end
 
 export async function list(): Promise<Item[]> {
   const shells = process.platform === "win32" ? win() : await unix()

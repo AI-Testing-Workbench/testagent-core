@@ -1,9 +1,10 @@
-import { Effect, Schema } from "effect"
+import { Effect, Metric, Schema } from "effect" // testagent_change - add Metric
 import { HttpClient, HttpClientRequest } from "effect/unstable/http"
 import * as Tool from "./tool"
 import TurndownService from "turndown"
 import DESCRIPTION from "./webfetch.txt"
 import { isImageAttachment } from "@/util/media"
+import { webfetchInvalidUrlScheme, webfetchResponseTooLarge } from "@opencode-ai/core/effect/observability" // testagent_change
 
 const MAX_RESPONSE_SIZE = 5 * 1024 * 1024 // 5MB
 const DEFAULT_TIMEOUT = 30 * 1000 // 30 seconds
@@ -31,6 +32,7 @@ export const WebFetchTool = Tool.define(
       execute: (params: Schema.Schema.Type<typeof Parameters>, ctx: Tool.Context) =>
         Effect.gen(function* () {
           if (!params.url.startsWith("http://") && !params.url.startsWith("https://")) {
+            yield* Metric.update(Metric.withAttributes(webfetchInvalidUrlScheme, { session_id: ctx.sessionID }), 1) // testagent_change
             throw new Error("URL must start with http:// or https://")
           }
 
@@ -93,11 +95,13 @@ export const WebFetchTool = Tool.define(
           // Check content length
           const contentLength = response.headers["content-length"]
           if (contentLength && parseInt(contentLength) > MAX_RESPONSE_SIZE) {
+            yield* Metric.update(Metric.withAttributes(webfetchResponseTooLarge, { session_id: ctx.sessionID }), 1) // testagent_change
             throw new Error("Response too large (exceeds 5MB limit)")
           }
 
           const arrayBuffer = yield* response.arrayBuffer
           if (arrayBuffer.byteLength > MAX_RESPONSE_SIZE) {
+            yield* Metric.update(Metric.withAttributes(webfetchResponseTooLarge, { session_id: ctx.sessionID }), 1) // testagent_change
             throw new Error("Response too large (exceeds 5MB limit)")
           }
 

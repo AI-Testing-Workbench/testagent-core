@@ -4,7 +4,7 @@
 // https://github.com/cline/cline/blob/main/evals/diff-edits/diff-apply/diff-06-26-25.ts
 
 import * as path from "path"
-import { Effect, Schema, Semaphore } from "effect"
+import { Effect, Metric, Schema, Semaphore } from "effect" // testagent_change - add Metric
 import * as Tool from "./tool"
 import { LSP } from "@/lsp/lsp"
 import { createTwoFilesPatch, diffLines } from "diff"
@@ -18,6 +18,7 @@ import { Snapshot } from "@/snapshot"
 import { assertExternalDirectoryEffect } from "./external-directory"
 import { AppFileSystem } from "@opencode-ai/core/filesystem"
 import * as Bom from "@/util/bom"
+import { editFileNotFound, editPathIsDirectory } from "@opencode-ai/core/effect/observability" // testagent_change
 
 function normalizeLineEndings(text: string): string {
   return text.replaceAll("\r\n", "\n")
@@ -117,8 +118,14 @@ export const EditTool = Tool.define(
               }
 
               const info = yield* afs.stat(filePath).pipe(Effect.catch(() => Effect.succeed(undefined)))
-              if (!info) throw new Error(`File ${filePath} not found`)
-              if (info.type === "Directory") throw new Error(`Path is a directory, not a file: ${filePath}`)
+              if (!info) {
+                yield* Metric.update(Metric.withAttributes(editFileNotFound, { session_id: ctx.sessionID }), 1) // testagent_change
+                throw new Error(`File ${filePath} not found`)
+              }
+              if (info.type === "Directory") {
+                yield* Metric.update(Metric.withAttributes(editPathIsDirectory, { session_id: ctx.sessionID }), 1) // testagent_change
+                throw new Error(`Path is a directory, not a file: ${filePath}`)
+              }
               const source = yield* Bom.readFile(afs, filePath)
               contentOld = source.text
 

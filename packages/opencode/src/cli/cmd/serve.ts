@@ -21,7 +21,7 @@ export const ServeCommand = effectCmd({
     console.log(`opencode server listening on http://${server.hostname}:${server.port}`)
 
     // testagent_change start - 沙箱启动通知在监听起来后立刻发：
-    // 不再依赖首个带 ?directory= 的请求触发插件实例化（插件工厂里仍保留一次兑底调用）。
+    // 不再依赖首个带 ?directory= 的请求触发插件实例化（插件工厂里仍保留一次兜底调用）。
     // 扩展以工作区根目录为 cwd 派生 serve，process.cwd() 就是 Web UI 深链要用的那一段目录。
     notifyStartup({
       directory: process.cwd(),

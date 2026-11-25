@@ -152,6 +152,40 @@ function logs() {
 // which can only be called once per MetricReader instance.
 let metricsInit: Promise<void> | undefined
 
+// testagent_change start
+// delta 模式下 Effect 会把已注册的 counter series 每周期重复导出（无增量即 0），
+// 一次失败在 ES 里变成 1 条 1 值文档 + 持续不断的 0 值文档。导出前原地剔除
+// sum 类型（dataPointType 3）的 0 增量点：失败发生当拍报 1，之后不再刷屏。
+// 仅作用于 tool.shell.* 指标，其余指标保持原有行为。
+const SHELL_PREFIX = "tool.shell."
+
+function stripZeroSums(item: any) {
+  const rms = Array.isArray(item) ? item : [item]
+  for (const rm of rms) {
+    for (const sm of rm?.scopeMetrics ?? []) {
+      for (const m of sm?.metrics ?? []) {
+        if (!String(m.descriptor?.name ?? "").startsWith(SHELL_PREFIX)) continue
+        if (m.dataPointType !== 3 || !Array.isArray(m.dataPoints)) continue
+        const points = m.dataPoints
+        for (let i = points.length - 1; i >= 0; i--) {
+          if (Number(points[i]?.value) === 0) points.splice(i, 1)
+        }
+      }
+    }
+  }
+  return item
+}
+
+function zeroStripped(exporter: any) {
+  return {
+    export: (metrics: any, cb: any) => exporter.export(stripZeroSums(metrics), cb),
+    selectAggregationTemporality: (type: any) => exporter.selectAggregationTemporality(type),
+    shutdown: () => exporter.shutdown(),
+    forceFlush: () => exporter.forceFlush(),
+  }
+}
+// testagent_change end
+
 async function initMetrics() {
   if (metricsInit) return metricsInit
   metricsInit = (async () => {
@@ -168,12 +202,14 @@ async function initMetrics() {
       ),
     )
     const reader = new PeriodicExportingMetricReader({
-      exporter: new OTLPMetricExporter({
-        url: `${base}/v1/metrics`,
-        headers,
-        temporalityPreference: AggregationTemporalityPreference.DELTA,
-      }),
-      exportIntervalMillis: 10000,
+      exporter: zeroStripped(
+        new OTLPMetricExporter({
+          url: `${base}/v1/metrics`,
+          headers,
+          temporalityPreference: AggregationTemporalityPreference.DELTA,
+        }),
+      ),
+      exportIntervalMillis: 60000, // testagent_change - 指标上传从 10s 降频为 60s
     })
     reader.setMetricProducer(producer)
   })()
@@ -355,5 +391,111 @@ export const sessionActualDuration = Metric.gauge("session.duration.actual", {
 export const sessionPermissionDuration = Metric.gauge("session.duration.permission", {
   description: "Time spent waiting for permission approval (s)",
 })
+// testagent_change start - snapshot 耗时统计
+export const snapshotEnabled = Metric.gauge("session.snapshot.enabled", {
+  description: "Whether snapshot is enabled for the session (1 = enabled, 0 = disabled)",
+})
+export const snapshotVcs = Metric.gauge("session.snapshot.vcs", {
+  description: "VCS type used by snapshot (1 = git, 0 = other)",
+})
+export const snapshotTrackDuration = Metric.gauge("session.snapshot.track.duration", {
+  description: "Cumulative time spent in snapshot track for the session (s)",
+})
+export const snapshotTrackCount = Metric.counter("session.snapshot.track.count", {
+  description: "Number of snapshot track calls in the session",
+})
+export const snapshotPatchDuration = Metric.gauge("session.snapshot.patch.duration", {
+  description: "Cumulative time spent in snapshot patch for the session (s)",
+})
+export const snapshotPatchCount = Metric.counter("session.snapshot.patch.count", {
+  description: "Number of snapshot patch calls in the session",
+})
+export const snapshotTotalDuration = Metric.gauge("session.snapshot.total.duration", {
+  description: "Total time spent in snapshot for the session (s)",
+})
+export const snapshotMaxDuration = Metric.gauge("session.snapshot.max.duration", {
+  description: "Longest single snapshot operation in the session (s)",
+})
+export const snapshotFailed = Metric.counter("session.snapshot.failed", {
+  description: "Number of snapshot staging failures in the session",
+})
+// testagent_change end
+export const modelOutputAbnormal = Metric.counter("session.model.output_abnormal", {
+  description: "Model output status abnormal (finish_reason length/stop with invalid tools), auto-stopped to prevent infinite loop",
+}) // testagent_change
+export const modelDuplicateOutput = Metric.counter("session.model.duplicate_output", { // testagent_change
+  description: "Model returned identical content 3 times consecutively, auto-stopped to prevent infinite loop", // testagent_change
+}) // testagent_change
+export const modelColonTerminated = Metric.counter("session.model.colon_terminated", { // testagent_change
+  description: "Model text output ended with non-terminator (colon, comma, etc) or empty, or last line only has text and spaces, no tool_calls - possible abnormal termination", // testagent_change
+}) // testagent_change
+export const grepNoFilesFound = Metric.counter("tool.grep.no_files_found", { // testagent_change
+  description: "Grep tool calls that found no matching files", // testagent_change
+}) // testagent_change
+export const readFileNotFound = Metric.counter("tool.read.file_not_found", { // testagent_change
+  description: "Read tool calls where the file was not found", // testagent_change
+}) // testagent_change
+export const globNoFilesFound = Metric.counter("tool.glob.no_files_found", { // testagent_change
+  description: "Glob tool calls that found no matching files", // testagent_change
+}) // testagent_change
+export const shellNoOutput = Metric.counter("tool.shell.no_output", { // testagent_change
+  description: "Shell tool calls that produced no output", // testagent_change
+}) // testagent_change
+export const skillNotFound = Metric.counter("tool.skill.not_found", { // testagent_change
+  description: "Skill tool calls where the requested skill was not found", // testagent_change
+}) // testagent_change
+export const editFileNotFound = Metric.counter("tool.edit.file_not_found", { // testagent_change
+  description: "Edit tool calls where the target file was not found", // testagent_change
+}) // testagent_change
+export const editPathIsDirectory = Metric.counter("tool.edit.path_is_directory", { // testagent_change
+  description: "Edit tool calls where the target path is a directory instead of a file", // testagent_change
+}) // testagent_change
+export const taskUnknownAgentType = Metric.counter("tool.task.unknown_agent_type", { // testagent_change
+  description: "Task tool calls where the specified subagent type is not valid", // testagent_change
+}) // testagent_change
+export const webfetchInvalidUrlScheme = Metric.counter("tool.webfetch.invalid_url_scheme", { // testagent_change
+  description: "Webfetch tool calls where the URL does not start with http:// or https://", // testagent_change
+}) // testagent_change
+export const webfetchResponseTooLarge = Metric.counter("tool.webfetch.response_too_large", { // testagent_change
+  description: "Webfetch tool calls where the response exceeds the 5MB size limit", // testagent_change
+}) // testagent_change
+
+// testagent_change start - bash tool shell instrumentation.
+// Measures whether a POSIX-compatible shell (ps-bash) fixes the failures that occur
+// when an LLM emits bash syntax while Windows PowerShell executes it. The `shell`
+// attribute is the grouping dimension: powershell/pwsh are the baseline, ps-bash is
+// the treatment. `failure` classifies why a call failed, and `bash_style` marks
+// commands that only make sense in a POSIX shell, which is the population the fix
+// targets.
+export const shellCallTotal = Metric.counter("tool.shell.call.total", {
+  description: "bash 工具调用总数（按 shell 类型、命令风格）",
+})
+export const shellCallFailed = Metric.counter("tool.shell.call.failed", {
+  description: "bash 工具失败调用（按 shell 类型、命令风格、失败原因）",
+})
+export const shellCallNonzero = Metric.counter("tool.shell.call.nonzero", {
+  description: "bash 工具非零退出但无已知错误特征的调用（不计入失败率）",
+})
+export const shellCallDuration = Metric.gauge("tool.shell.call.duration", {
+  description: "bash 工具调用耗时（毫秒，按 shell 类型）",
+})
+// testagent_change end
+
+// testagent_change start - 「最后工具执行完成 → 下一轮 LLM 请求发出」间隙耗时
+// 以最后一个完成的工具为起点，累计到下一次 LLM 请求发出为止，包含：
+//   1) finish-step 收尾（token/usage 统计、snapshot.patch、summary fork）
+//   2) process cleanup
+//   3) 外层 agent loop 重入（消息重载、latest、model/agent 解析、insertReminders）
+//   4) processor.create 的 snapshot.track
+//   5) resolveTools
+//   6) system prompt / toModelMessages 组装
+//   7) process 入口（config.get、token 估算）
+// 并发工具时取最后完成的那个；每个 step 增量累加一次。
+// 按 sessionID 对增量求和，即为该会话「工具完成 → 下一轮 LLM 请求」的汇总耗时。
+export const toolToLlmTotal = Metric.counter("session.tool_to_llm.total", {
+  description:
+    "Sum of gaps (ms) from last tool completion to next LLM request send, incremented per step. Sum by sessionID for the session total. Includes finish-step finalization, cleanup, loop re-entry, context loading, snapshot.track, tool resolution, prompt assembly, and process entry.",
+})
+// testagent_change end
 
 export const Observability = { enabled, layer }

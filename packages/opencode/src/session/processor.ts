@@ -19,6 +19,9 @@ import type { Provider } from "@/provider/provider"
 import { Question } from "@/question"
 import { errorMessage } from "@/util/error"
 import * as Log from "@opencode-ai/core/util/log"
+import * as Latency from "@/testagent/latency" // testagent_change - 链路探针
+import * as SnapshotStats from "@/testagent/snapshot-stats" // testagent_change - snapshot 指标
+import * as ToolGap from "@/testagent/tool-gap" // testagent_change - 工具完成→下一轮 LLM 请求间隙
 import { isRecord } from "@/util/record"
 import { EventV2 } from "@/v2/event"
 import { SessionEvent } from "@/v2/session-event"
@@ -36,6 +39,9 @@ import {
   tokenCacheWrite,
   tokenTotal,
   sessionLlmDuration,
+  toolToLlmTotal, // testagent_change
+  modelOutputAbnormal, // testagent_change
+  modelColonTerminated, // testagent_change
 } from "@opencode-ai/core/effect/observability" // testagent_change
 
 const DOOM_LOOP_THRESHOLD = 3
@@ -129,7 +135,22 @@ export const layer: Layer.Layer<
       // Pre-capture snapshot before the LLM stream starts. The AI SDK
       // may execute tools internally before emitting start-step events,
       // so capturing inside the event handler can be too late.
+      // testagent_change start - snapshot 耗时统计：先登记开关状态
+      const snapshotEnabled = SnapshotStats.enabled()
+      if (snapshotEnabled) {
+        const info = yield* snapshot.status()
+        SnapshotStats.init({ sessionID: input.sessionID, enabled: info.enabled, vcs: info.vcs })
+      }
+      const snapshotStart = performance.now()
       const initialSnapshot = yield* snapshot.track()
+      if (snapshotEnabled) {
+        SnapshotStats.track({
+          sessionID: input.sessionID,
+          elapsed: performance.now() - snapshotStart,
+          ok: initialSnapshot !== undefined,
+        })
+      }
+      // testagent_change end
       const ctx: ProcessorContext = {
         assistantMessage: input.assistantMessage,
         sessionID: input.sessionID,
@@ -212,6 +233,7 @@ export const layer: Layer.Layer<
             attachments: output.attachments,
           },
         })
+        ToolGap.done(ctx.sessionID) // testagent_change - 记录工具完成时刻（并发取最晚）
         yield* settleToolCall(toolCallID)
       })
 
@@ -227,6 +249,7 @@ export const layer: Layer.Layer<
             time: { start: match.part.state.time.start, end: Date.now() },
           },
         })
+        ToolGap.done(ctx.sessionID) // testagent_change - 工具失败也算执行完成（并发取最晚）
         if (error instanceof Permission.RejectedError) {
           ctx.blocked = ctx.shouldBreak
         } else if (error instanceof Question.RejectedError) {
@@ -531,13 +554,69 @@ export const layer: Layer.Layer<
                 (p) => p.type === "tool" && p.tool === "invalid",
               )
               if (hasInvalidTools) {
+                // 记录 invalid tools 检测统计到 metric
+                yield* Metric.update(Metric.withAttributes(modelOutputAbnormal, { sessionID: ctx.sessionID, modelID: ctx.model.id, providerID: ctx.model.providerID, finishReason: value.finishReason }), 1)
+                
                 if (!ctx.assistantMessage.error) {
                   ctx.assistantMessage.error = {
                     name: "UnknownError" as const,
-                    data: { message: `模型侧的finish_reason输出异常【${value.finishReason}】` },
+                    data: { message: `检测到模型侧输出状态异常【${value.finishReason}】，为防止死循环已自动停止。建议：更换模型进行重试。` },
                   }
                 }
                 ctx.blocked = true
+              }
+            }
+            // testagent_change end
+            
+            // testagent_change start - 检测文本以非结束符号结束或为空且无 tool_calls 的情况
+            // 当模型返回的文本内容 trim 后以非结束符号（冒号、逗号、顿号、分号等）结束，或为空串，或最后一行只有文本字符和空格，且没有工具调用时，
+            // 这可能是模型异常终止的信号，需要记录到 metric 中。
+            const parts = MessageV2.parts(ctx.assistantMessage.id)
+            const textParts = parts.filter((p) => p.type === "text") as MessageV2.TextPart[]
+            const toolParts = parts.filter((p) => p.type === "tool")
+            
+            // 只有在没有工具调用的情况下才检测
+            if (toolParts.length === 0) {
+              // 收集所有文本内容
+              const fullText = textParts.map((p) => p.text).join("")
+              const trimmedText = fullText.trim()
+              
+              // 检测是否以非结束符号结束（冒号、逗号、顿号、分号、左括号等）
+              // 不包括右括号、引号、省略号和破折号，因为它们可能是正常结束
+              const endsWithNonTerminator = /[:：,，、;；(（\[【{｛<《]$/.test(trimmedText)
+              
+              // 获取最后一行
+              const lines = trimmedText.split("\n")
+              const lastLine = lines[lines.length - 1] || ""
+              const trimmedLastLine = lastLine.trim()
+              
+              // 检测最后一行是否只包含字母、数字、空格、中文字符（无任何符号）
+              const onlyTextAndSpaces = /^[\w\s\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff]+$/
+              const lastLineOnlyText = trimmedLastLine.length > 0 && onlyTextAndSpaces.test(lastLine)
+              
+              // 检测是否以非结束符号结束、为空串、或最后一行只有文本和空格
+              if (endsWithNonTerminator || trimmedText === "" || lastLineOnlyText) {
+                // 记录冒号终止统计到 metric
+                yield* Metric.update(
+                  Metric.withAttributes(modelColonTerminated, {
+                    sessionID: ctx.sessionID,
+                    modelID: ctx.model.id,
+                    providerID: ctx.model.providerID,
+                    finishReason: value.finishReason,
+                  }),
+                  1,
+                )
+                
+                log.warn("检测到模型返回异常终止：文本以非结束符号结束、为空或最后一行只有文本，无 tool_calls", {
+                  sessionID: ctx.sessionID,
+                  messageID: ctx.assistantMessage.id,
+                  modelID: ctx.model.id,
+                  providerID: ctx.model.providerID,
+                  finishReason: value.finishReason,
+                  textLength: trimmedText.length,
+                  lastLine: lastLine.slice(0, 100),
+                  lastChars: trimmedText.length > 0 ? trimmedText.slice(-20) : "(empty)",
+                })
               }
             }
             // testagent_change end
@@ -566,7 +645,16 @@ export const layer: Layer.Layer<
             })
             yield* session.updateMessage(ctx.assistantMessage)
             if (ctx.snapshot) {
+              // testagent_change - snapshot 耗时统计
+              const patchedAt = performance.now()
               const patch = yield* snapshot.patch(ctx.snapshot)
+              if (SnapshotStats.enabled()) {
+                SnapshotStats.patch({
+                  sessionID: ctx.sessionID,
+                  elapsed: performance.now() - patchedAt,
+                  files: patch.files.length,
+                })
+              }
               if (patch.files.length) {
                 yield* session.updatePart({
                   id: PartID.ascending(),
@@ -616,6 +704,14 @@ export const layer: Layer.Layer<
 
           case "text-delta":
             if (!ctx.currentText) return
+            // testagent_change start - 链路探针①: LLM 首个正文字符到达
+            yield* Latency.markLlmFirstTokenFx({
+              sessionID: ctx.currentText.sessionID,
+              messageID: ctx.currentText.messageID,
+              partID: ctx.currentText.id,
+              kind: "text",
+            })
+            // testagent_change end
             ctx.currentText.text += value.text
             if (value.providerMetadata) ctx.currentText.metadata = value.providerMetadata
             yield* session.updatePartDelta({
@@ -668,7 +764,16 @@ export const layer: Layer.Layer<
 
       const cleanup = Effect.fn("SessionProcessor.cleanup")(function* () {
         if (ctx.snapshot) {
+          // testagent_change - snapshot 耗时统计
+          const patchedAt = performance.now()
           const patch = yield* snapshot.patch(ctx.snapshot)
+          if (SnapshotStats.enabled()) {
+            SnapshotStats.patch({
+              sessionID: ctx.sessionID,
+              elapsed: performance.now() - patchedAt,
+              files: patch.files.length,
+            })
+          }
           if (patch.files.length) {
             yield* session.updatePart({
               id: PartID.ascending(),
@@ -734,6 +839,9 @@ export const layer: Layer.Layer<
         ctx.toolcalls = {}
         ctx.assistantMessage.time.completed = Date.now()
         yield* session.updateMessage(ctx.assistantMessage)
+
+        // testagent_change - 本 session 结束，汇总上报 snapshot 耗时
+        yield* SnapshotStats.report(ctx.sessionID)
       })
 
       const halt = Effect.fn("SessionProcessor.halt")(function* (e: unknown) {
@@ -782,6 +890,20 @@ export const layer: Layer.Layer<
             ctx.currentText = undefined
             ctx.emitted = false // testagent_change - 每次重试尝试重新计可见输出
             ctx.reasoningMap = {}
+
+            // testagent_change start - 上报「最后工具完成 → 本轮 LLM 请求发出」间隙
+            const gap = ToolGap.take(ctx.sessionID)
+            if (gap !== undefined) {
+              yield* Metric.update(
+                Metric.withAttributes(toolToLlmTotal, {
+                  sessionID: ctx.sessionID,
+                  modelID: streamInput.model.id,
+                  providerID: streamInput.model.providerID,
+                }),
+                gap,
+              )
+            }
+            // testagent_change end
 
             // testagent_change start - Add stream timing logs
             ctx.streamStartTime = Date.now()
@@ -924,8 +1046,16 @@ export const layer: Layer.Layer<
             Effect.ensuring(cleanup()),
           )
 
-          if (ctx.needsCompaction) return "compact"
-          if (ctx.blocked || ctx.assistantMessage.error) return "stop"
+          // testagent_change start - 本轮结束不会再有下一次请求，丢弃未消费的间隙记录
+          if (ctx.needsCompaction) {
+            ToolGap.reset(ctx.sessionID)
+            return "compact"
+          }
+          if (ctx.blocked || ctx.assistantMessage.error) {
+            ToolGap.reset(ctx.sessionID)
+            return "stop"
+          }
+          // testagent_change end
           return "continue"
         })
       })

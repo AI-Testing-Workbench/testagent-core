@@ -33,6 +33,20 @@ export type FileDiff = typeof FileDiff.Type
 const log = Log.create({ service: "snapshot" })
 const prune = "7.days"
 const limit = 2 * 1024 * 1024
+
+// testagent_change start - Windows 保留设备名。
+// git 在 Windows 上无法索引名为 nul / con / aux / prn / com1-9 / lpt1-9 的路径：
+//   error: invalid path 'nul'
+//   error: unable to add 'nul' to index
+//   fatal: adding files failed
+// 一旦候选集里出现这类文件，整次 `git add` 都会失败，导致快照停留在旧树。
+const WINDOWS_RESERVED = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$/i
+
+function reserved(file: string): boolean {
+  const base = file.split(/[\\/]/).pop() ?? ""
+  return WINDOWS_RESERVED.test(base)
+}
+// testagent_change end
 const core = ["-c", "core.longpaths=true", "-c", "core.symlinks=true"]
 const cfg = ["-c", "core.autocrlf=false", ...core]
 const quote = [...cfg, "-c", "core.quotepath=false"]
@@ -42,11 +56,15 @@ interface GitResult {
   readonly stderr: string
 }
 
-type State = Omit<Interface, "init">
+type State = Omit<Interface, "init" | "status"> & {
+  status: () => Effect.Effect<{ enabled: boolean; vcs: string }>
+}
 
 export interface Interface {
   readonly init: () => Effect.Effect<void>
   readonly cleanup: () => Effect.Effect<void>
+  /** testagent_change - 供耗时统计上报：是否启用、版本控制类型 */
+  readonly status: () => Effect.Effect<{ enabled: boolean; vcs: string }>
   readonly track: () => Effect.Effect<string | undefined>
   readonly patch: (hash: string) => Effect.Effect<Patch>
   readonly restore: (snapshot: string) => Effect.Effect<void>
@@ -158,8 +176,9 @@ export const layer: Layer.Layer<
           )
         })
 
+        // testagent_change - 返回是否成功，供 add()/track() 决定能否继续 write-tree
         const stage = Effect.fnUntraced(function* (files: string[]) {
-          if (!files.length) return
+          if (!files.length) return true
           const result = yield* git(
             [...cfg, ...args(["add", "--all", "--pathspec-from-file=-", "--pathspec-file-nul"])],
             {
@@ -167,11 +186,12 @@ export const layer: Layer.Layer<
               stdin: feed(files),
             },
           )
-          if (result.code === 0) return
+          if (result.code === 0) return true
           log.warn("failed to add snapshot files", {
             exitCode: result.code,
             stderr: result.stderr,
           })
+          return false
         })
 
         const exists = (file: string) => fs.exists(file).pipe(Effect.orDie)
@@ -232,13 +252,13 @@ export const layer: Layer.Layer<
               otherCode: other.code,
               otherStderr: other.stderr,
             })
-            return
+            return false
           }
 
           const tracked = diff.text.split("\0").filter(Boolean)
           const untracked = other.text.split("\0").filter(Boolean)
           const all = Array.from(new Set([...tracked, ...untracked]))
-          if (!all.length) return
+          if (!all.length) return true
 
           // Resolve source-repo ignore rules against the exact candidate set.
           // --no-index keeps this pattern-based even when a path is already tracked.
@@ -251,8 +271,14 @@ export const layer: Layer.Layer<
             yield* drop(ignoredFiles)
           }
 
-          const allow = all.filter((item) => !ignored.has(item))
-          if (!allow.length) return
+          // testagent_change start - 过滤 Windows 保留设备名，避免整次 git add 失败
+          const blocked = all.filter((item) => reserved(item))
+          if (blocked.length) {
+            log.info("skipping reserved paths in snapshot", { count: blocked.length, sample: blocked.slice(0, 5) })
+          }
+          const allow = all.filter((item) => !ignored.has(item) && !reserved(item))
+          if (!allow.length) return true
+          // testagent_change end
 
           const large = new Set(
             (yield* Effect.all(
@@ -274,7 +300,7 @@ export const layer: Layer.Layer<
           const block = new Set(untracked.filter((item) => large.has(item)))
           yield* sync(Array.from(block))
           // Stage only the allowed candidate paths so snapshot updates stay scoped.
-          yield* stage(allow.filter((item) => !block.has(item)))
+          return yield* stage(allow.filter((item) => !block.has(item)))
         })
 
         const cleanup = Effect.fnUntraced(function* () {
@@ -311,11 +337,20 @@ export const layer: Layer.Layer<
                 yield* git(["--git-dir", state.gitdir, "config", "core.fsmonitor", "false"])
                 log.info("initialized")
               }
-              yield* add()
+              // testagent_change start - add 失败时不要 write-tree。
+              // 之前无论如何都会 write-tree，而 git add 失败后索引停留在旧状态，
+              // write-tree 返回的是上一次的树哈希，快照会静默变成陈旧数据。
+              // 现在直接返回 undefined，由调用方跳过本次快照。
+              const staged = yield* add()
+              if (!staged) {
+                log.warn("snapshot skipped: staging failed", { cwd: state.directory })
+                return undefined
+              }
               const result = yield* git(args(["write-tree"]), { cwd: state.directory })
               const hash = result.text.trim()
               log.info("tracking", { hash, cwd: state.directory, git: state.gitdir })
               return hash
+              // testagent_change end
             }),
           )
         })
@@ -740,7 +775,12 @@ export const layer: Layer.Layer<
           Effect.forkScoped,
         )
 
-        return { cleanup, track, patch, restore, revert, diff, diffFull }
+        // testagent_change - 供耗时统计上报：是否启用 + 版本控制类型
+        const status = Effect.fnUntraced(function* () {
+          return { enabled: yield* enabled(), vcs: state.vcs as string }
+        })
+
+        return { cleanup, track, patch, restore, revert, diff, diffFull, status }
       }),
     )
 
@@ -750,6 +790,10 @@ export const layer: Layer.Layer<
       }),
       cleanup: Effect.fn("Snapshot.cleanup")(function* () {
         return yield* InstanceState.useEffect(state, (s) => s.cleanup())
+      }),
+      // testagent_change - 供耗时统计上报
+      status: Effect.fn("Snapshot.status")(function* () {
+        return yield* InstanceState.useEffect(state, (s) => s.status())
       }),
       track: Effect.fn("Snapshot.track")(function* () {
         return yield* InstanceState.useEffect(state, (s) => s.track())

@@ -1,11 +1,12 @@
 import path from "path"
 import { pathToFileURL } from "url"
-import { Effect, Schema } from "effect"
+import { Effect, Metric, Schema } from "effect" // testagent_change - add Metric
 import * as Stream from "effect/Stream"
 import { Ripgrep } from "../file/ripgrep"
 import { Skill } from "../skill"
 import * as Tool from "./tool"
 import DESCRIPTION from "./skill.txt"
+import { skillNotFound } from "@opencode-ai/core/effect/observability" // testagent_change
 
 export const Parameters = Schema.Struct({
   name: Schema.String.annotate({ description: "The name of the skill from available_skills" }),
@@ -24,6 +25,7 @@ export const SkillTool = Tool.define(
         Effect.gen(function* () {
           const info = yield* skill.get(params.name)
           if (!info) {
+            yield* Metric.update(Metric.withAttributes(skillNotFound, { session_id: ctx.sessionID, skill_name: params.name }), 1) // testagent_change
             const all = yield* skill.all()
             const available = all.map((item) => item.name).join(", ")
             throw new Error(`Skill "${params.name}" not found. Available skills: ${available || "none"}`)

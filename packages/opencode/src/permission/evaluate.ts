@@ -11,17 +11,12 @@ function isDeleteCommand(permission: string, pattern: string): boolean {
   // 只针对 bash/shell 权限
   if (permission !== "bash" && permission !== "*") return false
   
-  // 匹配删除命令模式（不区分大小写以支持 PowerShell）
-  const deletePatterns = [
-    /^rm\s/i,           // rm file, rm -rf dir
-    /^rmdir\s/i,        // rmdir dir
-    /^del\s/i,          // Windows del
-    /^erase\s/i,        // Windows erase
-    /^remove-item\s/i,  // PowerShell Remove-Item
-    /^rd\s/i,           // Windows rd
-  ]
+  // 简化方案：检测命令字符串中是否包含删除关键词（带词边界）
+  // 匹配所有常见的删除命令，无论它们在命令中的位置
+  // \b 确保是完整单词，避免误匹配（如 "format" 不会匹配 "rm"）
+  const deleteKeywords = /\b(rm|rmdir|del|erase|remove-item|rd|delete|unlink|remove|uninstall)\b/i
   
-  return deletePatterns.some(regex => regex.test(pattern.trim()))
+  return deleteKeywords.test(pattern)
 }
 
 // 检查规则模式是否针对删除命令
@@ -33,20 +28,18 @@ function isDeleteCommandPattern(pattern: string): boolean {
   if (trimmed === "*" || trimmed === "**") return false
   
   // 检查模式是否以删除命令开头（不区分大小写）
-  // 包括: "rm", "rm *", "rm -rf *", "remove-item **" 等
+  // 只保留精确匹配，如 "rm", "del", "rmdir" 等
   const deleteCommandPrefixes = [
-    /^rm\s/i,           // rm file, rm -rf *
     /^rm$/i,            // 精确匹配 "rm"
-    /^rmdir\s/i,
-    /^rmdir$/i,
-    /^del\s/i,
-    /^del$/i,
-    /^erase\s/i,
-    /^erase$/i,
-    /^remove-item\s/i,
-    /^remove-item$/i,
-    /^rd\s/i,
-    /^rd$/i,
+    /^rmdir$/i,         // 精确匹配 "rmdir"
+    /^del$/i,           // 精确匹配 "del"
+    /^erase$/i,         // 精确匹配 "erase"
+    /^remove-item$/i,   // 精确匹配 "remove-item"
+    /^rd$/i,            // 精确匹配 "rd"
+    /^delete$/i,        // 精确匹配 "delete"
+    /^unlink$/i,        // 精确匹配 "unlink"
+    /^remove$/i,        // 精确匹配 "remove"
+    /^uninstall$/i,     // 精确匹配 "uninstall"
   ]
   
   return deleteCommandPrefixes.some(regex => regex.test(trimmed))
@@ -54,12 +47,26 @@ function isDeleteCommandPattern(pattern: string): boolean {
 
 // 检查规则模式是否匹配删除命令（考虑大小写不敏感）
 function matchesDeletePattern(command: string, rulePattern: string): boolean {
-  // 获取命令的前缀（删除命令部分）
   const commandLower = command.toLowerCase().trim()
   const ruleLower = rulePattern.toLowerCase().trim()
   
-  // 如果规则模式以删除命令开头，使用 Wildcard 匹配（但转为小写）
+  // 如果规则模式以删除命令开头（如 "rm *", "del **"）
   if (isDeleteCommandPattern(rulePattern)) {
+    // 提取规则中的删除命令关键词
+    const ruleDeleteKeyword = ruleLower.match(/^(rm|rmdir|del|erase|remove-item|rd|delete|unlink|remove|uninstall)\b/)?.[1]
+    
+    if (ruleDeleteKeyword) {
+      // 检查实际命令中是否包含相同的删除关键词（词边界匹配）
+      const commandHasKeyword = new RegExp(`\\b${ruleDeleteKeyword}\\b`, 'i').test(command)
+      
+      if (commandHasKeyword) {
+        // 命令包含该删除关键词，认为规则匹配
+        // 例如：规则 "del *" 匹配命令 "forfiles ... del @path"
+        return true
+      }
+    }
+    
+    // 兜底：如果命令以相同删除命令开头，使用通配符匹配
     return Wildcard.match(commandLower, ruleLower)
   }
   

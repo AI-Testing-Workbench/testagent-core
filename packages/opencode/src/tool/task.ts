@@ -11,7 +11,7 @@ import { Permission } from "@/permission"
 import { consumeStopped } from "@/testagent/cancel" // testagent_change - 用户手动停止 subagent 时回传明确结果
 import { Effect, Exit, Metric, Schema } from "effect"
 import { EffectBridge } from "@/effect/bridge"
-import { taskCall } from "@opencode-ai/core/effect/observability"
+import { taskCall, taskUnknownAgentType } from "@opencode-ai/core/effect/observability" // testagent_change
 
 // testagent_change start - subagent 取消支持传入 idle reason
 export interface TaskPromptOps {
@@ -91,6 +91,7 @@ export const TaskTool = Tool.define(
 
       const next = yield* agent.get(params.subagent_type)
       if (!next) {
+        yield* Metric.update(Metric.withAttributes(taskUnknownAgentType, { session_id: ctx.sessionID, subagent_type: params.subagent_type }), 1) // testagent_change
         return yield* Effect.fail(new Error(`Unknown agent type: ${params.subagent_type} is not a valid agent type`))
       }
 

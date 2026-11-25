@@ -221,7 +221,7 @@ export const layer: Layer.Layer<Service, never, AppFileSystem.Service> = Layer.e
         data.push({
           id: "Economy",
           owned_by: "openai",
-          limit: { context: 16000 },
+          limit: { context: 128000 },
         })
       }
       // testagent_change end

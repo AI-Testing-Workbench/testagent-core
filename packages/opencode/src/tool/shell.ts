@@ -1,4 +1,5 @@
 import { Effect, Stream } from "effect"
+import { Metric } from "effect" // testagent_change
 import os from "os"
 import { createWriteStream } from "node:fs"
 import * as Tool from "./tool"
@@ -18,6 +19,7 @@ import { Config } from "@/config/config"
 import { Flag } from "@opencode-ai/core/flag/flag"
 import { Shell } from "@/shell/shell"
 import { ShellID } from "./shell/id"
+import { MessageV2 } from "@/session/message-v2"
 
 import * as Truncate from "./truncate"
 import { Plugin } from "@/plugin"
@@ -25,6 +27,9 @@ import { ChildProcess } from "effect/unstable/process"
 import { ChildProcessSpawner } from "effect/unstable/process/ChildProcessSpawner"
 import { ShellPrompt, type Parameters } from "./shell/prompt"
 import { BashArity } from "@/permission/arity"
+import { shellNoOutput } from "@opencode-ai/core/effect/observability" // testagent_change
+// testagent_change - shell call telemetry for the ps-bash migration
+import * as ShellTelemetry from "@/testagent/shell/telemetry"
 
 // testagent_change start: Import for reading python config and checking file existence
 import { readFile, access } from "node:fs/promises"
@@ -351,6 +356,28 @@ function shouldUseWindowsShellDecoding(): boolean {
 }
 // testagent_change end
 
+// testagent_change start - detect a ps-bash launch failure so a broken bundle degrades
+// to the ambient shell. Only .NET host loader errors qualify: a retry re-executes the
+// command, so a normal non-zero exit must never be treated as a ps-bash failure.
+function psBashFailed(result: { metadata?: { exit?: number | null; timeout?: boolean }; output?: string }) {
+  if (result.metadata?.exit === 0) return
+  if (result.metadata?.timeout) return
+  const output = result.output ?? ""
+  const patterns = [
+    "ps-bash-host",
+    "You must install or update .NET",
+    "Framework not found",
+    "The application to execute does not exist",
+    "Unable to load DLL",
+    "hostfxr",
+    "coreclr",
+  ]
+  for (const pattern of patterns) {
+    if (output.includes(pattern)) return pattern
+  }
+}
+// testagent_change end
+
 function cmd(shell: string, command: string, cwd: string, env: NodeJS.ProcessEnv) {
   if (process.platform === "win32") {
     if (Shell.ps(shell)) {
@@ -582,7 +609,31 @@ export const ShellTool = Tool.define(
 
         if (tokens.length && (!cmd || !CWD.has(cmd))) {
           scan.patterns.add(source(node))
-          scan.always.add(BashArity.prefix(tokens).join(" ") + " *")
+          
+          // testagent_change start - 为删除命令生成规则
+          // 检测命令中是否包含删除关键词
+          const deleteKeywords = /\b(rm|rmdir|del|erase|remove-item|rd|delete|unlink|remove|uninstall)\b/i
+          const commandText = source(node).toLowerCase()
+          const deleteMatch = commandText.match(deleteKeywords)
+          const prefixRule = BashArity.prefix(tokens).join(" ")
+          
+          if (deleteMatch) {
+            const deleteCmd = deleteMatch[1].toLowerCase()
+            
+            // 如果命令不是以删除命令开头（如 "forfiles ... del ..."）
+            // 需要添加前缀规则（如 "forfiles *"）
+            if (prefixRule.toLowerCase() !== deleteCmd) {
+              scan.always.add(prefixRule + " *")
+            }
+            
+            // 总是添加删除命令规则（精确匹配，不带通配符）
+            scan.always.add(deleteCmd)
+          } else {
+            // 非删除命令（如 "ls -la"）
+            // 正常添加前缀通配符规则
+            scan.always.add(prefixRule + " *")
+          }
+          // testagent_change end
         }
       }
 
@@ -669,6 +720,7 @@ export const ShellTool = Tool.define(
       }
       // testagent_change end
       
+      const started = Date.now() // testagent_change - shell call duration
       const limits = yield* trunc.limits()
       const keep = limits.maxBytes * 2
       let full = ""
@@ -794,7 +846,10 @@ export const ShellTool = Tool.define(
       }
 
       let output = end.text
-      if (!output) output = "(no output)"
+      if (!output) {
+        yield* Metric.update(Metric.withAttributes(shellNoOutput, { session_id: ctx.sessionID }), 1) // testagent_change
+        output = "(no output)"
+      }
 
       if (cut && file) {
         output = `...output truncated...\n\nFull output saved to: ${file}\n\n` + output
@@ -813,6 +868,27 @@ export const ShellTool = Tool.define(
             }),
         )
       }
+
+      // testagent_change start - record shell/style/failure so we can measure whether
+      // ps-bash actually stops POSIX commands from failing on Windows PowerShell.
+      const msg = yield* Effect.try({
+        try: () => MessageV2.get({ sessionID: ctx.sessionID, messageID: ctx.messageID }),
+        catch: () => new Error("message not found"),
+      }).pipe(Effect.catch(() => Effect.succeed(undefined)))
+      yield* Effect.forEach(
+        ShellTelemetry.record({
+          shell: input.shell,
+          command: input.command,
+          output,
+          code,
+          ms: Date.now() - started,
+          modelID: msg?.info.role === "assistant" ? msg.info.modelID : undefined,
+          providerID: msg?.info.role === "assistant" ? msg.info.providerID : undefined,
+        }),
+        (update) => update,
+        { discard: true },
+      )
+      // testagent_change end
 
       return {
         title: input.description,
@@ -865,18 +941,31 @@ export const ShellTool = Tool.define(
                 }),
               )
 
-              return yield* run(
-                {
-                  shell,
-                  command: params.command,
-                  cwd,
-                  env: yield* shellEnv(ctx, cwd),
-                  timeout,
-                  description: params.description,
-                  background: params.background ?? false,
-                },
-                ctx,
-              )
+              const env = yield* shellEnv(ctx, cwd)
+              const input = {
+                command: params.command,
+                cwd,
+                env,
+                timeout,
+                description: params.description,
+                background: params.background ?? false,
+              }
+              const first = yield* run({ ...input, shell }, ctx)
+              if (!Shell.isPsBash(shell)) return first
+
+              // testagent_change start - a broken ps-bash bundle must not brick the
+              // tool: retry once on the ambient shell and stop selecting ps-bash.
+              const failed = psBashFailed(first)
+              if (!failed) return first
+              Shell.breakPsBash()
+              const next = Shell.rescue()
+              yield* Effect.logInfo(`ps-bash failed (${failed}); retrying with shell="${next}"`)
+              const retry = yield* run({ ...input, shell: next }, ctx)
+              return {
+                ...retry,
+                output: `${retry.output}\n\n<shell_metadata>\nps-bash failed: ${failed}\nFalling back to ${next} for the rest of this session. Commands may hit Windows PowerShell quoting bugs; restart the extension to retry ps-bash.\n</shell_metadata>`,
+              }
+              // testagent_change end
             }),
         }
       })
