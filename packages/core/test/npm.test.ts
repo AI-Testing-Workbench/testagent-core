@@ -62,6 +62,28 @@ describe("Npm.add", () => {
 
     expect(Option.isSome(entry.entrypoint)).toBe(true)
   })
+
+  test("reifies when cached package directory exists without package.json", async () => {
+    await using tmp = await tmpdir()
+    await fs.mkdir(path.join(tmp.path, "fixture-provider"))
+    await writePackage(path.join(tmp.path, "fixture-provider"), {
+      name: "fixture-provider",
+      main: "index.js",
+    })
+    await Bun.write(path.join(tmp.path, "fixture-provider", "index.js"), "export const fixture = true\n")
+
+    const spec = `fixture-provider@file:${path.join(tmp.path, "fixture-provider")}`
+    const stale = path.join(tmp.path, "cache", "packages", Npm.sanitize(spec), "node_modules", "fixture-provider")
+    await fs.mkdir(stale, { recursive: true })
+
+    const entry = await Effect.gen(function* () {
+      const npm = yield* Npm.Service
+      return yield* npm.add(spec)
+    }).pipe(Effect.scoped, Effect.provide(npmLayer(path.join(tmp.path, "cache"))), Effect.runPromise)
+
+    expect(Option.isSome(entry.entrypoint)).toBe(true)
+    await expect(fs.stat(path.join(stale, "package.json"))).resolves.toBeDefined()
+  })
 })
 
 describe("Npm.install", () => {
