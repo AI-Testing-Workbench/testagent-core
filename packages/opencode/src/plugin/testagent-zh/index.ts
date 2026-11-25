@@ -89,88 +89,6 @@ function relayHeaders() {
   return { Authorization: `Bearer ${USER_TOKEN()}` }
 }
 
-// Web UI 远程访问地址：与扩展「复制 Web UI 链接」按钮拼出的字符串一致。
-// 端口取 serve 实际监听端口；auth_token 为 base64(username:password)，
-// 与 GET /testagent/server/auth 返回值同源；serve 未设密码（独立 CLI）时不带 auth_token。
-function shareLink(base: string | URL) {
-  const url = new URL(String(base))
-  const port = url.port || (url.protocol === "https:" ? "443" : "80")
-  const host = shareHost()
-  const password = process.env["OPENCODE_SERVER_PASSWORD"]
-  if (!password) return `http://${host}:${port}/`
-  const username = process.env["OPENCODE_SERVER_USERNAME"] ?? "opencode"
-  const token = Buffer.from(`${username}:${password}`).toString("base64")
-  return `http://${host}:${port}/?auth_token=${encodeURIComponent(token)}`
-}
-
-// 启动通知：serve 起来后推一条「沙箱启动成功 + Web UI 地址」。
-// 与完成通知相互独立（不受 enabled 开关影响，也不依赖某个 session）。
-// 复用招乎已有的 /message/testagent/notification/notify 卡片接口，不新增 relay 端点。
-// 仅云端发送——消息语义就是沙箱就绪，本地启动不需要通知。
-// 重试策略：登录态未就绪 / 401·403 / 网络异常 → 等 START_RETRY_MS 再试；其它 HTTP 失败直接放弃。
-//
-// 触发时机：cli/cmd/serve.ts 在监听起来后立刻调用，不再等首个请求触发插件实例化；
-// 插件工厂内仍保留一次调用作为兜底（TUI / run 等非 serve 入口），startStarted 保证进程内只发一次。
-export function notifyStartup(input: { directory: string; serverUrl: string | URL }) {
-  const directory = input.directory
-  if (startStarted) return
-  startStarted = true
-  if (!isCloudMode()) {
-    // 本地不发送，但仍打印一次待发送内容，便于核对 dir 取值是否符合预期
-    zhLog("info", "startup notify skipped: not cloud mode", {
-      directory,
-      localUrl: `${RELAY_URL}/message/testagent/tscode/jump?dir=${encodeURIComponent(directory)}`,
-      shareLink: shareLink(input.serverUrl),
-    })
-    return
-  }
-  void (async () => {
-    for (let attempt = 1; attempt <= START_RETRY_MAX; attempt++) {
-      if (!USER_ID() || !USER_TOKEN()) {
-        zhLog("info", "startup notify waiting for login", { attempt })
-        await sleep(START_RETRY_MS)
-        continue
-      }
-      const url = `${RELAY_URL}/message/testagent/notification/notify`
-      // dir 取 serve 的工作目录：扩展以工作区根目录为 cwd 派生 serve，首个请求的
-      // ?directory= / x-opencode-directory 也由它携带，Session.create 正是把这个值原样写进
-      // Session.Info.directory，所以它就是 Web UI 深链 /<base64url(dir)> 的那一段。
-      // 路径含空格/中文/反斜杠，必须编码后再放进 query。
-      const localUrl = `${RELAY_URL}/message/testagent/tscode/jump?dir=${encodeURIComponent(directory)}`
-      const webLink = shareLink(input.serverUrl)
-      const body = {
-        content: [
-          { type: "title", content: "沙箱启动成功通知", style: 1 },
-          {
-            type: "content",
-            list: [
-              { content: `点击浏览器打开\n`, type: [3], link: { url: webLink } },
-              { content: `点击本地工作台打开`, type: [3], link: { url: localUrl } },
-            ],
-          },
-        ],
-        userId: USER_ID(),
-      }
-      zhLog("info", "startup notify request", { attempt, url, directory, localUrl, body })
-      try {
-        const res = await fetch(url, {
-          method: "POST",
-          headers: { "Content-Type": "application/json", ...relayHeaders() },
-          body: JSON.stringify(body),
-        })
-        const data = await res.json().catch(() => ({}))
-        zhLog("info", "startup notify response", { attempt, status: res.status, body: data })
-        if (res.ok && data.returnCode === "SUC0000") return
-        if (res.status !== 401 && res.status !== 403) return
-      } catch (err) {
-        zhLog("warn", "startup notify failed", { attempt, error: String(err) })
-      }
-      await sleep(START_RETRY_MS)
-    }
-    zhLog("warn", "startup notify gave up", { attempts: START_RETRY_MAX })
-  })()
-}
-
 // 进程级全局开关监听（跨实例）：按钮经 GlobalBus 广播。
 // /testagent/* 是 root 路由，无 per-instance 目录上下文，事件必须走 GlobalBus 而非 per-directory Bus。
 GlobalBus.on("event", (event) => {
@@ -248,7 +166,7 @@ export function notifyStartup(input: { directory: string; serverUrl: string | UR
       try {
         const res = await fetch(url, {
           method: "POST",
-          headers: { "Content-Type": "application/json", Authorization: `Bearer ${USER_TOKEN()}` },
+          headers: { "Content-Type": "application/json", ...relayHeaders() },
           body: JSON.stringify(body),
         })
         const data = await res.json().catch(() => ({}))
