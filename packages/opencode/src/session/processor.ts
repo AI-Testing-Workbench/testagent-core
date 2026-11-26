@@ -655,8 +655,20 @@ export const layer: Layer.Layer<
                   lastChars: trimmedText.length > 0 ? trimmedText.slice(-20) : "(empty)",
                 })
                 
-                // 设置恢复标记，让 processor 返回 "recovery" 结果
-                ctx.needsRecovery = true
+                if (endsWithNonTerminator || trimmedText === "") {
+                  // 记录异常终止处理次数
+                  yield* Metric.update(
+                    Metric.withAttributes(modelAbnormalRecovery, {
+                      sessionID: ctx.sessionID,
+                      modelID: ctx.model.id,
+                      providerID: ctx.model.providerID,
+                      finishReason: value.finishReason,
+                    }),
+                    1,
+                  )
+                  // 设置恢复标记，让 processor 返回 "recovery" 结果
+                  ctx.needsRecovery = true
+                }
               }
             }
             // testagent_change end
