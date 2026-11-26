@@ -429,6 +429,9 @@ export const modelDuplicateOutput = Metric.counter("session.model.duplicate_outp
 export const modelColonTerminated = Metric.counter("session.model.colon_terminated", { // testagent_change
   description: "Model text output ended with non-terminator (colon, comma, etc) or empty, or last line only has text and spaces, no tool_calls - possible abnormal termination", // testagent_change
 }) // testagent_change
+export const modelAbnormalRecovery = Metric.counter("session.model.abnormal_recovery", { // testagent_change
+  description: "Abnormal termination handled by injecting a continuation user message", // testagent_change
+}) // testagent_change
 export const grepNoFilesFound = Metric.counter("tool.grep.no_files_found", { // testagent_change
   description: "Grep tool calls that found no matching files", // testagent_change
 }) // testagent_change

@@ -1889,6 +1889,40 @@ NOTE: At any point in time through this workflow you should feel free to ask the
               }
             }
 
+            // testagent_change start - 检测到异常终止时自动注入用户消息请求继续
+            if (result === "recovery") {
+              yield* slog.info("检测到模型异常终止，自动注入 continuation 消息并继续", {
+                sessionID,
+                messageID: handle.message.id,
+              })
+
+              // 创建合成的用户消息
+              const recoveryUser: MessageV2.User = {
+                id: MessageID.ascending(),
+                role: "user",
+                parentID: handle.message.id,
+                sessionID,
+                agent: lastUser.agent,
+                time: { created: Date.now() },
+                model: lastUser.model,
+                path: { cwd: ctx.directory, root: ctx.worktree },
+              }
+              yield* sessions.updateMessage(recoveryUser)
+
+              // testagent_change - recovery 用户消息需要在 UI 中可见，不加 synthetic
+              yield* sessions.updatePart({
+                id: PartID.ascending(),
+                messageID: recoveryUser.id,
+                sessionID,
+                type: "text",
+                text: "你的上一条回复似乎被中断了，请继续完成你之前的回答。",
+              } satisfies MessageV2.TextPart)
+
+              // 继续循环
+              return "continue" as const
+            }
+            // testagent_change end
+
             // testagent_change start - YOLO 错误终止有界续跑：瞬态失败退避后注入提醒重跑，
             // 无人值守下 API 抖动不再让任务永久停住；连续计数、成功轮归零
             if (result === "stop") {
