@@ -168,6 +168,11 @@ export const layer: Layer.Layer<
         needsRecovery: false, // testagent_change - 初始化恢复标记
       }
       let aborted = false
+      // testagent_change start - AI SDK may execute tools before tool-input-start
+      // registers the part. Queue ctx.metadata / updateToolCall so sessionId is
+      // written as soon as the part exists instead of only at completeToolCall.
+      const pending: Record<string, Array<(part: MessageV2.ToolPart) => MessageV2.ToolPart>> = {}
+      // testagent_change end
       const slog = log.clone().tag("session.id", input.sessionID).tag("messageID", input.assistantMessage.id)
 
       const parse = (e: unknown) =>
@@ -179,6 +184,7 @@ export const layer: Layer.Layer<
       const settleToolCall = Effect.fn("SessionProcessor.settleToolCall")(function* (toolCallID: string) {
         const done = ctx.toolcalls[toolCallID]?.done
         delete ctx.toolcalls[toolCallID]
+        delete pending[toolCallID] // testagent_change
         if (done) yield* Deferred.succeed(done, undefined).pipe(Effect.ignore)
       })
 
@@ -197,20 +203,41 @@ export const layer: Layer.Layer<
         return { call, part }
       })
 
+      const applyToolCall = Effect.fn("SessionProcessor.applyToolCall")(function* (
+        toolCallID: string,
+        call: ToolCall,
+        part: MessageV2.ToolPart,
+        fns: Array<(part: MessageV2.ToolPart) => MessageV2.ToolPart>,
+      ) {
+        const next = yield* fns.reduce(
+          (acc, fn) => acc.pipe(Effect.flatMap((cur) => session.updatePart(fn(cur)))),
+          Effect.succeed(part),
+        )
+        ctx.toolcalls[toolCallID] = {
+          ...call,
+          partID: next.id,
+          messageID: next.messageID,
+          sessionID: next.sessionID,
+        }
+        return next
+      })
+
       const updateToolCall = Effect.fn("SessionProcessor.updateToolCall")(function* (
         toolCallID: string,
         update: (part: MessageV2.ToolPart) => MessageV2.ToolPart,
       ) {
         const match = yield* readToolCall(toolCallID)
-        if (!match) return
-        const part = yield* session.updatePart(update(match.part))
-        ctx.toolcalls[toolCallID] = {
-          ...match.call,
-          partID: part.id,
-          messageID: part.messageID,
-          sessionID: part.sessionID,
+        if (!match) {
+          // testagent_change start
+          pending[toolCallID] = [...(pending[toolCallID] ?? []), update]
+          return
+          // testagent_change end
         }
-        return part
+        // testagent_change start
+        const queued = pending[toolCallID]
+        delete pending[toolCallID]
+        return yield* applyToolCall(toolCallID, match.call, match.part, queued ? [...queued, update] : [update])
+        // testagent_change end
       })
 
       const completeToolCall = Effect.fn("SessionProcessor.completeToolCall")(function* (
@@ -365,6 +392,13 @@ export const layer: Layer.Layer<
               messageID: part.messageID,
               sessionID: part.sessionID,
             }
+            // testagent_change start - flush metadata queued before this part existed
+            const queued = pending[value.id]
+            if (queued) {
+              delete pending[value.id]
+              yield* Effect.forEach(queued, (fn) => updateToolCall(value.id, fn), { discard: true })
+            }
+            // testagent_change end
             return
 
           case "tool-input-delta":
@@ -620,20 +654,9 @@ export const layer: Layer.Layer<
                   lastLine: lastLine.slice(0, 100),
                   lastChars: trimmedText.length > 0 ? trimmedText.slice(-20) : "(empty)",
                 })
-                if (endsWithNonTerminator || trimmedText === "") {
-                  // 记录异常终止处理次数
-                  yield* Metric.update(
-                    Metric.withAttributes(modelAbnormalRecovery, {
-                      sessionID: ctx.sessionID,
-                      modelID: ctx.model.id,
-                      providerID: ctx.model.providerID,
-                      finishReason: value.finishReason,
-                    }),
-                    1,
-                  )
-                  // 设置恢复标记，让 processor 返回 "recovery" 结果
-                  ctx.needsRecovery = true
-                }
+                
+                // 设置恢复标记，让 processor 返回 "recovery" 结果
+                ctx.needsRecovery = true
               }
             }
             // testagent_change end
