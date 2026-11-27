@@ -42,12 +42,13 @@ import {
   toolToLlmTotal, // testagent_change
   modelOutputAbnormal, // testagent_change
   modelColonTerminated, // testagent_change
+  modelAbnormalRecovery, // testagent_change
 } from "@opencode-ai/core/effect/observability" // testagent_change
 
 const DOOM_LOOP_THRESHOLD = 3
 const log = Log.create({ service: "session.processor" })
 
-export type Result = "compact" | "stop" | "continue"
+export type Result = "compact" | "stop" | "continue" | "recovery" // testagent_change - 添加 recovery 结果类型用于异常终止恢复
 
 export type Event = LLM.Event
 
@@ -97,6 +98,7 @@ interface ProcessorContext extends Input {
   tokenEstimates?: { system: number; messages: number; tools: number }
   streamStartTime?: number // testagent_change
   emitted: boolean // testagent_change - 本轮是否已流出可见输出（文本/推理/工具入参）
+  needsRecovery: boolean // testagent_change - 检测到异常终止，需要自动恢复
 }
 
 type StreamEvent = Event
@@ -163,8 +165,14 @@ export const layer: Layer.Layer<
         currentText: undefined,
         reasoningMap: {},
         emitted: false, // testagent_change
+        needsRecovery: false, // testagent_change - 初始化恢复标记
       }
       let aborted = false
+      // testagent_change start - AI SDK may execute tools before tool-input-start
+      // registers the part. Queue ctx.metadata / updateToolCall so sessionId is
+      // written as soon as the part exists instead of only at completeToolCall.
+      const pending: Record<string, Array<(part: MessageV2.ToolPart) => MessageV2.ToolPart>> = {}
+      // testagent_change end
       const slog = log.clone().tag("session.id", input.sessionID).tag("messageID", input.assistantMessage.id)
 
       const parse = (e: unknown) =>
@@ -176,6 +184,7 @@ export const layer: Layer.Layer<
       const settleToolCall = Effect.fn("SessionProcessor.settleToolCall")(function* (toolCallID: string) {
         const done = ctx.toolcalls[toolCallID]?.done
         delete ctx.toolcalls[toolCallID]
+        delete pending[toolCallID] // testagent_change
         if (done) yield* Deferred.succeed(done, undefined).pipe(Effect.ignore)
       })
 
@@ -194,20 +203,41 @@ export const layer: Layer.Layer<
         return { call, part }
       })
 
+      const applyToolCall = Effect.fn("SessionProcessor.applyToolCall")(function* (
+        toolCallID: string,
+        call: ToolCall,
+        part: MessageV2.ToolPart,
+        fns: Array<(part: MessageV2.ToolPart) => MessageV2.ToolPart>,
+      ) {
+        const next = yield* fns.reduce(
+          (acc, fn) => acc.pipe(Effect.flatMap((cur) => session.updatePart(fn(cur)))),
+          Effect.succeed(part),
+        )
+        ctx.toolcalls[toolCallID] = {
+          ...call,
+          partID: next.id,
+          messageID: next.messageID,
+          sessionID: next.sessionID,
+        }
+        return next
+      })
+
       const updateToolCall = Effect.fn("SessionProcessor.updateToolCall")(function* (
         toolCallID: string,
         update: (part: MessageV2.ToolPart) => MessageV2.ToolPart,
       ) {
         const match = yield* readToolCall(toolCallID)
-        if (!match) return
-        const part = yield* session.updatePart(update(match.part))
-        ctx.toolcalls[toolCallID] = {
-          ...match.call,
-          partID: part.id,
-          messageID: part.messageID,
-          sessionID: part.sessionID,
+        if (!match) {
+          // testagent_change start
+          pending[toolCallID] = [...(pending[toolCallID] ?? []), update]
+          return
+          // testagent_change end
         }
-        return part
+        // testagent_change start
+        const queued = pending[toolCallID]
+        delete pending[toolCallID]
+        return yield* applyToolCall(toolCallID, match.call, match.part, queued ? [...queued, update] : [update])
+        // testagent_change end
       })
 
       const completeToolCall = Effect.fn("SessionProcessor.completeToolCall")(function* (
@@ -362,6 +392,13 @@ export const layer: Layer.Layer<
               messageID: part.messageID,
               sessionID: part.sessionID,
             }
+            // testagent_change start - flush metadata queued before this part existed
+            const queued = pending[value.id]
+            if (queued) {
+              delete pending[value.id]
+              yield* Effect.forEach(queued, (fn) => updateToolCall(value.id, fn), { discard: true })
+            }
+            // testagent_change end
             return
 
           case "tool-input-delta":
@@ -570,7 +607,7 @@ export const layer: Layer.Layer<
             
             // testagent_change start - 检测文本以非结束符号结束或为空且无 tool_calls 的情况
             // 当模型返回的文本内容 trim 后以非结束符号（冒号、逗号、顿号、分号等）结束，或为空串，或最后一行只有文本字符和空格，且没有工具调用时，
-            // 这可能是模型异常终止的信号，需要记录到 metric 中。
+            // 这可能是模型异常终止的信号，需要自动恢复续跑
             const parts = MessageV2.parts(ctx.assistantMessage.id)
             const textParts = parts.filter((p) => p.type === "text") as MessageV2.TextPart[]
             const toolParts = parts.filter((p) => p.type === "tool")
@@ -596,7 +633,7 @@ export const layer: Layer.Layer<
               
               // 检测是否以非结束符号结束、为空串、或最后一行只有文本和空格
               if (endsWithNonTerminator || trimmedText === "" || lastLineOnlyText) {
-                // 记录冒号终止统计到 metric
+                // 记录异常终止统计到 metric
                 yield* Metric.update(
                   Metric.withAttributes(modelColonTerminated, {
                     sessionID: ctx.sessionID,
@@ -607,7 +644,7 @@ export const layer: Layer.Layer<
                   1,
                 )
                 
-                log.warn("检测到模型返回异常终止：文本以非结束符号结束、为空或最后一行只有文本，无 tool_calls", {
+                log.warn("检测到模型返回异常终止：文本以非结束符号结束、为空或最后一行只有文本，无 tool_calls，将自动恢复", {
                   sessionID: ctx.sessionID,
                   messageID: ctx.assistantMessage.id,
                   modelID: ctx.model.id,
@@ -617,6 +654,21 @@ export const layer: Layer.Layer<
                   lastLine: lastLine.slice(0, 100),
                   lastChars: trimmedText.length > 0 ? trimmedText.slice(-20) : "(empty)",
                 })
+                
+                if (endsWithNonTerminator || trimmedText === "") {
+                  // 记录异常终止处理次数
+                  yield* Metric.update(
+                    Metric.withAttributes(modelAbnormalRecovery, {
+                      sessionID: ctx.sessionID,
+                      modelID: ctx.model.id,
+                      providerID: ctx.model.providerID,
+                      finishReason: value.finishReason,
+                    }),
+                    1,
+                  )
+                  // 设置恢复标记，让 processor 返回 "recovery" 结果
+                  ctx.needsRecovery = true
+                }
               }
             }
             // testagent_change end
@@ -1051,6 +1103,7 @@ export const layer: Layer.Layer<
             ToolGap.reset(ctx.sessionID)
             return "compact"
           }
+          if (ctx.needsRecovery) return "recovery" // testagent_change - 检测到异常终止，返回 recovery
           if (ctx.blocked || ctx.assistantMessage.error) {
             ToolGap.reset(ctx.sessionID)
             return "stop"
