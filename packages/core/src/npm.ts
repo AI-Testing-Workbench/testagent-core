@@ -151,14 +151,25 @@ export const layer = Layer.effect(
         }
       })()
 
-      if (yield* afs.existsSafe(path.join(dir, "node_modules", name))) {
-        return resolveEntryPoint(name, path.join(dir, "node_modules", name))
+      const pkgDir = path.join(dir, "node_modules", name)
+
+      // testagent_change start
+      // Only trust the cache when package.json exists. A bare directory is a partial
+      // install (interrupted network, killed process, antivirus cleanup) that would
+      // otherwise short-circuit here forever and fail later with ENOENT.
+      if (yield* afs.existsSafe(path.join(pkgDir, "package.json"))) {
+        return resolveEntryPoint(name, pkgDir)
       }
+      if (yield* afs.existsSafe(pkgDir)) {
+        log.warn("npm cache incomplete, reinstalling", { pkg })
+        yield* fs.remove(pkgDir, { recursive: true }).pipe(Effect.orElseSucceed(() => {}))
+      }
+      // testagent_change end
 
       const tree = yield* reify({ dir, add: [pkg] })
       const first = tree.edgesOut.values().next().value?.to
       if (!first) {
-        const result = resolveEntryPoint(name, path.join(dir, "node_modules", name))
+        const result = resolveEntryPoint(name, pkgDir)
         if (Option.isSome(result.entrypoint)) return result
         return yield* new InstallFailedError({ add: [pkg], dir })
       }
