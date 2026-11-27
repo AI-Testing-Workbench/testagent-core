@@ -4,3 +4,4 @@ export { bootstrap } from "./cli/bootstrap"
 export * as Log from "@opencode-ai/core/util/log"
 export { Database } from "@/storage/db"
 export { JsonMigration } from "@/storage/json-migration"
+export { notifyStartup } from "./plugin/testagent-zh/index" // testagent_change - 供 nodejs-server 启动时发沙箱通知

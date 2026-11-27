@@ -1,6 +1,6 @@
 #!/usr/bin/env node --experimental-sqlite
 import { parseArgs } from "node:util"
-import { Server, Log, Database, JsonMigration } from "./node.js"
+import { Server, Log, Database, JsonMigration, notifyStartup } from "./node.js"
 import { existsSync } from "node:fs"
 import { join } from "node:path"
 import { homedir } from "node:os"
@@ -88,6 +88,16 @@ const server = await Server.listen({
   hostname: values.hostname,
 })
 console.log(`opencode server listening on http://${server.hostname}:${server.port}`)
+
+// 沙箱启动通知：与 packages/opencode/src/cli/cmd/serve.ts 同一时机——监听起来后立刻发，
+// 不再等首个带 ?directory= 的请求触发插件实例化。
+// 云端由 isCloudMode() 判定（扩展 spawn 时 ...process.env 已透传 TESTAGENT_CLOUD_MODE），
+// startStarted 在插件模块内去重，插件工厂里的兜底调用不会重复发。
+// directory 取进程 cwd：扩展以工作区根目录为 cwd 派生本进程，与 Web UI 深链的 dir 一致。
+notifyStartup({
+  directory: process.cwd(),
+  serverUrl: `http://${server.hostname}:${server.port}`,
+})
 
 const shutdown = async () => {
   await server.stop(true)

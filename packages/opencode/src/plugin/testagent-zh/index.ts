@@ -89,6 +89,17 @@ function relayHeaders() {
   return { Authorization: `Bearer ${USER_TOKEN()}` }
 }
 
+// 进程级全局开关监听（跨实例）：按钮经 GlobalBus 广播。
+// /testagent/* 是 root 路由，无 per-instance 目录上下文，事件必须走 GlobalBus 而非 per-directory Bus。
+GlobalBus.on("event", (event) => {
+  const payload = event.payload as { type?: string; properties?: { enabled?: boolean } } | undefined
+  if (!payload || typeof payload !== "object") return
+  if (payload.type !== "zh.answer.toggled") return
+  enabled = payload.properties?.enabled === true
+  zhLog("info", "answer toggle (global)", { enabled })
+  if (!enabled) pending.clear()
+})
+
 // Web UI 远程访问地址：与扩展「复制 Web UI 链接」按钮拼出的字符串一致。
 // 端口取 serve 实际监听端口；auth_token 为 base64(username:password)，
 // 与 GET /testagent/server/auth 返回值同源；serve 未设密码（独立 CLI）时不带 auth_token。
@@ -103,14 +114,14 @@ function shareLink(base: string | URL) {
   return `http://${host}:${port}/?auth_token=${encodeURIComponent(token)}`
 }
 
-// 启动通知：serve 起来后推一条「沙箱启动成功 + Web UI 地址」。
+// 启动通知：沙箱启动成功后推一条「沙箱启动成功 + Web UI 地址」。
 // 与完成通知相互独立（不受 enabled 开关影响，也不依赖某个 session）。
 // 复用招乎已有的 /message/testagent/notification/notify 卡片接口，不新增 relay 端点。
 // 仅云端发送——消息语义就是沙箱就绪，本地启动不需要通知。
 // 重试策略：登录态未就绪 / 401·403 / 网络异常 → 等 START_RETRY_MS 再试；其它 HTTP 失败直接放弃。
 //
-// 触发时机：cli/cmd/serve.ts 在监听起来后立刻调用，不再等首个请求触发插件实例化；
-// 插件工厂内仍保留一次调用作为兜底（TUI / run 等非 serve 入口），startStarted 保证进程内只发一次。
+// 触发时机：cli/cmd/serve.ts 与 nodejs-server/cli.mjs 在监听起来后立刻调用，不再等首个请求
+// 触发插件实例化；插件工厂内仍保留一次调用作为兑底，startStarted 保证进程内只发一次。
 export function notifyStartup(input: { directory: string; serverUrl: string | URL }) {
   const directory = input.directory
   if (startStarted) return
@@ -170,17 +181,6 @@ export function notifyStartup(input: { directory: string; serverUrl: string | UR
     zhLog("warn", "startup notify gave up", { attempts: START_RETRY_MAX })
   })()
 }
-
-// 进程级全局开关监听（跨实例）：按钮经 GlobalBus 广播。
-// /testagent/* 是 root 路由，无 per-instance 目录上下文，事件必须走 GlobalBus 而非 per-directory Bus。
-GlobalBus.on("event", (event) => {
-  const payload = event.payload as { type?: string; properties?: { enabled?: boolean } } | undefined
-  if (!payload || typeof payload !== "object") return
-  if (payload.type !== "zh.answer.toggled") return
-  enabled = payload.properties?.enabled === true
-  zhLog("info", "answer toggle (global)", { enabled })
-  if (!enabled) pending.clear()
-})
 
 export const ZhBridgePlugin: Plugin = async ({ client, directory, serverUrl, log, metric }) => {
   serverLog = log
@@ -495,8 +495,8 @@ export const ZhBridgePlugin: Plugin = async ({ client, directory, serverUrl, log
     })()
   }
 
-  // serve 已在监听起来后调用过一次（cli/cmd/serve.ts）；这里兜底 TUI / run 等入口。
-  // startStarted 为模块级，重复调用直接返回。
+  // 桌面/云端启动时已由 cli.mjs、cli/cmd/serve.ts 在监听起来后发过；这里是 TUI / run 等
+  // 非 serve 入口的兑底，startStarted 保证进程内只发一次。
   notifyStartup({ directory, serverUrl })
 
   return {
