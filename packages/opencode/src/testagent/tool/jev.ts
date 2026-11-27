@@ -1,6 +1,7 @@
 // testagent_change - new file
 import { Effect, Schema } from "effect"
 import * as Tool from "../../tool/tool"
+import { User } from "../user"
 
 const DESCRIPTION = `向 Jev 决策模型提问。传入 state（上下文）和 questions（问题集合），返回每个问题的结构化判断结果，键名沿用 questions 的键名。Jev 支持三种问题类型：
 - choice：给出候选集合，返回选中项 choice、概率分布与置信度
@@ -132,8 +133,9 @@ export const JevTool = Tool.define(
       parameters: Parameters,
       execute: (params: Schema.Schema.Type<typeof Parameters>, ctx: Tool.Context) =>
         Effect.gen(function* () {
+          const user = User.get()?.userId
           const res = yield* Effect.promise(() =>
-            call({ model: MODEL, state: params.state, questions: params.questions }, ctx.abort),
+            call({ model: MODEL, state: params.state, questions: params.questions, user: user }, ctx.abort),
           )
 
           if (!res.ok) {
